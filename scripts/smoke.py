@@ -18,7 +18,7 @@ async def turn(client_id: str, room_id: str, token: str, text: str) -> None:
             "token": token,
         }))
         await ws.send(json.dumps({"type": "user_text", "text": text}))
-        for _ in range(3):
+        for _ in range(8):
             try:
                 msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
             except (asyncio.TimeoutError, websockets.ConnectionClosed):
@@ -27,8 +27,11 @@ async def turn(client_id: str, room_id: str, token: str, text: str) -> None:
 
 
 async def main() -> None:
-    print("== happy path: desk-ui ==")
+    print("== happy path: desk-ui (echo) ==")
     await turn("desk-ui", "desk", "dev-token-desk", "hello glados")
+
+    print("\n== tool call: desk-ui asks for the time ==")
+    await turn("desk-ui", "desk", "dev-token-desk", "what time is it?")
 
     print("\n== second room: desk2-ui ==")
     await turn("desk2-ui", "desk2", "dev-token-desk2", "different room")

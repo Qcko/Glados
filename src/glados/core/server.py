@@ -1,29 +1,31 @@
 """FastAPI server exposing `/ws/v1`.
 
-v0 scope: hello + auth check, echo `user_text` back as a single
-`assistant_delta` then `done`. Organizer and LLM are wired in subsequent
-slices; this file is intentionally small.
+Handshake → register client connection → forward `user_text` to the
+Organizer. The Organizer owns sessions, tool dispatch, and egress; this file
+only handles wire I/O and connection bookkeeping.
 """
 
 from __future__ import annotations
 
 import os
-import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from ..brain.llm.fake import FakeLLM
+from ..mcp.registry import MCPRegistry
+from ..servers.time_server import NowTool
 from .config import GladosConfig, RoomsConfig, load_glados_config, load_rooms_config
+from .organizer import Organizer
 from .protocols import (
-    AssistantDelta,
     ClientMessage,
-    Done,
     ErrorMessage,
     Hello,
     UserText,
-    Welcome,
 )
+from .sessions import SessionRegistry
+from .traces import TraceStore
 
 
 CONFIG_DIR = Path(os.environ.get("GLADOS_CONFIG_DIR", "configs"))
@@ -32,24 +34,66 @@ _glados_cfg: GladosConfig = load_glados_config(CONFIG_DIR / "glados.toml")
 _rooms_cfg: RoomsConfig = load_rooms_config(CONFIG_DIR / "rooms.toml")
 _client_msg = TypeAdapter(ClientMessage)
 
+_traces = TraceStore(_glados_cfg.server.traces_dir)
+_mcp = MCPRegistry()
+_mcp.register(NowTool())
+_llm = FakeLLM()
+_connections: dict[str, WebSocket] = {}
+
+
+async def _send(client_id: str, msg: BaseModel) -> None:
+    ws = _connections.get(client_id)
+    if ws is not None:
+        await ws.send_json(msg.model_dump())
+
+
+def _clients_in_room(room_id: str) -> list[str]:
+    return [
+        c.client_id
+        for c in _rooms_cfg.clients
+        if c.room_id == room_id and c.client_id in _connections
+    ]
+
+
+_sessions = SessionRegistry()
+_organizer = Organizer(
+    llm=_llm,
+    mcp=_mcp,
+    traces=_traces,
+    sessions=_sessions,
+    send=_send,
+    binding_for_client=_rooms_cfg.find,
+    clients_in_room=_clients_in_room,
+)
+
 app = FastAPI(title="GLaDOS", version="0.1.0")
 
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    return {"ok": True, "rooms": len({c.room_id for c in _rooms_cfg.clients})}
+    return {
+        "ok": True,
+        "rooms": len({c.room_id for c in _rooms_cfg.clients}),
+        "tools": [s.qualified for s in _mcp.specs()],
+    }
 
 
 @app.websocket("/ws/v1")
 async def ws_v1(ws: WebSocket) -> None:
     await ws.accept()
+    client_id: str | None = None
     try:
         binding = await _handshake(ws)
         if binding is None:
             return
-        await _serve(ws, binding_room=binding.room_id, binding_user=binding.default_user)
+        client_id = binding.client_id
+        await _replace_connection(client_id, ws)
+        await _serve(ws, client_id)
     except WebSocketDisconnect:
         return
+    finally:
+        if client_id is not None and _connections.get(client_id) is ws:
+            del _connections[client_id]
 
 
 async def _handshake(ws: WebSocket):
@@ -84,7 +128,7 @@ async def _handshake(ws: WebSocket):
     return binding
 
 
-async def _serve(ws: WebSocket, *, binding_room: str, binding_user: str) -> None:
+async def _serve(ws: WebSocket, client_id: str) -> None:
     while True:
         raw = await ws.receive_json()
         try:
@@ -94,18 +138,19 @@ async def _serve(ws: WebSocket, *, binding_room: str, binding_user: str) -> None
             continue
 
         if isinstance(msg, UserText):
-            await _echo_turn(ws, binding_room, binding_user, msg.text)
+            await _organizer.handle_user_text(client_id, msg.text)
         # other types are accepted but no-op in v0
-
-
-async def _echo_turn(ws: WebSocket, room: str, user: str, text: str) -> None:
-    session_id = f"{room}:{user}:{uuid.uuid4().hex[:8]}"
-    await ws.send_json(Welcome(session_id=session_id).model_dump())
-    await ws.send_json(
-        AssistantDelta(session_id=session_id, text=f"echo: {text}").model_dump()
-    )
-    await ws.send_json(Done(session_id=session_id).model_dump())
 
 
 async def _send_error(ws: WebSocket, code: str, message: str) -> None:
     await ws.send_json(ErrorMessage(code=code, message=message).model_dump())
+
+
+async def _replace_connection(client_id: str, ws: WebSocket) -> None:
+    prev = _connections.get(client_id)
+    if prev is not None and prev is not ws:
+        try:
+            await prev.close()
+        except Exception:
+            pass
+    _connections[client_id] = ws
