@@ -55,6 +55,19 @@ ollama pull qwen2.5:7b-instruct
 uv run glados
 ```
 
+> **Storage convention.** Large caches and model files live on `E:\` to keep
+> `C:\` lean. Persist these once with `setx`:
+>
+> ```powershell
+> setx OLLAMA_MODELS       "E:\ollama\models"
+> setx UV_PYTHON_INSTALL_DIR "E:\uv\python"
+> setx UV_CACHE_DIR        "E:\uv\cache"
+> setx HF_HOME             "E:\hf"
+> ```
+>
+> If Ollama was already pulled to its default path, stop the service, move
+> `~/.ollama/models` → `E:\ollama\models`, then start it again.
+
 Open http://127.0.0.1:8765/ for the demo UI, or use `ws://127.0.0.1:8765/ws/v1`
 directly. `GET /healthz` for a liveness check. Tests: `uv run pytest`
 (integration tests skip when Ollama isn't reachable).
