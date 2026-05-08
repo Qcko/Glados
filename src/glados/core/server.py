@@ -15,9 +15,17 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ..brain.llm.fake import FakeLLM
+from ..brain.llm.ollama import OllamaLLM
 from ..mcp.registry import MCPRegistry
 from ..servers.time_server import NowTool
-from .config import GladosConfig, RoomsConfig, load_glados_config, load_rooms_config
+from .adapters import LLM
+from .config import (
+    GladosConfig,
+    LLMConfig,
+    RoomsConfig,
+    load_glados_config,
+    load_rooms_config,
+)
 from .organizer import Organizer
 from .protocols import (
     ClientMessage,
@@ -35,10 +43,21 @@ _glados_cfg: GladosConfig = load_glados_config(CONFIG_DIR / "glados.toml")
 _rooms_cfg: RoomsConfig = load_rooms_config(CONFIG_DIR / "rooms.toml")
 _client_msg = TypeAdapter(ClientMessage)
 
+def _build_llm(cfg: LLMConfig) -> LLM:
+    if cfg.backend == "ollama":
+        return OllamaLLM(
+            host=cfg.host,
+            model=cfg.model,
+            temperature=cfg.temperature,
+            timeout=cfg.timeout,
+        )
+    return FakeLLM()
+
+
 _traces = TraceStore(_glados_cfg.server.traces_dir)
 _mcp = MCPRegistry()
 _mcp.register(NowTool())
-_llm = FakeLLM()
+_llm: LLM = _build_llm(_glados_cfg.llm)
 _connections: dict[str, WebSocket] = {}
 
 

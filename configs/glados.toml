@@ -8,3 +8,11 @@ traces_dir = "traces"
 [auth.tokens]
 desk-ui = "dev-token-desk"
 desk2-ui = "dev-token-desk2"
+
+[llm]
+# backend: "fake" (deterministic, used in tests) or "ollama"
+backend = "ollama"
+model = "qwen2.5:7b-instruct"
+host = "http://localhost:11434"
+temperature = 0.2
+timeout = 60.0

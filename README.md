@@ -36,9 +36,10 @@ Full design and trade-offs in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Status
 
-**v0** — text-only client/server loop. WebSocket protocol, per-client auth,
-config loader, and an echo round-trip are in. LLM and first MCP server land
-next.
+**v0** — text-only end-to-end. WebSocket protocol, per-client auth, Organizer
+with single-turn sessions, JSONL traces, in-process MCP with one dummy tool
+(`time.now`), and a real local LLM via **Ollama + Qwen2.5:7b-instruct**. A
+deterministic `fake` backend is kept for tests.
 
 Roadmap: v0 text → v1 voice in browser → v2 multi-room concurrency → v3 Pi
 clients → v4 wake word → v5 speaker ID. See ARCHITECTURE §12.
@@ -47,11 +48,24 @@ clients → v4 wake word → v5 speaker ID. See ARCHITECTURE §12.
 
 ```powershell
 uv sync
+# one-time: install Ollama and pull the default model
+winget install Ollama.Ollama
+ollama pull qwen2.5:7b-instruct
+
 uv run glados
 ```
 
-Server on `ws://127.0.0.1:8765/ws/v1`. `GET /healthz` for a liveness check.
-Tests: `uv run pytest`.
+Open http://127.0.0.1:8765/ for the demo UI, or use `ws://127.0.0.1:8765/ws/v1`
+directly. `GET /healthz` for a liveness check. Tests: `uv run pytest`
+(integration tests skip when Ollama isn't reachable).
+
+To run with the deterministic fake LLM (no Ollama needed):
+
+```powershell
+$env:GLADOS_LLM_BACKEND = "fake"; uv run glados
+```
+
+`GLADOS_LLM_MODEL` and `GLADOS_LLM_HOST` also work as overrides.
 
 > uv stores its Python and cache on the same drive as the repo (cross-drive
 > renames fail on Windows). If the repo lives on E:, set

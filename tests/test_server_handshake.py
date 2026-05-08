@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 @pytest.fixture(scope="module")
 def client() -> TestClient:
     os.environ["GLADOS_CONFIG_DIR"] = str(Path(__file__).parent.parent / "configs")
-    # Import after env var is set so server picks up correct config dir.
+    os.environ["GLADOS_LLM_BACKEND"] = "fake"
+    # Import after env vars are set so server picks up correct config.
     from glados.core.server import app
 
     return TestClient(app)

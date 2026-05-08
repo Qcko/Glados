@@ -18,12 +18,18 @@ async def turn(client_id: str, room_id: str, token: str, text: str) -> None:
             "token": token,
         }))
         await ws.send(json.dumps({"type": "user_text", "text": text}))
-        for _ in range(8):
+        while True:
             try:
-                msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                raw = await asyncio.wait_for(ws.recv(), timeout=60.0)
             except (asyncio.TimeoutError, websockets.ConnectionClosed):
                 break
-            print(f"[{client_id}] <- {msg}")
+            print(f"[{client_id}] <- {raw}")
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if msg.get("type") in {"done", "error", "cancelled"}:
+                break
 
 
 async def main() -> None:

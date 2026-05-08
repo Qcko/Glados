@@ -234,6 +234,7 @@ def test_trace_writes_jsonl(tmp_path: Path) -> None:
 @pytest.fixture(scope="module")
 def http_client() -> TestClient:
     os.environ["GLADOS_CONFIG_DIR"] = str(Path(__file__).parent.parent / "configs")
+    os.environ["GLADOS_LLM_BACKEND"] = "fake"
     from glados.core.server import app
 
     return TestClient(app)
