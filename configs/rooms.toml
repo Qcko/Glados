@@ -1,0 +1,11 @@
+[[clients]]
+client_id = "desk-ui"
+room_id = "desk"
+role = "ui"
+default_user = "qcko"
+
+[[clients]]
+client_id = "desk2-ui"
+room_id = "desk2"
+role = "ui"
+default_user = "qcko"

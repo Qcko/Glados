@@ -1,0 +1,10 @@
+[server]
+host = "127.0.0.1"
+port = 8765
+traces_dir = "traces"
+
+# v0 only: tokens live in the config so the server boots without a keyring.
+# Real secret storage (OS keyring) lands in v1+.
+[auth.tokens]
+desk-ui = "dev-token-desk"
+desk2-ui = "dev-token-desk2"

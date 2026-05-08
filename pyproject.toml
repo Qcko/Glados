@@ -1,0 +1,28 @@
+[project]
+name = "glados"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "Qcko", email = "komec@centrum.cz" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.136.1",
+    "pydantic>=2.13.4",
+    "uvicorn[standard]>=0.46.0",
+    "websockets>=16.0",
+]
+
+[project.scripts]
+glados = "glados:main"
+
+[build-system]
+requires = ["uv_build>=0.11.11,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+]
