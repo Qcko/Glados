@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ..brain.llm.fake import FakeLLM
@@ -67,6 +68,12 @@ _organizer = Organizer(
 )
 
 app = FastAPI(title="GLaDOS", version="0.1.0")
+_CLIENT_INDEX = Path(__file__).resolve().parent.parent / "client_web" / "index.html"
+
+
+@app.get("/")
+async def index() -> FileResponse:
+    return FileResponse(_CLIENT_INDEX)
 
 
 @app.get("/healthz")
