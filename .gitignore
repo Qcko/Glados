@@ -1,4 +1,5 @@
 .claude/
+SESSION.md
 .venv/
 __pycache__/
 *.pyc
