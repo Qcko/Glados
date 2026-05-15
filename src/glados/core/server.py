@@ -18,6 +18,7 @@ from ..brain.llm.fake import FakeLLM
 from ..brain.llm.ollama import OllamaLLM
 from ..mcp.registry import MCPRegistry
 from ..servers.time_server import NowTool
+from ..servers.toy_server import TOY_TOOLS
 from .adapters import LLM
 from .config import (
     GladosConfig,
@@ -57,6 +58,8 @@ def _build_llm(cfg: LLMConfig) -> LLM:
 _traces = TraceStore(_glados_cfg.server.traces_dir)
 _mcp = MCPRegistry()
 _mcp.register(NowTool())
+for _tool in TOY_TOOLS:
+    _mcp.register(_tool)
 _llm: LLM = _build_llm(_glados_cfg.llm)
 _connections: dict[str, WebSocket] = {}
 
