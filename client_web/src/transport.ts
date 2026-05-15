@@ -55,6 +55,12 @@ export class Transport {
     return true;
   }
 
+  sendBinary(data: ArrayBuffer): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+    this.ws.send(data);
+    return true;
+  }
+
   private openSocket(): void {
     if (!this.settings) return;
     const proto = location.protocol === "https:" ? "wss" : "ws";

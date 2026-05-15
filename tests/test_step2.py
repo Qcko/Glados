@@ -256,6 +256,31 @@ def test_e2e_time_question(http_client: TestClient) -> None:
     assert "iso" in msgs[2]["content"]
 
 
+def test_e2e_audio_frame_writes_wav(http_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import struct
+    import wave
+    from glados.core import server as srv
+
+    monkeypatch.setattr(srv._glados_cfg.server, "traces_dir", tmp_path)
+    samples = [0, 1000, -1000, 32767, -32768]
+    pcm = b"".join(struct.pack("<h", s) for s in samples)
+    frame = struct.pack(">I", 0) + pcm
+
+    with http_client.websocket_connect("/ws/v1") as ws:
+        ws.send_json(_hello("desk-ui", "desk", "dev-token-desk"))
+        ws.send_bytes(frame)
+        ws.send_bytes(struct.pack(">I", 1) + pcm)
+
+    audio_dir = tmp_path / "audio" / "desk-ui"
+    wavs = list(audio_dir.glob("*.wav"))
+    assert len(wavs) == 1
+    with wave.open(str(wavs[0]), "rb") as w:
+        assert w.getframerate() == 16_000
+        assert w.getnchannels() == 1
+        assert w.getsampwidth() == 2
+        assert w.getnframes() == len(samples) * 2
+
+
 def test_e2e_two_tabs_isolated(http_client: TestClient) -> None:
     with http_client.websocket_connect("/ws/v1") as a, http_client.websocket_connect(
         "/ws/v1"

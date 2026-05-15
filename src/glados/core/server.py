@@ -21,6 +21,7 @@ from ..mcp.registry import MCPRegistry
 from ..servers.time_server import NowTool
 from ..servers.toy_server import TOY_TOOLS
 from .adapters import LLM
+from .audio_sink import AudioSink, FrameTooShort
 from .config import (
     GladosConfig,
     LLMConfig,
@@ -134,16 +135,20 @@ async def healthz() -> dict:
 async def ws_v1(ws: WebSocket) -> None:
     await ws.accept()
     client_id: str | None = None
+    sink: AudioSink | None = None
     try:
         binding = await _handshake(ws)
         if binding is None:
             return
         client_id = binding.client_id
         await _replace_connection(client_id, ws)
-        await _serve(ws, client_id)
+        sink = AudioSink(_glados_cfg.server.traces_dir, client_id)
+        await _serve(ws, client_id, sink)
     except WebSocketDisconnect:
         return
     finally:
+        if sink is not None:
+            sink.close()
         if client_id is not None and _connections.get(client_id) is ws:
             del _connections[client_id]
 
@@ -180,18 +185,33 @@ async def _handshake(ws: WebSocket):
     return binding
 
 
-async def _serve(ws: WebSocket, client_id: str) -> None:
+async def _serve(ws: WebSocket, client_id: str, sink: AudioSink) -> None:
     while True:
-        raw = await ws.receive_json()
+        event = await ws.receive()
+        if event["type"] == "websocket.disconnect":
+            raise WebSocketDisconnect(event.get("code", 1000))
+        if (data := event.get("bytes")) is not None:
+            await _handle_audio(ws, sink, data)
+            continue
+        if (text := event.get("text")) is None:
+            # ASGI permits a websocket.receive with neither payload set;
+            # ignore rather than spin or crash.
+            continue
         try:
-            msg = _client_msg.validate_python(raw)
+            msg = _client_msg.validate_json(text)
         except ValidationError as e:
             await _send_error(ws, "bad_message", str(e))
             continue
-
         if isinstance(msg, UserText):
             await _organizer.handle_user_text(client_id, msg.text)
         # other types are accepted but no-op in v0
+
+
+async def _handle_audio(ws: WebSocket, sink: AudioSink, data: bytes) -> None:
+    try:
+        sink.write(data)
+    except FrameTooShort as e:
+        await _send_error(ws, "bad_audio_frame", str(e))
 
 
 async def _send_error(ws: WebSocket, code: str, message: str) -> None:

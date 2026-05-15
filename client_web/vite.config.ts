@@ -5,6 +5,10 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     sourcemap: true,
+    // Don't inline assets as data URLs. AudioWorklet's `addModule()` works
+    // with data URLs but only just barely (CORS quirks across browsers);
+    // a stable file URL is more predictable.
+    assetsInlineLimit: 0,
   },
   server: {
     // Loopback only. Mitigates SNYK-JS-VITE-15922213 (.map dir-traversal,

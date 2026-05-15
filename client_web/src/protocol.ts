@@ -15,19 +15,18 @@ export interface UserText {
   text: string;
 }
 
-export interface AudioChunk {
-  type: "audio_chunk";
-  seq: number;
-  sample_rate: number;
-  pcm_b64: string;
-}
-
 export interface Interrupt {
   type: "interrupt";
   session_id: string;
 }
 
-export type ClientMessage = Hello | UserText | AudioChunk | Interrupt;
+export type ClientMessage = Hello | UserText | Interrupt;
+
+// Audio frames are sent as raw binary WebSocket messages, not JSON.
+// Wire layout: big-endian uint32 seq + PCM16-LE samples at 16 kHz mono.
+// Keep AUDIO_SAMPLE_RATE in sync with src/glados/core/protocols.py.
+export const AUDIO_SAMPLE_RATE = 16_000;
+export const AUDIO_HEADER_LEN = 4;
 
 export interface Welcome {
   type: "welcome";

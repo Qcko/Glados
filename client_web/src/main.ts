@@ -1,5 +1,6 @@
 import "./styles.css";
 
+import { Mic, type MicEvent } from "./audio/mic";
 import { loadSettings, saveSettings, type Settings } from "./settings";
 import { StateMachine, type ConnState } from "./state";
 import { Transport } from "./transport";
@@ -29,6 +30,9 @@ app.innerHTML = `
   <footer>
     <div class="quick" id="quick"></div>
     <form class="input-row" id="form">
+      <button id="micBtn" type="button" class="mic" title="capture mic" disabled>
+        <span class="dot"></span> mic
+      </button>
       <input id="input" placeholder="say something…" autocomplete="off" disabled />
       <button id="sendBtn" type="submit" disabled>send</button>
     </form>
@@ -54,6 +58,7 @@ const latencyEl = $<HTMLElement>("latency");
 const connectBtn = $<HTMLButtonElement>("connectBtn");
 const inputEl = $<HTMLInputElement>("input");
 const sendBtn = $<HTMLButtonElement>("sendBtn");
+const micBtn = $<HTMLButtonElement>("micBtn");
 const formEl = $<HTMLFormElement>("form");
 const quickEl = $<HTMLElement>("quick");
 
@@ -62,6 +67,39 @@ const transcript = new Transcript(log);
 
 const state = new StateMachine();
 const transport = new Transport(state);
+const mic = new Mic((data) => transport.sendBinary(data));
+
+mic.subscribe(renderMic);
+
+function renderMic(e: MicEvent): void {
+  micBtn.classList.remove("running", "starting", "err");
+  switch (e.kind) {
+    case "starting":
+      micBtn.classList.add("starting");
+      micBtn.textContent = "starting…";
+      break;
+    case "running":
+      micBtn.classList.add("running");
+      micBtn.innerHTML = '<span class="dot"></span> capturing';
+      break;
+    case "stopped":
+      micBtn.innerHTML = '<span class="dot"></span> mic';
+      break;
+    case "error":
+      micBtn.classList.add("err");
+      micBtn.textContent = "mic error";
+      transcript.systemNote(`mic: ${e.message}`);
+      break;
+  }
+}
+
+micBtn.addEventListener("click", () => {
+  if (mic.running) {
+    void mic.stop();
+  } else {
+    void mic.start();
+  }
+});
 
 transport.onServerMessage((msg) => transcript.ingest(msg));
 transport.onFirstReply((ms) => {
@@ -84,6 +122,8 @@ function renderState(s: ConnState): void {
       setInputsDisabled(false);
       inputEl.disabled = true;
       sendBtn.disabled = true;
+      micBtn.disabled = true;
+      if (mic.running) void mic.stop();
       connectBtn.textContent = "connect";
       connectBtn.classList.remove("disconnect");
       latencyEl.textContent = "";
@@ -94,6 +134,8 @@ function renderState(s: ConnState): void {
       setInputsDisabled(true);
       inputEl.disabled = true;
       sendBtn.disabled = true;
+      micBtn.disabled = true;
+      if (mic.running) void mic.stop();
       connectBtn.textContent = "cancel";
       connectBtn.classList.add("disconnect");
       break;
@@ -103,6 +145,7 @@ function renderState(s: ConnState): void {
       setInputsDisabled(true);
       inputEl.disabled = false;
       sendBtn.disabled = false;
+      micBtn.disabled = false;
       connectBtn.textContent = "disconnect";
       connectBtn.classList.add("disconnect");
       inputEl.focus();
@@ -113,6 +156,8 @@ function renderState(s: ConnState): void {
       setInputsDisabled(true);
       inputEl.disabled = true;
       sendBtn.disabled = true;
+      micBtn.disabled = true;
+      if (mic.running) void mic.stop();
       connectBtn.textContent = "cancel";
       connectBtn.classList.add("disconnect");
       break;
@@ -122,6 +167,8 @@ function renderState(s: ConnState): void {
       setInputsDisabled(false);
       inputEl.disabled = true;
       sendBtn.disabled = true;
+      micBtn.disabled = true;
+      if (mic.running) void mic.stop();
       connectBtn.textContent = "connect";
       connectBtn.classList.remove("disconnect");
       break;

@@ -86,3 +86,18 @@ footer {
   border-radius: 6px; font-size: .9rem; cursor: pointer; font-weight: 600;
 }
 .input-row input:disabled, .input-row button:disabled { opacity: .4; cursor: not-allowed; }
+
+.mic {
+  background: var(--panel); color: inherit; border: 1px solid var(--line);
+  padding: 0 .75rem; border-radius: 6px; font-size: .85rem; cursor: pointer;
+  display: inline-flex; align-items: center; gap: .4rem;
+}
+.mic .dot {
+  width: .55rem; height: .55rem; border-radius: 50%;
+  background: var(--muted); transition: background .15s ease;
+}
+.mic.starting .dot { background: var(--warn); }
+.mic.running { border-color: rgba(239,91,91,.5); color: var(--error); }
+.mic.running .dot { background: var(--error); animation: pulse 1.2s ease-in-out infinite; }
+.mic.err { border-color: var(--error); color: var(--error); }
+@keyframes pulse { 50% { opacity: .35; } }

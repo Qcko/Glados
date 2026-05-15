@@ -28,22 +28,25 @@ class UserText(BaseModel):
     text: str
 
 
-class AudioChunk(BaseModel):
-    type: Literal["audio_chunk"] = "audio_chunk"
-    seq: int
-    sample_rate: int
-    pcm_b64: str
-
-
 class Interrupt(BaseModel):
     type: Literal["interrupt"] = "interrupt"
     session_id: str
 
 
 ClientMessage = Annotated[
-    Hello | UserText | AudioChunk | Interrupt,
+    Hello | UserText | Interrupt,
     Field(discriminator="type"),
 ]
+
+
+# Audio is sent as raw binary WebSocket frames, not JSON. Frame layout:
+#   bytes 0..4   : big-endian uint32 sequence number
+#   bytes 4..end : PCM16-LE samples at AUDIO_SAMPLE_RATE Hz, mono
+# Sample rate is a constant on both ends — keeping it implicit avoids
+# per-frame header bloat and lets the server treat every byte beyond
+# the prefix as audio samples.
+AUDIO_SAMPLE_RATE = 16_000
+AUDIO_HEADER_LEN = 4
 
 
 class Welcome(BaseModel):
