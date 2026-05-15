@@ -68,9 +68,24 @@ uv run glados
 > If Ollama was already pulled to its default path, stop the service, move
 > `~/.ollama/models` → `E:\ollama\models`, then start it again.
 
-Open http://127.0.0.1:8765/ for the demo UI, or use `ws://127.0.0.1:8765/ws/v1`
+Build the web client once before opening the UI:
+
+```powershell
+cd client_web
+npm install
+npm run build
+```
+
+Then open http://127.0.0.1:8765/ for the UI, or use `ws://127.0.0.1:8765/ws/v1`
 directly. `GET /healthz` for a liveness check. Tests: `uv run pytest`
 (integration tests skip when Ollama isn't reachable).
+
+For client iteration, run Vite's dev server with HMR — it proxies the WS to
+the FastAPI backend running on 8765/8000:
+
+```powershell
+cd client_web; npm run dev   # then open http://127.0.0.1:5173
+```
 
 To run with the deterministic fake LLM (no Ollama needed):
 

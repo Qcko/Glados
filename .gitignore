@@ -6,3 +6,5 @@ __pycache__/
 .pytest_cache/
 traces/
 .env.uv
+client_web/node_modules/
+client_web/dist/

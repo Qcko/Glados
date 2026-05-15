@@ -11,7 +11,8 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ..brain.llm.fake import FakeLLM
@@ -90,12 +91,34 @@ _organizer = Organizer(
 )
 
 app = FastAPI(title="GLaDOS", version="0.1.0")
-_CLIENT_INDEX = Path(__file__).resolve().parent.parent / "client_web" / "index.html"
+# Source-checkout layout only: src/glados/core/server.py → repo root is parents[3].
+# GLaDOS is self-hosted, not pip-distributed; if that ever changes, ship the
+# built client as package data and resolve via importlib.resources.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_CLIENT_DIST = _REPO_ROOT / "client_web" / "dist"
+_CLIENT_INDEX = _CLIENT_DIST / "index.html"
+_CLIENT_ASSETS = _CLIENT_DIST / "assets"
+
+if _CLIENT_ASSETS.is_dir():
+    app.mount("/assets", StaticFiles(directory=_CLIENT_ASSETS), name="assets")
+
+
+_NOT_BUILT_HTML = (
+    "<!doctype html><meta charset=utf-8><title>GLaDOS</title>"
+    "<style>body{font-family:system-ui;background:#0e0f12;color:#e6e9ef;"
+    "padding:2rem;max-width:40rem;margin:auto}"
+    "code{background:#16181d;padding:.15rem .35rem;border-radius:3px}</style>"
+    "<h1>Client not built</h1>"
+    "<p>Run <code>cd client_web &amp;&amp; npm install &amp;&amp; npm run build</code>"
+    " (or <code>npm run dev</code> for HMR on port 5173).</p>"
+)
 
 
 @app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(_CLIENT_INDEX)
+async def index() -> Response:
+    if _CLIENT_INDEX.is_file():
+        return FileResponse(_CLIENT_INDEX)
+    return HTMLResponse(_NOT_BUILT_HTML, status_code=503)
 
 
 @app.get("/healthz")
