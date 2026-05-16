@@ -12,6 +12,9 @@ dependencies = [
     "pydantic>=2.13.4",
     "uvicorn[standard]>=0.46.0",
     "websockets>=16.0",
+    "numpy>=2.0",
+    "silero-vad>=5.1",
+    "faster-whisper>=1.2.0",
 ]
 
 [project.scripts]

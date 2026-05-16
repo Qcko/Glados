@@ -64,13 +64,26 @@ def _build_llm(cfg: LLMConfig) -> LLM:
 
 def _build_vad(cfg: VADConfig) -> VAD:
     if cfg.backend == "silero":
-        raise NotImplementedError("silero VAD lands in a later slice")
+        from ..audio.vad.silero import SileroVAD
+
+        return SileroVAD(
+            threshold=cfg.silero_threshold,
+            min_silence_ms=cfg.silero_min_silence_ms,
+            speech_pad_ms=cfg.silero_speech_pad_ms,
+        )
     return FakeVAD(utterance_samples=cfg.fake_utterance_samples)
 
 
 def _build_stt(cfg: STTConfig) -> STT:
     if cfg.backend == "faster-whisper":
-        raise NotImplementedError("faster-whisper STT lands in a later slice")
+        from ..audio.stt.whisper import WhisperSTT
+
+        return WhisperSTT(
+            model=cfg.whisper_model,
+            device=cfg.whisper_device,
+            compute_type=cfg.whisper_compute_type,
+            language=cfg.whisper_language,
+        )
     return FakeSTT(text=cfg.fake_text)
 
 

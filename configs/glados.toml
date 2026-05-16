@@ -23,11 +23,19 @@ timeout = 60.0
 wav_traces = true
 
 [vad]
-# "fake": fixed-size utterances, no ML deps. "silero" lands in a later slice.
-backend = "fake"
+# "fake": fixed-size utterances (used in tests). "silero": real VAD.
+backend = "silero"
 fake_utterance_samples = 16000  # 1 s at 16 kHz
+silero_threshold = 0.5
+silero_min_silence_ms = 200
+silero_speech_pad_ms = 30
 
 [stt]
-# "fake": returns `fake_text` for every utterance. "faster-whisper" lands later.
-backend = "fake"
+# "fake": returns `fake_text`. "faster-whisper": real STT (first run
+# downloads the model to HF_HOME ~ E:\hf).
+backend = "faster-whisper"
 fake_text = "hello world"
+whisper_model = "distil-small.en"
+whisper_device = "cpu"
+whisper_compute_type = "int8"
+whisper_language = "en"

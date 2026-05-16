@@ -41,19 +41,31 @@ class AudioConfig(BaseModel):
 
 
 class VADConfig(BaseModel):
-    # "fake" splits the stream into fixed-size utterances for tests and
-    # dep-free dev. "silero" is wired in a later slice.
-    backend: Literal["fake", "silero"] = "fake"
+    # "fake" splits the stream into fixed-size utterances (dep-free,
+    # used in tests). "silero" runs silero-vad on every 512-sample
+    # chunk and emits real utterance boundaries.
+    backend: Literal["fake", "silero"] = "silero"
     # Fake-only: how many int16 samples make up one utterance.
     # 16000 = 1 s at 16 kHz.
     fake_utterance_samples: int = 16000
+    # Silero knobs. Threshold trades false-positives for missed speech;
+    # min_silence_ms is how long quiet must last before we call the
+    # utterance done; speech_pad_ms widens the emitted slice on each
+    # side so Whisper sees a tiny breath of context.
+    silero_threshold: float = 0.5
+    silero_min_silence_ms: int = 200
+    silero_speech_pad_ms: int = 30
 
 
 class STTConfig(BaseModel):
-    # "fake" returns a canned string. "faster-whisper" is wired in a
-    # later slice along with model/device knobs.
-    backend: Literal["fake", "faster-whisper"] = "fake"
+    # "fake" returns `fake_text`. "faster-whisper" runs the configured
+    # model; first call downloads the weights to HF_HOME.
+    backend: Literal["fake", "faster-whisper"] = "faster-whisper"
     fake_text: str = "hello world"
+    whisper_model: str = "distil-small.en"
+    whisper_device: str = "cpu"
+    whisper_compute_type: str = "int8"
+    whisper_language: str = "en"
 
 
 class GladosConfig(BaseModel):
@@ -84,16 +96,22 @@ def load_glados_config(path: Path) -> GladosConfig:
 
 
 def _apply_env_overrides(cfg: GladosConfig) -> GladosConfig:
-    updates: dict = {}
+    llm_updates: dict = {}
     backend = os.environ.get("GLADOS_LLM_BACKEND")
     if backend in ("fake", "ollama"):
-        updates["backend"] = backend
+        llm_updates["backend"] = backend
     if (model := os.environ.get("GLADOS_LLM_MODEL")) is not None:
-        updates["model"] = model
+        llm_updates["model"] = model
     if (host := os.environ.get("GLADOS_LLM_HOST")) is not None:
-        updates["host"] = host
-    if updates:
-        cfg = cfg.model_copy(update={"llm": cfg.llm.model_copy(update=updates)})
+        llm_updates["host"] = host
+    if llm_updates:
+        cfg = cfg.model_copy(update={"llm": cfg.llm.model_copy(update=llm_updates)})
+
+    if (vad_backend := os.environ.get("GLADOS_VAD_BACKEND")) in ("fake", "silero"):
+        cfg = cfg.model_copy(update={"vad": cfg.vad.model_copy(update={"backend": vad_backend})})
+
+    if (stt_backend := os.environ.get("GLADOS_STT_BACKEND")) in ("fake", "faster-whisper"):
+        cfg = cfg.model_copy(update={"stt": cfg.stt.model_copy(update={"backend": stt_backend})})
     return cfg
 
 
