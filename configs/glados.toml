@@ -16,3 +16,18 @@ model = "qwen2.5:7b-instruct"
 host = "http://localhost:11434"
 temperature = 0.2
 timeout = 60.0
+
+[audio]
+# Tee inbound mic frames to traces/audio/<client>/<utc>.wav for offline
+# replay. Disable in production to keep disk usage bounded.
+wav_traces = true
+
+[vad]
+# "fake": fixed-size utterances, no ML deps. "silero" lands in a later slice.
+backend = "fake"
+fake_utterance_samples = 16000  # 1 s at 16 kHz
+
+[stt]
+# "fake": returns `fake_text` for every utterance. "faster-whisper" lands later.
+backend = "fake"
+fake_text = "hello world"

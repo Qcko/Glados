@@ -33,10 +33,36 @@ class LLMConfig(BaseModel):
     timeout: float = 60.0
 
 
+class AudioConfig(BaseModel):
+    # Per-connection WAV trace of inbound mic audio. Useful for offline
+    # replay against the STT; flip to false in production to stop
+    # `traces/audio/` from filling at ~32 KB/s per active mic.
+    wav_traces: bool = True
+
+
+class VADConfig(BaseModel):
+    # "fake" splits the stream into fixed-size utterances for tests and
+    # dep-free dev. "silero" is wired in a later slice.
+    backend: Literal["fake", "silero"] = "fake"
+    # Fake-only: how many int16 samples make up one utterance.
+    # 16000 = 1 s at 16 kHz.
+    fake_utterance_samples: int = 16000
+
+
+class STTConfig(BaseModel):
+    # "fake" returns a canned string. "faster-whisper" is wired in a
+    # later slice along with model/device knobs.
+    backend: Literal["fake", "faster-whisper"] = "fake"
+    fake_text: str = "hello world"
+
+
 class GladosConfig(BaseModel):
     server: ServerConfig = ServerConfig()
     auth: AuthConfig = AuthConfig()
     llm: LLMConfig = LLMConfig()
+    audio: AudioConfig = AudioConfig()
+    vad: VADConfig = VADConfig()
+    stt: STTConfig = STTConfig()
 
 
 class ClientBinding(BaseModel):

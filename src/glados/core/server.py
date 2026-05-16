@@ -15,17 +15,22 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from ..audio.pipeline import AudioPipeline
+from ..audio.stt.fake import FakeSTT
+from ..audio.vad.fake import FakeVAD
 from ..brain.llm.fake import FakeLLM
 from ..brain.llm.ollama import OllamaLLM
 from ..mcp.registry import MCPRegistry
 from ..servers.time_server import NowTool
 from ..servers.toy_server import TOY_TOOLS
-from .adapters import LLM
+from .adapters import LLM, STT, VAD
 from .audio_sink import AudioSink, FrameTooShort
 from .config import (
     GladosConfig,
     LLMConfig,
     RoomsConfig,
+    STTConfig,
+    VADConfig,
     load_glados_config,
     load_rooms_config,
 )
@@ -57,12 +62,27 @@ def _build_llm(cfg: LLMConfig) -> LLM:
     return FakeLLM()
 
 
+def _build_vad(cfg: VADConfig) -> VAD:
+    if cfg.backend == "silero":
+        raise NotImplementedError("silero VAD lands in a later slice")
+    return FakeVAD(utterance_samples=cfg.fake_utterance_samples)
+
+
+def _build_stt(cfg: STTConfig) -> STT:
+    if cfg.backend == "faster-whisper":
+        raise NotImplementedError("faster-whisper STT lands in a later slice")
+    return FakeSTT(text=cfg.fake_text)
+
+
 _traces = TraceStore(_glados_cfg.server.traces_dir)
 _mcp = MCPRegistry()
 _mcp.register(NowTool())
 for _tool in TOY_TOOLS:
     _mcp.register(_tool)
 _llm: LLM = _build_llm(_glados_cfg.llm)
+# STT shared across connections (real backends load a model on construct).
+# VAD is per-connection — it carries per-stream buffer state.
+_stt: STT = _build_stt(_glados_cfg.stt)
 _connections: dict[str, WebSocket] = {}
 
 
@@ -135,22 +155,40 @@ async def healthz() -> dict:
 async def ws_v1(ws: WebSocket) -> None:
     await ws.accept()
     client_id: str | None = None
-    sink: AudioSink | None = None
+    pipeline: AudioPipeline | None = None
     try:
         binding = await _handshake(ws)
         if binding is None:
             return
         client_id = binding.client_id
         await _replace_connection(client_id, ws)
-        sink = AudioSink(_glados_cfg.server.traces_dir, client_id)
-        await _serve(ws, client_id, sink)
+        pipeline = _build_pipeline(client_id)
+        await _serve(ws, client_id, pipeline)
     except WebSocketDisconnect:
         return
     finally:
-        if sink is not None:
-            sink.close()
+        if pipeline is not None:
+            await pipeline.close()
         if client_id is not None and _connections.get(client_id) is ws:
             del _connections[client_id]
+
+
+def _build_pipeline(client_id: str) -> AudioPipeline:
+    sink = (
+        AudioSink(_glados_cfg.server.traces_dir, client_id)
+        if _glados_cfg.audio.wav_traces
+        else None
+    )
+
+    async def on_utterance(text: str) -> None:
+        await _organizer.handle_user_text(client_id, text)
+
+    return AudioPipeline(
+        sink=sink,
+        vad=_build_vad(_glados_cfg.vad),
+        stt=_stt,
+        on_utterance=on_utterance,
+    )
 
 
 async def _handshake(ws: WebSocket):
@@ -185,13 +223,13 @@ async def _handshake(ws: WebSocket):
     return binding
 
 
-async def _serve(ws: WebSocket, client_id: str, sink: AudioSink) -> None:
+async def _serve(ws: WebSocket, client_id: str, pipeline: AudioPipeline) -> None:
     while True:
         event = await ws.receive()
         if event["type"] == "websocket.disconnect":
             raise WebSocketDisconnect(event.get("code", 1000))
         if (data := event.get("bytes")) is not None:
-            await _handle_audio(ws, sink, data)
+            await _handle_audio(ws, pipeline, data)
             continue
         if (text := event.get("text")) is None:
             # ASGI permits a websocket.receive with neither payload set;
@@ -207,9 +245,9 @@ async def _serve(ws: WebSocket, client_id: str, sink: AudioSink) -> None:
         # other types are accepted but no-op in v0
 
 
-async def _handle_audio(ws: WebSocket, sink: AudioSink, data: bytes) -> None:
+async def _handle_audio(ws: WebSocket, pipeline: AudioPipeline, data: bytes) -> None:
     try:
-        sink.write(data)
+        await pipeline.feed_frame(data)
     except FrameTooShort as e:
         await _send_error(ws, "bad_audio_frame", str(e))
 
