@@ -87,3 +87,24 @@ class STT(Protocol):
     backend wants it; wrapping is trivial."""
 
     async def transcribe(self, pcm: bytes) -> str: ...
+
+
+class TtsChunkOut(BaseModel):
+    """One audio chunk emitted by a TTS backend.
+
+    `pcm` is int16-LE mono samples at `sample_rate` Hz. Backends decide
+    chunk granularity (Piper yields one chunk per sentence)."""
+
+    pcm: bytes
+    sample_rate: int
+
+
+class TTS(Protocol):
+    """Speech synthesis. Streams PCM chunks for one input text.
+
+    The v1 step 3 contract is one-shot text -> async iterator of chunks.
+    Chunk granularity is backend-defined; callers must not assume a
+    fixed size. Implementations are expected to run their blocking
+    inference in `asyncio.to_thread` so the event loop stays responsive."""
+
+    def synthesize(self, text: str) -> AsyncIterator[TtsChunkOut]: ...

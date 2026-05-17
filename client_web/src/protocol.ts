@@ -61,6 +61,7 @@ export interface TtsChunk {
   type: "tts_chunk";
   session_id: string;
   seq: number;
+  sample_rate: number;
   pcm_b64: string;
 }
 

@@ -39,13 +39,15 @@ def test_handshake_and_echo(client: TestClient) -> None:
         ws.send_json({"type": "user_text", "text": "ping"})
         welcome = ws.receive_json()
         delta = ws.receive_json()
+        tts = ws.receive_json()
         done = ws.receive_json()
 
     assert welcome["type"] == "welcome"
     assert delta["type"] == "assistant_delta"
     assert delta["text"] == "echo: ping"
+    assert tts["type"] == "tts_chunk"
     assert done["type"] == "done"
-    assert welcome["session_id"] == delta["session_id"] == done["session_id"]
+    assert welcome["session_id"] == delta["session_id"] == tts["session_id"] == done["session_id"]
 
 
 def test_bad_token_rejected(client: TestClient) -> None:

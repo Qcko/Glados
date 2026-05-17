@@ -13,3 +13,4 @@ import os
 os.environ.setdefault("GLADOS_LLM_BACKEND", "fake")
 os.environ.setdefault("GLADOS_VAD_BACKEND", "fake")
 os.environ.setdefault("GLADOS_STT_BACKEND", "fake")
+os.environ.setdefault("GLADOS_TTS_BACKEND", "fake")

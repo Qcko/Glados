@@ -68,6 +68,15 @@ class STTConfig(BaseModel):
     whisper_language: str = "en"
 
 
+class TTSConfig(BaseModel):
+    # "fake" yields a silent chunk (used in tests). "piper" loads a Piper
+    # voice and streams real PCM. First piper construct downloads the
+    # voice from HuggingFace into `voices_dir` if not already cached.
+    backend: Literal["fake", "piper"] = "piper"
+    piper_voice: str = "en_GB-cori-high"
+    piper_voices_dir: Path = Path(r"E:\dev\piper\voices")
+
+
 class GladosConfig(BaseModel):
     server: ServerConfig = ServerConfig()
     auth: AuthConfig = AuthConfig()
@@ -75,6 +84,7 @@ class GladosConfig(BaseModel):
     audio: AudioConfig = AudioConfig()
     vad: VADConfig = VADConfig()
     stt: STTConfig = STTConfig()
+    tts: TTSConfig = TTSConfig()
 
 
 class ClientBinding(BaseModel):
@@ -112,6 +122,9 @@ def _apply_env_overrides(cfg: GladosConfig) -> GladosConfig:
 
     if (stt_backend := os.environ.get("GLADOS_STT_BACKEND")) in ("fake", "faster-whisper"):
         cfg = cfg.model_copy(update={"stt": cfg.stt.model_copy(update={"backend": stt_backend})})
+
+    if (tts_backend := os.environ.get("GLADOS_TTS_BACKEND")) in ("fake", "piper"):
+        cfg = cfg.model_copy(update={"tts": cfg.tts.model_copy(update={"backend": tts_backend})})
     return cfg
 
 

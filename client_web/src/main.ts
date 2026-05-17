@@ -1,6 +1,7 @@
 import "./styles.css";
 
 import { Mic, type MicEvent } from "./audio/mic";
+import { TtsPlayer } from "./audio/tts";
 import { loadSettings, saveSettings, type Settings } from "./settings";
 import { StateMachine, type ConnState } from "./state";
 import { Transport } from "./transport";
@@ -33,6 +34,7 @@ app.innerHTML = `
       <button id="micBtn" type="button" class="mic" title="capture mic" disabled>
         <span class="dot"></span> mic
       </button>
+      <button id="muteBtn" type="button" class="mute" title="mute speaker output">🔊</button>
       <input id="input" placeholder="say something…" autocomplete="off" disabled />
       <button id="sendBtn" type="submit" disabled>send</button>
     </form>
@@ -59,6 +61,7 @@ const connectBtn = $<HTMLButtonElement>("connectBtn");
 const inputEl = $<HTMLInputElement>("input");
 const sendBtn = $<HTMLButtonElement>("sendBtn");
 const micBtn = $<HTMLButtonElement>("micBtn");
+const muteBtn = $<HTMLButtonElement>("muteBtn");
 const formEl = $<HTMLFormElement>("form");
 const quickEl = $<HTMLElement>("quick");
 
@@ -68,8 +71,16 @@ const transcript = new Transcript(log);
 const state = new StateMachine();
 const transport = new Transport(state);
 const mic = new Mic((data) => transport.sendBinary(data));
+const tts = new TtsPlayer();
 
 mic.subscribe(renderMic);
+
+muteBtn.addEventListener("click", () => {
+  tts.setMuted(!tts.isMuted());
+});
+tts.subscribe((e) => {
+  if (e.kind === "muted") muteBtn.textContent = e.value ? "🔇" : "🔊";
+});
 
 function renderMic(e: MicEvent): void {
   micBtn.classList.remove("running", "starting", "err");
@@ -101,7 +112,12 @@ micBtn.addEventListener("click", () => {
   }
 });
 
-transport.onServerMessage((msg) => transcript.ingest(msg));
+transport.onServerMessage((msg) => {
+  if (msg.type === "tts_chunk") {
+    tts.enqueue(msg.pcm_b64, msg.sample_rate);
+  }
+  transcript.ingest(msg);
+});
 transport.onFirstReply((ms) => {
   latencyEl.textContent = `1st reply ${ms.toFixed(0)} ms`;
 });

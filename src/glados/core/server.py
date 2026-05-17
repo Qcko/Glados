@@ -17,19 +17,21 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ..audio.pipeline import AudioPipeline
 from ..audio.stt.fake import FakeSTT
+from ..audio.tts.fake import FakeTTS
 from ..audio.vad.fake import FakeVAD
 from ..brain.llm.fake import FakeLLM
 from ..brain.llm.ollama import OllamaLLM
 from ..mcp.registry import MCPRegistry
 from ..servers.time_server import NowTool
 from ..servers.toy_server import TOY_TOOLS
-from .adapters import LLM, STT, VAD
+from .adapters import LLM, STT, TTS, VAD
 from .audio_sink import AudioSink, FrameTooShort
 from .config import (
     GladosConfig,
     LLMConfig,
     RoomsConfig,
     STTConfig,
+    TTSConfig,
     VADConfig,
     load_glados_config,
     load_rooms_config,
@@ -87,15 +89,24 @@ def _build_stt(cfg: STTConfig) -> STT:
     return FakeSTT(text=cfg.fake_text)
 
 
+def _build_tts(cfg: TTSConfig) -> TTS:
+    if cfg.backend == "piper":
+        from ..audio.tts.piper import PiperTTS
+
+        return PiperTTS(voice=cfg.piper_voice, voices_dir=cfg.piper_voices_dir)
+    return FakeTTS()
+
+
 _traces = TraceStore(_glados_cfg.server.traces_dir)
 _mcp = MCPRegistry()
 _mcp.register(NowTool())
 for _tool in TOY_TOOLS:
     _mcp.register(_tool)
 _llm: LLM = _build_llm(_glados_cfg.llm)
-# STT shared across connections (real backends load a model on construct).
-# VAD is per-connection — it carries per-stream buffer state.
+# STT and TTS shared across connections (real backends load a model on
+# construct). VAD is per-connection — it carries per-stream buffer state.
 _stt: STT = _build_stt(_glados_cfg.stt)
+_tts: TTS = _build_tts(_glados_cfg.tts)
 _connections: dict[str, WebSocket] = {}
 
 
@@ -116,6 +127,7 @@ def _clients_in_room(room_id: str) -> list[str]:
 _sessions = SessionRegistry()
 _organizer = Organizer(
     llm=_llm,
+    tts=_tts,
     mcp=_mcp,
     traces=_traces,
     sessions=_sessions,

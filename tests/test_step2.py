@@ -244,16 +244,19 @@ def test_e2e_time_question(http_client: TestClient) -> None:
     with http_client.websocket_connect("/ws/v1") as ws:
         ws.send_json(_hello("desk-ui", "desk", "dev-token-desk"))
         ws.send_json({"type": "user_text", "text": "what time is it?"})
-        msgs = [ws.receive_json() for _ in range(5)]
+        msgs = [ws.receive_json() for _ in range(6)]
     assert [m["type"] for m in msgs] == [
         "welcome",
         "tool_call",
         "tool_result",
         "assistant_delta",
+        "tts_chunk",
         "done",
     ]
     assert msgs[2]["ok"] is True
     assert "iso" in msgs[2]["content"]
+    assert msgs[4]["seq"] == 0
+    assert msgs[4]["sample_rate"] == 22_050
 
 
 def test_e2e_audio_frame_writes_wav(http_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -290,8 +293,8 @@ def test_e2e_two_tabs_isolated(http_client: TestClient) -> None:
         a.send_json({"type": "user_text", "text": "hello"})
         b.send_json({"type": "user_text", "text": "what time is it?"})
 
-        a_msgs = [a.receive_json() for _ in range(3)]
-        b_msgs = [b.receive_json() for _ in range(5)]
+        a_msgs = [a.receive_json() for _ in range(4)]
+        b_msgs = [b.receive_json() for _ in range(6)]
 
     assert {m["session_id"] for m in a_msgs}.isdisjoint(
         {m["session_id"] for m in b_msgs}

@@ -134,7 +134,7 @@ chunks. Latency SLA: 2 s wake-to-first-audio; 1.2 s stretch goal.
 | VAD         | **silero-vad**                                               | webrtcvad                          | Silero handles noise better, ~5 ms cost |
 | STT         | **faster-whisper** (large-v3 GPU, distil-medium CPU)         | whisper.cpp, Parakeet              | faster-whisper = best Python ergonomics; whisper.cpp wins for embedded targets |
 | LLM         | **vLLM** + Qwen2.5-32B-Instruct or Llama 3.3 70B Q4          | llama.cpp parallel slots, Ollama   | vLLM = real concurrency for multi-room and stronger tool-calling than Ollama; benchmark grammar-constrained tool use before locking in |
-| TTS         | **Piper** (low latency) → **Kokoro/XTTS** for cloned voice   | Coqui XTTS-v2                      | Piper streams <100 ms; XTTS better quality, needs GPU |
+| TTS         | **Piper** (low latency) → **Kokoro/XTTS** for cloned voice   | Coqui XTTS-v2                      | Piper streams <100 ms; XTTS better quality, needs GPU. Note: the active `piper-tts` PyPI package (OHF-Voice/piper1-gpl) is **GPL-3** — fine for local-only personal use, would infect GLaDOS on redistribution. |
 | AEC         | **webrtc-audio-processing** on client (PipeWire)             | speex-aec                          | Required for barge-in; client-side avoids round-trip |
 | Memory      | **SQLite** (sessions + FTS5) + optional **LanceDB** later    | Chroma, Qdrant local               | Start with FTS5; add vector store only when retrieval recall demands it |
 | Web search  | **SearXNG** self-hosted (Docker), wrapped as MCP             | Brave API                          | SearXNG: no API key, aggregates public engines |

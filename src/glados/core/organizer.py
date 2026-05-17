@@ -8,17 +8,21 @@ audio arrives in v1.
 
 from __future__ import annotations
 
+import base64
 import json
+import logging
 from typing import Awaitable, Callable
 
 from pydantic import BaseModel
 
 from ..mcp.registry import CallEnvelope, MCPRegistry
-from .adapters import LLM, LLMMessage, LLMText, LLMToolCall
+from .adapters import LLM, TTS, LLMMessage, LLMText, LLMToolCall
 from .config import ClientBinding
-from .protocols import AssistantDelta, Done, ToolCall, ToolResult, Welcome
+from .protocols import AssistantDelta, Done, ToolCall, ToolResult, TtsChunk, Welcome
 from .sessions import SessionRegistry
 from .traces import TraceStore
+
+log = logging.getLogger(__name__)
 
 SendFn = Callable[[str, BaseModel], Awaitable[None]]
 BindingLookup = Callable[[str], ClientBinding | None]
@@ -42,8 +46,10 @@ class Organizer:
         send: SendFn,
         binding_for_client: BindingLookup,
         clients_in_room: RoomLookup,
+        tts: TTS | None = None,
     ) -> None:
         self.llm = llm
+        self.tts = tts
         self.mcp = mcp
         self.traces = traces
         self.sessions = sessions
@@ -76,11 +82,13 @@ class Organizer:
                 LLMMessage(role="system", content=_SYSTEM_PROMPT),
                 LLMMessage(role="user", content=text),
             ]
+            final_text = ""
             for _ in range(_MAX_TOOL_LOOP):
                 pending_calls, assistant_text = await self._run_one_llm_pass(
                     session.session_id, session.room_id, messages, trace
                 )
                 if not pending_calls:
+                    final_text = assistant_text
                     break
                 messages.append(
                     LLMMessage(
@@ -93,7 +101,10 @@ class Organizer:
                     session.session_id, session.room_id, envelope, pending_calls, messages, trace
                 )
             else:
-                await self._handle_loop_exhausted(session.session_id, session.room_id, trace)
+                final_text = await self._handle_loop_exhausted(
+                    session.session_id, session.room_id, trace
+                )
+            await self._speak(session.session_id, session.room_id, final_text, trace)
             await self._broadcast(session.room_id, Done(session_id=session.session_id))
             trace.event("done")
         finally:
@@ -127,12 +138,42 @@ class Organizer:
 
     async def _handle_loop_exhausted(
         self, session_id: str, room_id: str, trace
-    ) -> None:
+    ) -> str:
         msg = "I got stuck in a tool loop and stopped. Try rephrasing."
         await self._broadcast(
             room_id, AssistantDelta(session_id=session_id, text=msg)
         )
         trace.event("tool_loop_exhausted", limit=_MAX_TOOL_LOOP)
+        return msg
+
+    async def _speak(
+        self, session_id: str, room_id: str, text: str, trace
+    ) -> None:
+        if self.tts is None or not text.strip():
+            return
+        seq = 0
+        try:
+            async for chunk in self.tts.synthesize(text):
+                await self._broadcast(
+                    room_id,
+                    TtsChunk(
+                        session_id=session_id,
+                        seq=seq,
+                        sample_rate=chunk.sample_rate,
+                        pcm_b64=base64.b64encode(chunk.pcm).decode("ascii"),
+                    ),
+                )
+                trace.event(
+                    "tts_chunk",
+                    seq=seq,
+                    samples=len(chunk.pcm) // 2,
+                    sample_rate=chunk.sample_rate,
+                )
+                seq += 1
+        except Exception:
+            # TTS is a side-channel — don't break the turn if synth blows up.
+            log.exception("tts synthesize failed")
+            trace.event("tts_error")
 
     async def _run_tool_calls(
         self,

@@ -82,6 +82,7 @@ class TtsChunk(BaseModel):
     type: Literal["tts_chunk"] = "tts_chunk"
     session_id: str
     seq: int
+    sample_rate: int
     pcm_b64: str
 
 

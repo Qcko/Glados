@@ -15,6 +15,7 @@ dependencies = [
     "numpy>=2.0",
     "silero-vad>=5.1",
     "faster-whisper>=1.2.0",
+    "piper-tts>=1.4.2",
 ]
 
 [project.scripts]
