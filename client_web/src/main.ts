@@ -34,6 +34,7 @@ app.innerHTML = `
       <button id="micBtn" type="button" class="mic" title="capture mic" disabled>
         <span class="dot"></span> mic
       </button>
+      <button id="stopBtn" type="button" class="stop" title="interrupt the current reply" disabled>⏹</button>
       <button id="muteBtn" type="button" class="mute" title="mute speaker output">🔊</button>
       <input id="input" placeholder="say something…" autocomplete="off" disabled />
       <button id="sendBtn" type="submit" disabled>send</button>
@@ -61,6 +62,7 @@ const connectBtn = $<HTMLButtonElement>("connectBtn");
 const inputEl = $<HTMLInputElement>("input");
 const sendBtn = $<HTMLButtonElement>("sendBtn");
 const micBtn = $<HTMLButtonElement>("micBtn");
+const stopBtn = $<HTMLButtonElement>("stopBtn");
 const muteBtn = $<HTMLButtonElement>("muteBtn");
 const formEl = $<HTMLFormElement>("form");
 const quickEl = $<HTMLElement>("quick");
@@ -112,11 +114,42 @@ micBtn.addEventListener("click", () => {
   }
 });
 
+let activeSessionId: string | null = null;
+
+function setActiveSession(id: string | null): void {
+  activeSessionId = id;
+  stopBtn.disabled = id === null;
+}
+
 transport.onServerMessage((msg) => {
-  if (msg.type === "tts_chunk") {
-    tts.enqueue(msg.pcm_b64, msg.sample_rate);
+  switch (msg.type) {
+    case "welcome":
+      setActiveSession(msg.session_id);
+      break;
+    case "tts_chunk":
+      tts.enqueue(msg.pcm_b64, msg.sample_rate);
+      break;
+    case "cancelled":
+      tts.stop();
+      if (activeSessionId === msg.session_id) setActiveSession(null);
+      break;
+    case "done":
+      if (activeSessionId === msg.session_id) setActiveSession(null);
+      break;
+    case "error":
+      setActiveSession(null);
+      break;
   }
   transcript.ingest(msg);
+});
+
+stopBtn.addEventListener("click", () => {
+  if (activeSessionId === null) return;
+  transport.send({ type: "interrupt", session_id: activeSessionId });
+  // Optimistic local stop — server's Cancelled will redundantly call stop
+  // again, which is idempotent. Without this the user still hears the
+  // already-buffered audio for a few hundred ms.
+  tts.stop();
 });
 transport.onFirstReply((ms) => {
   latencyEl.textContent = `1st reply ${ms.toFixed(0)} ms`;
@@ -140,6 +173,8 @@ function renderState(s: ConnState): void {
       sendBtn.disabled = true;
       micBtn.disabled = true;
       if (mic.running) void mic.stop();
+      setActiveSession(null);
+      tts.stop();
       connectBtn.textContent = "connect";
       connectBtn.classList.remove("disconnect");
       latencyEl.textContent = "";
@@ -185,6 +220,8 @@ function renderState(s: ConnState): void {
       sendBtn.disabled = true;
       micBtn.disabled = true;
       if (mic.running) void mic.stop();
+      setActiveSession(null);
+      tts.stop();
       connectBtn.textContent = "connect";
       connectBtn.classList.remove("disconnect");
       break;

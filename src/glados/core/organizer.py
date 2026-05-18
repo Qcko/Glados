@@ -8,9 +8,11 @@ audio arrives in v1.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
+from contextlib import aclosing
 from typing import Awaitable, Callable
 
 from pydantic import BaseModel
@@ -18,7 +20,15 @@ from pydantic import BaseModel
 from ..mcp.registry import CallEnvelope, MCPRegistry
 from .adapters import LLM, TTS, LLMMessage, LLMText, LLMToolCall
 from .config import ClientBinding
-from .protocols import AssistantDelta, Done, ToolCall, ToolResult, TtsChunk, Welcome
+from .protocols import (
+    AssistantDelta,
+    Cancelled,
+    Done,
+    ToolCall,
+    ToolResult,
+    TtsChunk,
+    Welcome,
+)
 from .sessions import SessionRegistry
 from .traces import TraceStore
 
@@ -56,6 +66,9 @@ class Organizer:
         self.send = send
         self.binding_for_client = binding_for_client
         self.clients_in_room = clients_in_room
+        # session_id -> (task, room_id). Lets handle_interrupt cancel the
+        # right turn and route the Cancelled broadcast to the right room.
+        self._inflight: dict[str, tuple[asyncio.Task, str]] = {}
 
     async def handle_user_text(self, client_id: str, text: str) -> None:
         binding = self.binding_for_client(client_id)
@@ -67,7 +80,11 @@ class Organizer:
             room_id=session.room_id,
             speaker_id=session.speaker_id,
         )
+        task = asyncio.current_task()
+        if task is not None:
+            self._inflight[session.session_id] = (task, session.room_id)
         trace = self.traces.open(session.session_id)
+        cancelled = False
         try:
             trace.event(
                 "turn_start",
@@ -107,8 +124,39 @@ class Organizer:
             await self._speak(session.session_id, session.room_id, final_text, trace)
             await self._broadcast(session.room_id, Done(session_id=session.session_id))
             trace.event("done")
+        except asyncio.CancelledError:
+            cancelled = True
+            trace.event("cancelled")
         finally:
+            self._inflight.pop(session.session_id, None)
+            # Close the trace before any further await so a re-cancel during
+            # shutdown can't strand the file handle. Broadcast is shielded
+            # for the same reason — without it a second cancel would
+            # suppress Cancelled and leave the room hanging.
             trace.close()
+            if cancelled:
+                await asyncio.shield(
+                    self._broadcast(
+                        session.room_id,
+                        Cancelled(session_id=session.session_id),
+                    )
+                )
+
+    async def handle_interrupt(self, client_id: str, session_id: str) -> None:
+        binding = self.binding_for_client(client_id)
+        if binding is None:
+            return
+        entry = self._inflight.get(session_id)
+        if entry is None:
+            return  # turn already finished or never existed — no-op
+        task, room_id = entry
+        if room_id != binding.room_id:
+            log.warning(
+                "interrupt rejected: client %s in room %s tried to cancel session %s in room %s",
+                client_id, binding.room_id, session_id, room_id,
+            )
+            return
+        task.cancel()
 
     async def _run_one_llm_pass(
         self,
@@ -125,15 +173,19 @@ class Organizer:
         )
         pending: list[LLMToolCall] = []
         text_chunks: list[str] = []
-        async for event in self.llm.chat(messages, specs):
-            if isinstance(event, LLMText):
-                text_chunks.append(event.text)
-                await self._broadcast(
-                    room_id, AssistantDelta(session_id=session_id, text=event.text)
-                )
-                trace.event("assistant_delta", text=event.text)
-            elif isinstance(event, LLMToolCall):
-                pending.append(event)
+        # aclosing guarantees the upstream HTTP stream gets aclose()'d on
+        # CancelledError — otherwise Ollama keeps generating tokens we'll
+        # never read (ARCH §6: cancellation must propagate end-to-end).
+        async with aclosing(self.llm.chat(messages, specs)) as stream:
+            async for event in stream:
+                if isinstance(event, LLMText):
+                    text_chunks.append(event.text)
+                    await self._broadcast(
+                        room_id, AssistantDelta(session_id=session_id, text=event.text)
+                    )
+                    trace.event("assistant_delta", text=event.text)
+                elif isinstance(event, LLMToolCall):
+                    pending.append(event)
         return pending, "".join(text_chunks)
 
     async def _handle_loop_exhausted(
@@ -153,23 +205,26 @@ class Organizer:
             return
         seq = 0
         try:
-            async for chunk in self.tts.synthesize(text):
-                await self._broadcast(
-                    room_id,
-                    TtsChunk(
-                        session_id=session_id,
+            async with aclosing(self.tts.synthesize(text)) as stream:
+                async for chunk in stream:
+                    await self._broadcast(
+                        room_id,
+                        TtsChunk(
+                            session_id=session_id,
+                            seq=seq,
+                            sample_rate=chunk.sample_rate,
+                            pcm_b64=base64.b64encode(chunk.pcm).decode("ascii"),
+                        ),
+                    )
+                    trace.event(
+                        "tts_chunk",
                         seq=seq,
+                        samples=len(chunk.pcm) // 2,
                         sample_rate=chunk.sample_rate,
-                        pcm_b64=base64.b64encode(chunk.pcm).decode("ascii"),
-                    ),
-                )
-                trace.event(
-                    "tts_chunk",
-                    seq=seq,
-                    samples=len(chunk.pcm) // 2,
-                    sample_rate=chunk.sample_rate,
-                )
-                seq += 1
+                    )
+                    seq += 1
+        except asyncio.CancelledError:
+            raise
         except Exception:
             # TTS is a side-channel — don't break the turn if synth blows up.
             log.exception("tts synthesize failed")

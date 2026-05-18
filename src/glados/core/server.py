@@ -7,6 +7,7 @@ only handles wire I/O and connection bookkeeping.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -41,6 +42,7 @@ from .protocols import (
     ClientMessage,
     ErrorMessage,
     Hello,
+    Interrupt,
     UserText,
 )
 from .sessions import SessionRegistry
@@ -112,8 +114,15 @@ _connections: dict[str, WebSocket] = {}
 
 async def _send(client_id: str, msg: BaseModel) -> None:
     ws = _connections.get(client_id)
-    if ws is not None:
+    if ws is None:
+        return
+    try:
         await ws.send_json(msg.model_dump())
+    except Exception:
+        # Recipient went away mid-broadcast. Drop the slot so subsequent
+        # fan-outs skip it, and never let one dead client take the turn down.
+        if _connections.get(client_id) is ws:
+            del _connections[client_id]
 
 
 def _clients_in_room(room_id: str) -> list[str]:
@@ -181,6 +190,7 @@ async def ws_v1(ws: WebSocket) -> None:
     await ws.accept()
     client_id: str | None = None
     pipeline: AudioPipeline | None = None
+    turn_tasks: set[asyncio.Task] = set()
     try:
         binding = await _handshake(ws)
         if binding is None:
@@ -188,7 +198,7 @@ async def ws_v1(ws: WebSocket) -> None:
         client_id = binding.client_id
         await _replace_connection(client_id, ws)
         pipeline = _build_pipeline(client_id)
-        await _serve(ws, client_id, pipeline)
+        await _serve(ws, client_id, pipeline, turn_tasks)
     except WebSocketDisconnect:
         return
     finally:
@@ -196,6 +206,20 @@ async def ws_v1(ws: WebSocket) -> None:
             await pipeline.close()
         if client_id is not None and _connections.get(client_id) is ws:
             del _connections[client_id]
+        # Let in-flight turns finish so other room members still see Done.
+        # _send no-ops once the origin's ws is removed from _connections.
+        # 30 s cap prevents a misbehaving client from pinning the handler
+        # coroutine forever — Ollama is serialised, so a slow turn could
+        # otherwise hold this connection slot indefinitely.
+        if turn_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*turn_tasks, return_exceptions=True),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                for t in turn_tasks:
+                    t.cancel()
 
 
 def _build_pipeline(client_id: str) -> AudioPipeline:
@@ -248,7 +272,12 @@ async def _handshake(ws: WebSocket):
     return binding
 
 
-async def _serve(ws: WebSocket, client_id: str, pipeline: AudioPipeline) -> None:
+async def _serve(
+    ws: WebSocket,
+    client_id: str,
+    pipeline: AudioPipeline,
+    turn_tasks: set[asyncio.Task],
+) -> None:
     while True:
         event = await ws.receive()
         if event["type"] == "websocket.disconnect":
@@ -266,8 +295,14 @@ async def _serve(ws: WebSocket, client_id: str, pipeline: AudioPipeline) -> None
             await _send_error(ws, "bad_message", str(e))
             continue
         if isinstance(msg, UserText):
-            await _organizer.handle_user_text(client_id, msg.text)
-        # other types are accepted but no-op in v0
+            # Spawn the turn so the receive loop stays responsive to
+            # follow-up frames (interrupt, more audio). The Organizer
+            # tracks the task by session_id for cancellation.
+            task = asyncio.create_task(_organizer.handle_user_text(client_id, msg.text))
+            turn_tasks.add(task)
+            task.add_done_callback(turn_tasks.discard)
+        elif isinstance(msg, Interrupt):
+            await _organizer.handle_interrupt(client_id, msg.session_id)
 
 
 async def _handle_audio(ws: WebSocket, pipeline: AudioPipeline, data: bytes) -> None:
