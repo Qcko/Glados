@@ -35,7 +35,7 @@ app.innerHTML = `
         <span class="dot"></span> mic
       </button>
       <button id="stopBtn" type="button" class="stop" title="interrupt the current reply" disabled>⏹</button>
-      <button id="muteBtn" type="button" class="mute" title="mute speaker output">🔊</button>
+      <button id="silenceBtn" type="button" class="silence" title="interrupt speaker output for this reply">🔇</button>
       <input id="input" placeholder="say something…" autocomplete="off" disabled />
       <button id="sendBtn" type="submit" disabled>send</button>
     </form>
@@ -63,7 +63,7 @@ const inputEl = $<HTMLInputElement>("input");
 const sendBtn = $<HTMLButtonElement>("sendBtn");
 const micBtn = $<HTMLButtonElement>("micBtn");
 const stopBtn = $<HTMLButtonElement>("stopBtn");
-const muteBtn = $<HTMLButtonElement>("muteBtn");
+const silenceBtn = $<HTMLButtonElement>("silenceBtn");
 const formEl = $<HTMLFormElement>("form");
 const quickEl = $<HTMLElement>("quick");
 
@@ -77,11 +77,8 @@ const tts = new TtsPlayer();
 
 mic.subscribe(renderMic);
 
-muteBtn.addEventListener("click", () => {
-  tts.setMuted(!tts.isMuted());
-});
-tts.subscribe((e) => {
-  if (e.kind === "muted") muteBtn.textContent = e.value ? "🔇" : "🔊";
+silenceBtn.addEventListener("click", () => {
+  tts.silenceCurrentReply();
 });
 
 function renderMic(e: MicEvent): void {
@@ -125,6 +122,7 @@ transport.onServerMessage((msg) => {
   switch (msg.type) {
     case "welcome":
       setActiveSession(msg.session_id);
+      tts.allowPlayback();
       break;
     case "tts_chunk":
       tts.enqueue(msg.pcm_b64, msg.sample_rate);

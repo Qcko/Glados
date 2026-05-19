@@ -12,14 +12,17 @@
 export type TtsListener = (e: TtsEvent) => void;
 export type TtsEvent =
   | { kind: "playing" }
-  | { kind: "idle" }
-  | { kind: "muted"; value: boolean };
+  | { kind: "idle" };
 
 export class TtsPlayer {
   private ctx: AudioContext | null = null;
   private nextStartTime = 0;
   private inFlight = 0;
-  private muted = false;
+  // Set by silenceCurrentReply(); cleared by allowPlayback() at the
+  // start of the next turn. While set, incoming chunks are dropped so
+  // a click late in a reply truly silences the rest of it even though
+  // server-side synthesis keeps streaming.
+  private suppressed = false;
   private listeners = new Set<TtsListener>();
 
   subscribe(fn: TtsListener): () => void {
@@ -27,18 +30,17 @@ export class TtsPlayer {
     return () => this.listeners.delete(fn);
   }
 
-  setMuted(value: boolean): void {
-    this.muted = value;
-    if (value) this.stop();
-    this.emit({ kind: "muted", value });
+  silenceCurrentReply(): void {
+    this.suppressed = true;
+    this.stop();
   }
 
-  isMuted(): boolean {
-    return this.muted;
+  allowPlayback(): void {
+    this.suppressed = false;
   }
 
   enqueue(pcmB64: string, sampleRate: number): void {
-    if (this.muted) return;
+    if (this.suppressed) return;
     const pcm = decodePcm16(pcmB64);
     if (pcm.length === 0) return;
 
@@ -64,7 +66,7 @@ export class TtsPlayer {
     };
   }
 
-  // Hard-cut active playback. Used on disconnect, mute, or interrupt.
+  // Hard-cut active playback. Used on disconnect, silence, or interrupt.
   stop(): void {
     if (!this.ctx) return;
     try { this.ctx.close(); } catch { /* ignore */ }
