@@ -8,7 +8,9 @@ only handles wire I/O and connection bookkeeping.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -49,7 +51,14 @@ from .sessions import SessionRegistry
 from .traces import TraceStore
 
 
+log = logging.getLogger(__name__)
+
 CONFIG_DIR = Path(os.environ.get("GLADOS_CONFIG_DIR", "configs"))
+
+# 100 ms of silence at 16 kHz mono int16. Whisper rejects empty PCM but
+# accepts silence; the first call still pays the model-warm-up cost.
+_WARMUP_PCM = b"\x00\x00" * 1_600
+_WARMUP_TEXT = "hi"
 
 _glados_cfg: GladosConfig = load_glados_config(CONFIG_DIR / "glados.toml")
 _rooms_cfg: RoomsConfig = load_rooms_config(CONFIG_DIR / "rooms.toml")
@@ -145,7 +154,42 @@ _organizer = Organizer(
     clients_in_room=_clients_in_room,
 )
 
-app = FastAPI(title="GLaDOS", version="0.1.0")
+async def _warmup(stt: STT, tts: TTS) -> None:
+    """Hide first-inference latency by exercising each backend once on
+    server boot. Real Whisper/Piper load weights at construct time, but
+    the *first* `transcribe`/`synthesize` still pays ctranslate2 /
+    onnxruntime kernel-graph compilation and thread-pool init (~0.5-1.5 s
+    each). Fakes accept the calls cheaply."""
+    try:
+        await stt.transcribe(_WARMUP_PCM)
+    except Exception:
+        log.exception("STT warmup failed (continuing — first transcribe may be slow)")
+    try:
+        async for _ in tts.synthesize(_WARMUP_TEXT):
+            pass
+    except Exception:
+        log.exception("TTS warmup failed (continuing — first synth may be slow)")
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # Background so /healthz answers immediately and a fresh client can
+    # connect while warm-up is still finishing. The first audio utterance
+    # only benefits if warm-up completed first, but completing in 1-3 s
+    # is much better than running it inline at first use.
+    task = asyncio.create_task(_warmup(_stt, _tts))
+    try:
+        yield
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+app = FastAPI(title="GLaDOS", version="0.1.0", lifespan=_lifespan)
 # Source-checkout layout only: src/glados/core/server.py → repo root is parents[3].
 # GLaDOS is self-hosted, not pip-distributed; if that ever changes, ship the
 # built client as package data and resolve via importlib.resources.
