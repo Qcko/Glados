@@ -12,6 +12,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 from contextlib import aclosing
 from typing import Awaitable, Callable
 
@@ -43,6 +44,23 @@ _SYSTEM_PROMPT = (
     "Be concise."
 )
 _MAX_TOOL_LOOP = 8
+
+# Short utterances that should jump the queue and cancel an in-flight turn
+# in the speaker's room rather than open a new turn. Matched case-insensitively
+# after stripping surrounding whitespace; trailing punctuation is tolerated.
+# Whisper tends to render bare commands with a trailing period.
+_BARGE_IN_RE = re.compile(
+    r"^(?:(?:hey|ok(?:ay)?|alright|please|um)[\s,]+)*"
+    r"(?:glados[\s,]+)?"
+    r"(?:stop|cancel|halt|nevermind|never\s*mind|shut\s*up|be\s*quiet|"
+    r"stop\s+it|stop\s+talking)"
+    r"(?:[\s,]+(?:glados|please))*[\s.!?,]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_barge_in(text: str) -> bool:
+    return bool(text) and _BARGE_IN_RE.match(text.strip()) is not None
 
 
 class Organizer:
@@ -80,6 +98,11 @@ class Organizer:
             room_id=session.room_id,
             speaker_id=session.speaker_id,
         )
+        # Capture the task locally so the finally-block can release its own
+        # _inflight slot without clobbering a successor turn that may have
+        # reused the same session_id (race when a cancelled turn drains
+        # its finally while the next utterance starts a new turn for the
+        # same speaker).
         task = asyncio.current_task()
         if task is not None:
             self._inflight[session.session_id] = (task, session.room_id)
@@ -128,7 +151,9 @@ class Organizer:
             cancelled = True
             trace.event("cancelled")
         finally:
-            self._inflight.pop(session.session_id, None)
+            entry = self._inflight.get(session.session_id)
+            if entry is not None and entry[0] is task:
+                del self._inflight[session.session_id]
             # Close the trace before any further await so a re-cancel during
             # shutdown can't strand the file handle. Broadcast is shielded
             # for the same reason — without it a second cancel would
@@ -141,6 +166,29 @@ class Organizer:
                         Cancelled(session_id=session.session_id),
                     )
                 )
+
+    async def handle_audio_text(self, client_id: str, text: str) -> None:
+        """Audio-ingress entry. A short barge-in utterance (`stop`, `cancel`,
+        ...) cancels the speaker's room's in-flight turn instead of opening
+        a new one. Everything else falls through to `handle_user_text`."""
+        binding = self.binding_for_client(client_id)
+        if binding is None:
+            return
+        if _is_barge_in(text):
+            active = self._active_session_in_room(binding.room_id)
+            if active is not None:
+                await self.handle_interrupt(client_id, active)
+                return
+        await self.handle_user_text(client_id, text)
+
+    def _active_session_in_room(self, room_id: str) -> str | None:
+        # v1 invariant: at most one in-flight session per room (one speaker,
+        # one turn at a time). v2 multi-speaker rooms will need a policy
+        # choice — most-recent, or per-speaker fan-out.
+        for sid, (_task, rid) in self._inflight.items():
+            if rid == room_id:
+                return sid
+        return None
 
     async def handle_interrupt(self, client_id: str, session_id: str) -> None:
         binding = self.binding_for_client(client_id)

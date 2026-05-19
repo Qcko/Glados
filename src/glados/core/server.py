@@ -230,7 +230,7 @@ def _build_pipeline(client_id: str) -> AudioPipeline:
     )
 
     async def on_utterance(text: str) -> None:
-        await _organizer.handle_user_text(client_id, text)
+        await _organizer.handle_audio_text(client_id, text)
 
     return AudioPipeline(
         sink=sink,
