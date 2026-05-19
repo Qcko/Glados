@@ -42,6 +42,10 @@ class MCPRegistry:
     def specs(self) -> list[ToolSpec]:
         return [t.spec for t in self._tools.values()]
 
+    def spec_for(self, server: str, name: str) -> ToolSpec | None:
+        tool = self._tools.get(f"{server}.{name}")
+        return tool.spec if tool is not None else None
+
     async def dispatch(
         self,
         server: str,

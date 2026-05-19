@@ -6,9 +6,9 @@ the wire (`server.name` → `server__name`) and a reverse map restores them
 on the way back; the `__` separator is reserved (server/tool names with
 `__` are rejected, keeping the sanitisation injective).
 
-TODO(v1): tool result content from external sources (web fetch, scrapers)
-should be wrapped in `<tool_result>...</tool_result>` delimiters before
-reaching the LLM — see ARCHITECTURE §7 untrusted-content discipline.
+Untrusted-content wrapping (ARCHITECTURE §7) lives in the Organizer, not
+here: a `ToolSpec(untrusted=True)` causes the Organizer to wrap the
+result in `<external>...</external>` before it reaches this adapter.
 """
 
 from __future__ import annotations

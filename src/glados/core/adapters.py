@@ -16,6 +16,13 @@ class ToolSpec(BaseModel):
     name: str
     description: str
     parameters: dict
+    # When True, the tool returns content from outside the local trust
+    # boundary (web fetches, scraped pages, third-party APIs). The
+    # Organizer wraps the result in <external>...</external> delimiters
+    # before feeding it back to the LLM. Pair with a system-prompt rule
+    # that instructions inside <external> are data, not commands.
+    # See ARCHITECTURE.md §7 untrusted-content discipline.
+    untrusted: bool = False
 
     @property
     def qualified(self) -> str:
