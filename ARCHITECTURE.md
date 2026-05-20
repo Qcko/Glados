@@ -47,7 +47,10 @@ room". A Pi with a mic array and speakers runs several client processes.
   shared bearer.
 - **Why dumb clients:** the room/session/dedup logic lives in one place
   (Organizer), so adding a hardware button, a phone PWA, or a second mic in a
-  room is "pair another client", not a code change.
+  room is "pair another client", not a code change. Note: v7 (rich client
+  tier) explicitly relaxes the one-transducer-per-client rule for Windows
+  and Android clients that need to expose local capabilities (VPN, app
+  launch, clipboard). See §13.
 
 ---
 
@@ -102,9 +105,14 @@ not an edge case.
   Ollama serialises; vLLM and llama.cpp (parallel slots) batch. With
   Organizer + multi-room as the model, vLLM is justified by concurrency, not
   just tool-calling quality.
-- **Barge-in needs client-side AEC.** Mic stays hot during TTS; without AEC
-  (PipeWire + `webrtc-audio-processing`) the speaker→mic loop self-triggers
-  `interrupt`.
+- **Barge-in needs client-side AEC, with a server-side mic-gate layer.**
+  Mic stays hot during TTS so voice barge-in works; without client-side
+  AEC (PipeWire + `webrtc-audio-processing`, or `echoCancellation: true`
+  in browsers) the speaker→mic loop self-triggers `interrupt`. A
+  complementary server-side gate suppresses a room's mic ingress while
+  that room's speaker is mid-TTS — barge-in regex still passes through —
+  catching cases where client AEC is weak (external speakers, Pi
+  clients without `webrtc-audio-processing`).
 - **Organizer is now load-bearing.** Bugs here break everything. Needs solid
   tests and JSONL traces from v0.
 
@@ -317,6 +325,37 @@ Each version is its own session-sized chunk. Heavy work is deferred.
 
 - **v5 — speaker ID.** Resemblyzer or pyannote to populate `speaker_id`.
 
+- **v6 — voice identity & access control.** Builds on v5. Capture an
+  embedding at session open; subsequent utterances in the open session
+  must match within threshold or are dropped (speaker-focus — only the
+  invoker is heard, even with others in the room). Role-tagged
+  enrollment store with `adult | kid | blocked`; default-deny for
+  unknown voices; adult-only "allow X for N minutes" bypass spoken into
+  the Organizer. One enrollment CLI now, web UI later.
+
+- **v7 — rich client tier.** Windows and Android clients that declare
+  capabilities on `welcome` (VPN, app launch, clipboard, push
+  notifications). Per-client MCP servers carry the actual tools, so
+  every device-specific plugin is "another MCP" — not a special case
+  in the Organizer. Explicit relaxation of §2's "single transducer per
+  client" invariant; thin Pi clients remain unchanged because they
+  declare no extra capabilities. Per-session FIFO queue (§3) lands
+  first.
+
+- **v8 — remote access.** Tailscale-first (no public ports, no new
+  auth surface). The parked per-client pairing flow becomes
+  mandatory; dev tokens in `glados.toml` retire. BRIEF's local-first
+  stance softens to "self-hosted-first" on this slice — voice and
+  transcripts now leave the LAN, only encrypted, only to the user's
+  own devices.
+
+- **v9 — mobile.** Android Auto via media-session push-to-talk
+  (voice-only, no projected UI — sidesteps Google's AA category
+  restrictions). SIP "Call GLaDOS" as plan-B for the steering-wheel
+  call button; works in non-AA cars too via standard hands-free
+  Bluetooth. VPN-control plugin shipped as the canonical rich-client
+  MCP.
+
 ---
 
 ## 13. Known unknowns (parked, revisit before relevant version)
@@ -334,3 +373,52 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   backup story).
 - **Family member onboarding UX** — pairing a new client should be one short
   code, not editing config files.
+- **Multilingual STT cost (Czech-in / English-out).** Today's
+  `distil-small.en` is English-only. Multilingual `small` is ~3× slower
+  and ~1 pt WER worse on English; `medium` handles Czech sharper but
+  blows the latency budget. Two-pass (en-only fast path + multilingual
+  fallback on low confidence) was considered and rejected as
+  overengineered — pick one multilingual model and accept the tax.
+  TTS and LLM stay English; the LLM gets a "user may speak Czech;
+  always reply in English" clause.
+- **Voice ACL default policy.** Default-deny for unknown voices keeps
+  kids and guests out by accident; default-allow is friendlier but
+  defeats the kid-protection use case the moment a new family member's
+  embedding lags. Chosen: default-deny with an adult-only "allow X for
+  N minutes" bypass. Trade-off: guests need a host present to be
+  heard.
+- **Rich-client tier vs. thin-client invariant.** §2 currently insists
+  every client is one transducer. The VPN / remote / AA threads all
+  want capabilities the server cannot satisfy alone (VPN toggle on
+  the user's phone, app launch on the user's laptop). Two shapes:
+  (a) keep §2 strict and run a separate "agent" daemon per device
+      that registers as a yet-another remote MCP — clean but
+      duplicates connection state and per-device auth;
+  (b) relax §2 so a client advertises additional capabilities on
+      `welcome`, and those capabilities surface tools as if they were
+      MCP servers running on the client.
+  Chosen: (b). The Organizer doesn't care whether a tool's MCP lives
+  in a subprocess or behind a WS; the registry abstraction holds. Pi
+  clients are unaffected because they declare nothing extra.
+- **Remote-access transport.** Three viable shapes: Tailscale (zero
+  public surface, mesh-VPN, hard dependency on Tailscale's
+  coordination server for control-plane), Cloudflare Tunnel (public
+  hostname, no open ports, third party in the auth path), self-hosted
+  reverse proxy with TLS (full control, port-forwarding on home
+  router, ops cost). Chosen default: Tailscale. The other two stay
+  documented as alternatives for users who don't want a Tailscale
+  account.
+- **Privacy stance under remote access.** §9's invariant —
+  "transcripts and reasoning never appear in any outbound HTTP body"
+  — still holds. But BRIEF's stronger "no data leaves the machine"
+  framing softens to "no data leaves the user's own devices." This is
+  a material change to the project's framing and should land in BRIEF
+  when v8 ships, not silently in this doc.
+- **Mobile audio path.** Android Auto's published app categories
+  don't admit a general voice assistant; sideloaded media-session PTT
+  sidesteps the category problem entirely (no Play Store; personal
+  use). Plan B is a SIP/VoIP endpoint that appears as a phone contact
+  — the car's existing HFP stack carries audio, no AA cooperation
+  needed, and the same path works for non-AA cars. Trade-off: SIP
+  brings real-time audio into the server's outward surface; needs
+  per-device SIP creds and probably its own subprocess for isolation.
