@@ -314,8 +314,59 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   streams back. `interrupt` wired up. Validate the protocol against real
   codec realities here, before the Pi client.
 
-- **v2 — concurrency + second MCP.** Switch LLM to vLLM if needed. Add
-  Spotify MCP. Two browser tabs as "rooms"; verify isolation.
+- **v2 — first stdio MCP + permission gates + secrets keyring.** The
+  three §7/§9 capabilities that have been carried since v0 land
+  together because they enable each other and the first real third-
+  party MCP needs all three.
+  1. **stdio MCP client adapter** in `src/glados/mcp/`. Spawns
+     subprocesses, speaks JSON-RPC over stdin/stdout per MCP spec,
+     surfaces tool specs into the existing `MCPRegistry`. Prove the
+     transport by re-platforming the in-process toy server as a
+     small Python stdio subprocess first — no external risk.
+  2. **Per-tool permission gate framework** (ARCH §7). Hard-coded
+     list of side-effecting tools, not LLM-decided. Confirms are
+     per-user and routed back to the originating room.
+  3. **OS keyring for secrets** (ARCH §9). Windows Credential
+     Manager / libsecret. `glados.toml` holds handles, never
+     values. Long-parked debt; lands here because the next slice
+     needs real credentials.
+
+  Concurrency / vLLM moves to §13 as a deferred patch — it's a
+  performance improvement, not a milestone in itself, and only
+  matters once a real multi-room workload actually saturates
+  Ollama.
+
+- **v2.5 — Dunnes Stores MCP.** First real consumer of the v2
+  platform. Server lives at
+  `D:\dev\repos\DunnesStoresMCP\DunnesStoresMCP\McpServer\` (C# /
+  .NET 8, Selenium-driven, stdio transport via the
+  `ModelContextProtocol` C# SDK). 5 tool groups (`BrowserTools`,
+  `ShopTools`, `CartTools`, `CheckoutTools`, `CatalogTools`); a
+  singleton `BrowserSession` carries state across tool calls.
+  Integration scope:
+  - Wire via the v2 stdio adapter; declare in `servers.toml`
+    (`dotnet run --project ...` for dev; self-contained build
+    for prod).
+  - **All tool specs `untrusted=True`** — Selenium scrapes live
+    retail pages; `<external>` wrapping is mandatory.
+  - **Every side-effecting tool routed through the v2 gate
+    framework** — cart writes, checkout, login. Selenium = real
+    money. Not optional.
+  - Dunnes credentials in the v2 keyring.
+  - Per-tool timeout raised (default 8 s is too tight for
+    Selenium page loads; ~30 s for Dunnes tools).
+  - Tool-name namespacing: flat `dunnes.X` (collapse C# class
+    grouping) to stay under the ~30-tool ceiling small models
+    handle without hallucination (§7).
+  - `BrowserSession` state does not survive a GLaDOS restart —
+    cart loss on restart is accepted for v2.5, documented.
+  - Demo path: voice search ("anything on offer in dairy?") →
+    tool call → page content wrapped in `<external>` → answer.
+    Do NOT exercise checkout in the demo.
+
+- **Spotify MCP** stays carried as a future v2.x consumer of the
+  same platform. Different stack (Web API + OAuth, no Selenium),
+  so the credentials story exercises the keyring differently.
 
 - **v3 — Pi room client.** Python + PortAudio + WebSocket + AEC. systemd
   unit, auto-update from server. One Pi per room.
@@ -362,6 +413,13 @@ Each version is its own session-sized chunk. Heavy work is deferred.
 
 - **Tool-calling reliability:** benchmark Ollama vs. vLLM/llama.cpp grammar
   before v2.
+- **Concurrency / vLLM swap.** Originally part of v2; relocated when v2
+  was refocused on the stdio-MCP platform. Switch LLM backend to vLLM
+  (or llama.cpp parallel slots) when a real multi-room workload
+  actually saturates Ollama's serial generation. Today's per-room FIFO
+  queue means cross-room turns are *architecturally* parallel, but the
+  LLM backend still serialises — so the bottleneck has moved to the
+  backend, not the Organizer. Defer until measured.
 - **Skills layer:** still skipped. Reconsider when a multi-step routine
   (morning routine, weekly shop) repeatedly fumbles.
 - **Pi update channel:** systemd + `/client/latest` endpoint sketched, not
