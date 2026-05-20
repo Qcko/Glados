@@ -187,6 +187,9 @@ async def _lifespan(app: FastAPI):
                 await task
             except asyncio.CancelledError:
                 pass
+        # Stop room workers cleanly. In-flight turns receive CancelledError
+        # via their own task and run their finally-block before exit.
+        await _organizer.close()
 
 
 app = FastAPI(title="GLaDOS", version="0.1.0", lifespan=_lifespan)
@@ -234,7 +237,6 @@ async def ws_v1(ws: WebSocket) -> None:
     await ws.accept()
     client_id: str | None = None
     pipeline: AudioPipeline | None = None
-    turn_tasks: set[asyncio.Task] = set()
     try:
         binding = await _handshake(ws)
         if binding is None:
@@ -242,7 +244,7 @@ async def ws_v1(ws: WebSocket) -> None:
         client_id = binding.client_id
         await _replace_connection(client_id, ws)
         pipeline = _build_pipeline(client_id)
-        await _serve(ws, client_id, pipeline, turn_tasks)
+        await _serve(ws, client_id, pipeline)
     except WebSocketDisconnect:
         return
     finally:
@@ -250,20 +252,9 @@ async def ws_v1(ws: WebSocket) -> None:
             await pipeline.close()
         if client_id is not None and _connections.get(client_id) is ws:
             del _connections[client_id]
-        # Let in-flight turns finish so other room members still see Done.
-        # _send no-ops once the origin's ws is removed from _connections.
-        # 30 s cap prevents a misbehaving client from pinning the handler
-        # coroutine forever — Ollama is serialised, so a slow turn could
-        # otherwise hold this connection slot indefinitely.
-        if turn_tasks:
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*turn_tasks, return_exceptions=True),
-                    timeout=30.0,
-                )
-            except asyncio.TimeoutError:
-                for t in turn_tasks:
-                    t.cancel()
+        # In-flight turns continue on their room worker even after this
+        # WS goes away — other room members still see Done/Cancelled,
+        # and `_send` no-ops harmlessly for the now-disconnected client.
 
 
 def _build_pipeline(client_id: str) -> AudioPipeline:
@@ -320,7 +311,6 @@ async def _serve(
     ws: WebSocket,
     client_id: str,
     pipeline: AudioPipeline,
-    turn_tasks: set[asyncio.Task],
 ) -> None:
     while True:
         event = await ws.receive()
@@ -339,12 +329,10 @@ async def _serve(
             await _send_error(ws, "bad_message", str(e))
             continue
         if isinstance(msg, UserText):
-            # Spawn the turn so the receive loop stays responsive to
-            # follow-up frames (interrupt, more audio). The Organizer
-            # tracks the task by session_id for cancellation.
-            task = asyncio.create_task(_organizer.handle_user_text(client_id, msg.text))
-            turn_tasks.add(task)
-            task.add_done_callback(turn_tasks.discard)
+            # Enqueue on the speaker's room FIFO. Returns immediately so
+            # the receive loop stays responsive; the turn runs on the
+            # room's worker task.
+            await _organizer.handle_user_text(client_id, msg.text)
         elif isinstance(msg, Interrupt):
             await _organizer.handle_interrupt(client_id, msg.session_id)
 

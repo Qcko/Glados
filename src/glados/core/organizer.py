@@ -30,6 +30,7 @@ from .protocols import (
     TtsChunk,
     Welcome,
 )
+from .room_queues import RoomQueueManager
 from .sessions import SessionRegistry
 from .traces import TraceStore
 
@@ -80,6 +81,7 @@ class Organizer:
         binding_for_client: BindingLookup,
         clients_in_room: RoomLookup,
         tts: TTS | None = None,
+        room_queues: RoomQueueManager | None = None,
     ) -> None:
         self.llm = llm
         self.tts = tts
@@ -89,11 +91,32 @@ class Organizer:
         self.send = send
         self.binding_for_client = binding_for_client
         self.clients_in_room = clients_in_room
+        self._queues = room_queues if room_queues is not None else RoomQueueManager()
         # session_id -> (task, room_id). Lets handle_interrupt cancel the
         # right turn and route the Cancelled broadcast to the right room.
         self._inflight: dict[str, tuple[asyncio.Task, str]] = {}
 
     async def handle_user_text(self, client_id: str, text: str) -> None:
+        """Enqueue a text turn for the speaker's room. Returns once the
+        turn is in the room's FIFO; the turn itself runs on the room's
+        worker task. Same-room FIFO is enforced here; cross-room is
+        parallel (each room has its own worker)."""
+        binding = self.binding_for_client(client_id)
+        if binding is None:
+            return
+        self._queues.enqueue(
+            binding.room_id, lambda: self._run_user_text(client_id, text)
+        )
+
+    async def flush(self) -> None:
+        """Wait until every room's queue is drained. Test hook."""
+        await self._queues.flush()
+
+    async def close(self) -> None:
+        """Cancel all room workers. Server lifespan calls this on shutdown."""
+        await self._queues.close()
+
+    async def _run_user_text(self, client_id: str, text: str) -> None:
         binding = self.binding_for_client(client_id)
         if binding is None:
             return
@@ -174,16 +197,29 @@ class Organizer:
 
     async def handle_audio_text(self, client_id: str, text: str) -> None:
         """Audio-ingress entry. A short barge-in utterance (`stop`, `cancel`,
-        ...) cancels the speaker's room's in-flight turn instead of opening
-        a new one. Everything else falls through to `handle_user_text`."""
+        ...) cancels the speaker's room's in-flight turn AND drops anything
+        else queued for that room — voice "stop" means "shut up", not
+        "shut up only about this one thing." Everything else falls through
+        to `handle_user_text`.
+
+        UI Interrupt (via `handle_interrupt`) is finer-grained and does
+        NOT clear the queue — typed cancellation targets one session."""
         binding = self.binding_for_client(client_id)
         if binding is None:
             return
         if _is_barge_in(text):
+            pending = self._queues.clear(binding.room_id)
+            had_starting = self._has_active_or_starting_turn(binding.room_id)
             active = self._active_session_in_room(binding.room_id)
             if active is not None:
                 await self.handle_interrupt(client_id, active)
+            if had_starting or pending > 0:
+                # Voice "stop" with anything in flight for this room
+                # (active, just-starting, or queued) ends here. No new turn.
                 return
+            # Whisper false positive: barge-in regex matched but the room
+            # is genuinely idle. Fall through to a normal turn rather than
+            # silently swallowing user input.
         await self.handle_user_text(client_id, text)
 
     def _active_session_in_room(self, room_id: str) -> str | None:
@@ -194,6 +230,19 @@ class Organizer:
             if rid == room_id:
                 return sid
         return None
+
+    def _has_active_or_starting_turn(self, room_id: str) -> bool:
+        """`_inflight` is only populated *inside* `_run_user_text`, so there's
+        a sub-millisecond window between the worker dequeueing an action
+        and the action registering. A voice barge-in arriving in that
+        window would otherwise see `_inflight` empty + queue empty and
+        fall through to a regular turn — i.e. "stop" becomes "say stop".
+
+        `_queues._active_actions` is populated by the worker *before* it
+        awaits the action, so it closes that window."""
+        if self._active_session_in_room(room_id) is not None:
+            return True
+        return room_id in self._queues._active_actions
 
     async def handle_interrupt(self, client_id: str, session_id: str) -> None:
         binding = self.binding_for_client(client_id)

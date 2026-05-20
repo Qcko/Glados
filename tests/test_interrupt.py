@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -47,9 +48,12 @@ class SlowTTS:
         await asyncio.sleep(3600)
 
 
-def _make_organizer(
+@asynccontextmanager
+async def _make_organizer(
     bindings: list[ClientBinding], tmp: Path, llm, tts=None
-) -> tuple[Organizer, list[tuple[str, dict]]]:
+):
+    """Yields `(organizer, sink)` and guarantees `organizer.close()` so
+    room-queue workers don't leak between tests."""
     sink: list[tuple[str, dict]] = []
 
     async def send(client_id: str, msg: BaseModel) -> None:
@@ -66,69 +70,71 @@ def _make_organizer(
         binding_for_client=by_id.get,
         clients_in_room=lambda r: [b.client_id for b in bindings if b.room_id == r],
     )
-    return org, sink
+    try:
+        yield org, sink
+    finally:
+        await org.close()
 
 
 @pytest.mark.asyncio
 async def test_interrupt_cancels_inflight_turn(tmp_path: Path) -> None:
     llm = SlowLLM()
-    org, sink = _make_organizer(
+    async with _make_organizer(
         [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
         tmp_path,
         llm,
-    )
-    task = asyncio.create_task(org.handle_user_text("desk-ui", "hello"))
-    await llm.entered.wait()  # turn is mid-flight, LLM is hanging
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "hello")  # enqueue
+        await llm.entered.wait()  # worker dequeued; LLM is hanging mid-turn
 
-    welcome = next(m for _, m in sink if m["type"] == "welcome")
-    sid = welcome["session_id"]
+        welcome = next(m for _, m in sink if m["type"] == "welcome")
+        sid = welcome["session_id"]
 
-    await org.handle_interrupt("desk-ui", sid)
-    await task  # task completes normally after handling CancelledError
+        await org.handle_interrupt("desk-ui", sid)
+        await org.flush()  # wait for the cancelled turn to fully drain
 
-    types = [m["type"] for _, m in sink]
-    assert "cancelled" in types
-    assert "done" not in types
-    cancelled = next(m for _, m in sink if m["type"] == "cancelled")
-    assert cancelled["session_id"] == sid
+        types = [m["type"] for _, m in sink]
+        assert "cancelled" in types
+        assert "done" not in types
+        cancelled = next(m for _, m in sink if m["type"] == "cancelled")
+        assert cancelled["session_id"] == sid
 
 
 @pytest.mark.asyncio
 async def test_interrupt_for_unknown_session_is_noop(tmp_path: Path) -> None:
-    org, sink = _make_organizer(
+    async with _make_organizer(
         [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
         tmp_path,
         SlowLLM(),
-    )
-    await org.handle_interrupt("desk-ui", "desk:qcko:nosuch")
-    assert sink == []
+    ) as (org, sink):
+        await org.handle_interrupt("desk-ui", "desk:qcko:nosuch")
+        assert sink == []
 
 
 @pytest.mark.asyncio
 async def test_interrupt_from_foreign_room_rejected(tmp_path: Path, caplog) -> None:
     llm = SlowLLM()
-    org, sink = _make_organizer(
+    async with _make_organizer(
         [
             ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko"),
             ClientBinding(client_id="desk2-ui", room_id="desk2", role="ui", default_user="anna"),
         ],
         tmp_path,
         llm,
-    )
-    task = asyncio.create_task(org.handle_user_text("desk-ui", "hello"))
-    await llm.entered.wait()
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "hello")
+        await llm.entered.wait()
 
-    sid = next(m for _, m in sink if m["type"] == "welcome")["session_id"]
+        sid = next(m for _, m in sink if m["type"] == "welcome")["session_id"]
 
-    with caplog.at_level("WARNING"):
-        await org.handle_interrupt("desk2-ui", sid)
-    assert "interrupt rejected" in caplog.text
-    assert not any(m["type"] == "cancelled" for _, m in sink)
-    assert not task.done()
+        with caplog.at_level("WARNING"):
+            await org.handle_interrupt("desk2-ui", sid)
+        assert "interrupt rejected" in caplog.text
+        assert not any(m["type"] == "cancelled" for _, m in sink)
 
-    await org.handle_interrupt("desk-ui", sid)
-    await task
-    assert any(m["type"] == "cancelled" for _, m in sink)
+        await org.handle_interrupt("desk-ui", sid)
+        await org.flush()
+        assert any(m["type"] == "cancelled" for _, m in sink)
 
 
 @pytest.mark.asyncio
@@ -136,51 +142,56 @@ async def test_interrupt_during_tts_emits_cancelled(tmp_path: Path) -> None:
     from glados.brain.llm.fake import FakeLLM
 
     tts = SlowTTS()
-    org, sink = _make_organizer(
+    async with _make_organizer(
         [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
         tmp_path,
         FakeLLM(),
         tts=tts,
-    )
-    task = asyncio.create_task(org.handle_user_text("desk-ui", "hello there"))
-    await tts.entered.wait()  # past the LLM phase, inside _speak
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "hello there")
+        await tts.entered.wait()  # past the LLM phase, inside _speak
 
-    sid = next(m for _, m in sink if m["type"] == "welcome")["session_id"]
-    await org.handle_interrupt("desk-ui", sid)
-    await task
+        sid = next(m for _, m in sink if m["type"] == "welcome")["session_id"]
+        await org.handle_interrupt("desk-ui", sid)
+        await org.flush()
 
-    types = [m["type"] for _, m in sink]
-    assert "tts_chunk" in types
-    assert types[-1] == "cancelled"
-    assert "done" not in types
+        types = [m["type"] for _, m in sink]
+        assert "tts_chunk" in types
+        assert types[-1] == "cancelled"
+        assert "done" not in types
 
 
 @pytest.mark.asyncio
 async def test_interrupt_after_done_is_noop(tmp_path: Path) -> None:
     from glados.brain.llm.fake import FakeLLM
 
-    org, sink = _make_organizer(
+    async with _make_organizer(
         [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
         tmp_path,
         FakeLLM(),
-    )
-    await org.handle_user_text("desk-ui", "hello")  # completes synchronously
-    sid = next(m for _, m in sink if m["type"] == "welcome")["session_id"]
-    before = len(sink)
-    await org.handle_interrupt("desk-ui", sid)
-    assert len(sink) == before
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "hello")
+        await org.flush()
+        sid = next(m for _, m in sink if m["type"] == "welcome")["session_id"]
+        before = len(sink)
+        await org.handle_interrupt("desk-ui", sid)
+        assert len(sink) == before
 
 
 # ---- End-to-end via FastAPI TestClient ---------------------------------
 
 
 @pytest.fixture(scope="module")
-def http_client() -> TestClient:
+def http_client():
+    """See test_audio_pipeline.py for the rationale on context-managing
+    TestClient — needed so each module's room workers are torn down before
+    the next module's TestClient creates its own event loop."""
     os.environ["GLADOS_CONFIG_DIR"] = str(Path(__file__).parent.parent / "configs")
     os.environ["GLADOS_LLM_BACKEND"] = "fake"
     from glados.core.server import app
 
-    return TestClient(app)
+    with TestClient(app) as client:
+        yield client
 
 
 def test_e2e_interrupt_emits_cancelled(http_client: TestClient, monkeypatch) -> None:

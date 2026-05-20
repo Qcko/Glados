@@ -214,12 +214,18 @@ async def test_pipeline_close_drains_in_flight(tmp_path: Path) -> None:
 
 
 @pytest.fixture(scope="module")
-def http_client() -> TestClient:
+def http_client():
+    """Module-scoped TestClient that triggers app lifespan on enter/exit.
+    Shutdown calls `_organizer.close()` which clears per-room queues and
+    workers — without that, workers from this module's event loop persist
+    and the next module's TestClient sees cross-loop queue state, which
+    deadlocks on enqueue."""
     os.environ["GLADOS_CONFIG_DIR"] = str(Path(__file__).parent.parent / "configs")
     os.environ["GLADOS_LLM_BACKEND"] = "fake"
     from glados.core.server import app
 
-    return TestClient(app)
+    with TestClient(app) as client:
+        yield client
 
 
 def test_e2e_audio_drives_fake_transcript_into_organizer(

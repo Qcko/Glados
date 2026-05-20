@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -102,7 +103,8 @@ async def test_mcp_dispatch_timeout() -> None:
 # ---- Organizer ----------------------------------------------------------
 
 
-def _make_organizer(bindings: list[ClientBinding], tmp: Path) -> tuple[Organizer, list]:
+@asynccontextmanager
+async def _make_organizer(bindings: list[ClientBinding], tmp: Path):
     sink: list[tuple[str, dict]] = []
 
     async def send(client_id: str, msg: BaseModel) -> None:
@@ -127,46 +129,50 @@ def _make_organizer(bindings: list[ClientBinding], tmp: Path) -> tuple[Organizer
         binding_for_client=binding_for,
         clients_in_room=in_room,
     )
-    return organizer, sink
+    try:
+        yield organizer, sink
+    finally:
+        await organizer.close()
 
 
 @pytest.mark.asyncio
 async def test_organizer_runs_tool_loop(tmp_path: Path) -> None:
-    org, sink = _make_organizer(
+    async with _make_organizer(
         [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
         tmp_path,
-    )
-    await org.handle_user_text("desk-ui", "what time is it?")
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "what time is it?")
+        await org.flush()
 
-    types = [m["type"] for _, m in sink]
-    assert types == ["welcome", "tool_call", "tool_result", "assistant_delta", "done"]
-    session_ids = {m["session_id"] for _, m in sink if "session_id" in m}
-    assert len(session_ids) == 1
+        types = [m["type"] for _, m in sink]
+        assert types == ["welcome", "tool_call", "tool_result", "assistant_delta", "done"]
+        session_ids = {m["session_id"] for _, m in sink if "session_id" in m}
+        assert len(session_ids) == 1
 
 
 @pytest.mark.asyncio
 async def test_organizer_isolates_rooms(tmp_path: Path) -> None:
-    org, sink = _make_organizer(
+    async with _make_organizer(
         [
             ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko"),
             ClientBinding(client_id="desk2-ui", room_id="desk2", role="ui", default_user="anna"),
         ],
         tmp_path,
-    )
-    await asyncio.gather(
-        org.handle_user_text("desk-ui", "what time is it?"),
-        org.handle_user_text("desk2-ui", "hello"),
-    )
-    desk_msgs = [m for cid, m in sink if cid == "desk-ui"]
-    desk2_msgs = [m for cid, m in sink if cid == "desk2-ui"]
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "what time is it?")
+        await org.handle_user_text("desk2-ui", "hello")
+        await org.flush()
 
-    desk_sessions = {m["session_id"] for m in desk_msgs}
-    desk2_sessions = {m["session_id"] for m in desk2_msgs}
-    assert desk_sessions.isdisjoint(desk2_sessions)
-    assert all(s.startswith("desk:qcko") for s in desk_sessions)
-    assert all(s.startswith("desk2:anna") for s in desk2_sessions)
-    assert "tool_call" in {m["type"] for m in desk_msgs}
-    assert "tool_call" not in {m["type"] for m in desk2_msgs}
+        desk_msgs = [m for cid, m in sink if cid == "desk-ui"]
+        desk2_msgs = [m for cid, m in sink if cid == "desk2-ui"]
+
+        desk_sessions = {m["session_id"] for m in desk_msgs}
+        desk2_sessions = {m["session_id"] for m in desk2_msgs}
+        assert desk_sessions.isdisjoint(desk2_sessions)
+        assert all(s.startswith("desk:qcko") for s in desk_sessions)
+        assert all(s.startswith("desk2:anna") for s in desk2_sessions)
+        assert "tool_call" in {m["type"] for m in desk_msgs}
+        assert "tool_call" not in {m["type"] for m in desk2_msgs}
 
 
 # ---- Trace writer -------------------------------------------------------
@@ -207,13 +213,17 @@ async def test_organizer_handles_tool_loop_exhaustion(tmp_path: Path) -> None:
         binding_for_client={b.client_id: b for b in bindings}.get,
         clients_in_room=lambda r: [b.client_id for b in bindings if b.room_id == r],
     )
-    await org.handle_user_text("desk-ui", "loop forever")
-    types = [m["type"] for _, m in sink]
-    assert types.count("tool_call") >= 8
-    assert any(
-        m["type"] == "assistant_delta" and "stuck" in m["text"] for _, m in sink
-    )
-    assert types[-1] == "done"
+    try:
+        await org.handle_user_text("desk-ui", "loop forever")
+        await org.flush()
+        types = [m["type"] for _, m in sink]
+        assert types.count("tool_call") >= 8
+        assert any(
+            m["type"] == "assistant_delta" and "stuck" in m["text"] for _, m in sink
+        )
+        assert types[-1] == "done"
+    finally:
+        await org.close()
 
 
 def test_trace_writes_jsonl(tmp_path: Path) -> None:
@@ -232,12 +242,16 @@ def test_trace_writes_jsonl(tmp_path: Path) -> None:
 
 
 @pytest.fixture(scope="module")
-def http_client() -> TestClient:
+def http_client():
+    """See test_audio_pipeline.py for the rationale on context-managing
+    TestClient — needed so each module's room workers are torn down before
+    the next module's TestClient creates its own event loop."""
     os.environ["GLADOS_CONFIG_DIR"] = str(Path(__file__).parent.parent / "configs")
     os.environ["GLADOS_LLM_BACKEND"] = "fake"
     from glados.core.server import app
 
-    return TestClient(app)
+    with TestClient(app) as client:
+        yield client
 
 
 def test_e2e_time_question(http_client: TestClient) -> None:

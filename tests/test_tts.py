@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -46,7 +47,8 @@ async def test_fake_tts_skips_empty_text() -> None:
 # ---- Organizer + FakeTTS -----------------------------------------------
 
 
-def _make_organizer_with_tts(tts, tmp_path: Path) -> tuple[Organizer, list]:
+@asynccontextmanager
+async def _make_organizer_with_tts(tts, tmp_path: Path):
     sink: list[tuple[str, dict]] = []
 
     async def send(client_id: str, msg: BaseModel) -> None:
@@ -67,23 +69,26 @@ def _make_organizer_with_tts(tts, tmp_path: Path) -> tuple[Organizer, list]:
         binding_for_client=by_id.get,
         clients_in_room=lambda r: [b.client_id for b in bindings if b.room_id == r],
     )
-    return organizer, sink
+    try:
+        yield organizer, sink
+    finally:
+        await organizer.close()
 
 
 @pytest.mark.asyncio
 async def test_organizer_emits_tts_chunk_after_assistant_delta(tmp_path: Path) -> None:
     tts = FakeTTS(sample_rate=22_050, samples_per_chunk=2)
-    org, sink = _make_organizer_with_tts(tts, tmp_path)
+    async with _make_organizer_with_tts(tts, tmp_path) as (org, sink):
+        await org.handle_user_text("desk-ui", "hello there")
+        await org.flush()
 
-    await org.handle_user_text("desk-ui", "hello there")
-
-    types = [m["type"] for _, m in sink]
-    assert types == ["welcome", "assistant_delta", "tts_chunk", "done"]
-    tts_msg = next(m for _, m in sink if m["type"] == "tts_chunk")
-    assert tts_msg["seq"] == 0
-    assert tts_msg["sample_rate"] == 22_050
-    assert len(base64.b64decode(tts_msg["pcm_b64"])) == 4  # 2 int16 samples
-    assert tts.calls == ["echo: hello there"]
+        types = [m["type"] for _, m in sink]
+        assert types == ["welcome", "assistant_delta", "tts_chunk", "done"]
+        tts_msg = next(m for _, m in sink if m["type"] == "tts_chunk")
+        assert tts_msg["seq"] == 0
+        assert tts_msg["sample_rate"] == 22_050
+        assert len(base64.b64decode(tts_msg["pcm_b64"])) == 4  # 2 int16 samples
+        assert tts.calls == ["echo: hello there"]
 
 
 @pytest.mark.asyncio
@@ -97,24 +102,26 @@ async def test_organizer_skips_tts_when_no_text(tmp_path: Path) -> None:
             yield LLMText(text="")
 
     tts = FakeTTS()
-    org, sink = _make_organizer_with_tts(tts, tmp_path)
-    org.llm = SilentLLM()
+    async with _make_organizer_with_tts(tts, tmp_path) as (org, sink):
+        org.llm = SilentLLM()
 
-    await org.handle_user_text("desk-ui", "hi")
-    types = [m["type"] for _, m in sink]
-    assert "tts_chunk" not in types
-    # FakeTTS.calls is appended on first iteration; for a guarded skip we
-    # never iterate, so the empty call is filtered before synthesize is
-    # reached.
-    assert tts.calls == []
+        await org.handle_user_text("desk-ui", "hi")
+        await org.flush()
+        types = [m["type"] for _, m in sink]
+        assert "tts_chunk" not in types
+        # FakeTTS.calls is appended on first iteration; for a guarded skip we
+        # never iterate, so the empty call is filtered before synthesize is
+        # reached.
+        assert tts.calls == []
 
 
 @pytest.mark.asyncio
 async def test_organizer_with_no_tts_still_completes(tmp_path: Path) -> None:
-    org, sink = _make_organizer_with_tts(tts=None, tmp_path=tmp_path)
-    await org.handle_user_text("desk-ui", "hello there")
-    types = [m["type"] for _, m in sink]
-    assert types == ["welcome", "assistant_delta", "done"]
+    async with _make_organizer_with_tts(tts=None, tmp_path=tmp_path) as (org, sink):
+        await org.handle_user_text("desk-ui", "hello there")
+        await org.flush()
+        types = [m["type"] for _, m in sink]
+        assert types == ["welcome", "assistant_delta", "done"]
 
 
 # ---- PiperTTS smoke (env-gated) ----------------------------------------

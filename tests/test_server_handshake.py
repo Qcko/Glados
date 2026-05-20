@@ -10,13 +10,17 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture(scope="module")
-def client() -> TestClient:
+def client():
+    """See test_audio_pipeline.py for the rationale on context-managing
+    TestClient — needed so each module's room workers are torn down before
+    the next module's TestClient creates its own event loop."""
     os.environ["GLADOS_CONFIG_DIR"] = str(Path(__file__).parent.parent / "configs")
     os.environ["GLADOS_LLM_BACKEND"] = "fake"
     # Import after env vars are set so server picks up correct config.
     from glados.core.server import app
 
-    return TestClient(app)
+    with TestClient(app) as c:
+        yield c
 
 
 def test_healthz(client: TestClient) -> None:
