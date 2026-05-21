@@ -124,6 +124,143 @@ async def test_organizer_with_no_tts_still_completes(tmp_path: Path) -> None:
         assert types == ["welcome", "assistant_delta", "done"]
 
 
+# ---- PiperTTS lazy-load (no real piper / onnx required) ----------------
+#
+# Construction must be cheap. The voice download (~110 MB cold) and the
+# onnx model load happen on first `synthesize()` via background threads,
+# so the asyncio loop is never blocked. Tests stub both the `piper`
+# module and `_ensure_voice` so they run offline and instantly.
+
+
+@pytest.fixture
+def _fake_piper(monkeypatch):
+    """Inject a fake `piper` module into `sys.modules` so
+    `from piper import PiperVoice` (deferred inside `_ensure_loaded`)
+    finds our stub. Also stubs `_ensure_voice` to skip the disk check
+    and `PiperVoice.load` to count calls.
+
+    Returns a small handle exposing call counts on both."""
+    import sys
+    import types as _types
+
+    from glados.audio.tts import piper as piper_mod
+    from glados.core.adapters import TtsChunkOut
+
+    class _FakeVoice:
+        def synthesize(self, text):
+            class _C:
+                audio_int16_bytes = b"\x00\x00"
+                sample_rate = 22_050
+
+            yield _C()
+
+    class _CountingLoader:
+        load_calls = 0
+
+        @classmethod
+        def load(cls, _onnx_path):
+            cls.load_calls += 1
+            return _FakeVoice()
+
+    fake_module = _types.ModuleType("piper")
+    fake_module.PiperVoice = _CountingLoader
+    monkeypatch.setitem(sys.modules, "piper", fake_module)
+
+    ensure_calls = []
+
+    def _fake_ensure(voice, voices_dir):
+        ensure_calls.append((voice, voices_dir))
+        return Path(voices_dir) / f"{voice}.onnx"
+
+    monkeypatch.setattr(piper_mod, "_ensure_voice", _fake_ensure)
+
+    class _Handle:
+        @property
+        def ensure_calls(self):
+            return ensure_calls
+
+        @property
+        def load_calls(self):
+            return _CountingLoader.load_calls
+
+    return _Handle()
+
+
+def test_piper_construction_does_no_work(_fake_piper, tmp_path: Path) -> None:
+    """`__init__` must not download or load — otherwise the asyncio loop
+    is blocked at app-build time. The whole point of this slice."""
+    from glados.audio.tts.piper import PiperTTS
+
+    PiperTTS(voice="en_GB-cori-high", voices_dir=tmp_path)
+    assert _fake_piper.ensure_calls == [], "construction must not check disk"
+    assert _fake_piper.load_calls == 0, "construction must not load model"
+
+
+@pytest.mark.asyncio
+async def test_piper_first_synthesize_triggers_load(_fake_piper, tmp_path: Path) -> None:
+    from glados.audio.tts.piper import PiperTTS
+
+    tts = PiperTTS(voice="en_GB-cori-high", voices_dir=tmp_path)
+    chunks = [c async for c in tts.synthesize("hi")]
+    assert chunks, "fake voice yielded no chunks"
+    assert len(_fake_piper.ensure_calls) == 1
+    assert _fake_piper.load_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_piper_repeat_synthesize_does_not_reload(_fake_piper, tmp_path: Path) -> None:
+    from glados.audio.tts.piper import PiperTTS
+
+    tts = PiperTTS(voice="en_GB-cori-high", voices_dir=tmp_path)
+    async for _ in tts.synthesize("hi"):
+        pass
+    async for _ in tts.synthesize("there"):
+        pass
+    # Both calls share the loaded voice — no second load.
+    assert _fake_piper.load_calls == 1
+    assert len(_fake_piper.ensure_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_piper_concurrent_first_synth_serialises_load(
+    _fake_piper, tmp_path: Path
+) -> None:
+    """Two concurrent first-synthesize calls must load the voice exactly
+    once. Without the asyncio.Lock + double-check, both would race past
+    the `if self._voice is not None` guard and call `PiperVoice.load`
+    twice — wasted work, and on cold start, two parallel ~110 MB
+    downloads."""
+    import asyncio
+
+    from glados.audio.tts.piper import PiperTTS
+
+    tts = PiperTTS(voice="en_GB-cori-high", voices_dir=tmp_path)
+
+    async def drain(text):
+        async for _ in tts.synthesize(text):
+            pass
+
+    await asyncio.gather(drain("one"), drain("two"))
+    assert _fake_piper.load_calls == 1, (
+        f"expected exactly one load under concurrent first-synth, "
+        f"got {_fake_piper.load_calls}"
+    )
+    assert len(_fake_piper.ensure_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_piper_empty_text_does_not_load(_fake_piper, tmp_path: Path) -> None:
+    """`synthesize("")` returns immediately without touching the voice —
+    no point in downloading 110 MB to say nothing."""
+    from glados.audio.tts.piper import PiperTTS
+
+    tts = PiperTTS(voice="en_GB-cori-high", voices_dir=tmp_path)
+    chunks = [c async for c in tts.synthesize("")]
+    assert chunks == []
+    assert _fake_piper.load_calls == 0
+    assert _fake_piper.ensure_calls == []
+
+
 # ---- PiperTTS smoke (env-gated) ----------------------------------------
 
 
