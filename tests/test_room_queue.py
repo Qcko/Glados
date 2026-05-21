@@ -290,57 +290,83 @@ async def test_voice_barge_in_clears_room_queue(tmp_path: Path) -> None:
         assert "cancelled" in types
 
 
-@pytest.mark.skip(
-    reason="Flaky on Windows + Python 3.12 asyncio: the SlowStartLLM "
-    "generator that suspends before its first yield interacts badly with "
-    "aclosing/cancel — sometimes the action_task can't be reliably "
-    "cancelled and close() hangs. The race the test claims to cover "
-    "(barge-in during the dequeue→_inflight window) is also not really "
-    "exercised — by the time the test sleeps once, `_inflight` is already "
-    "populated, so we're testing post-registration cancellation, not the "
-    "race. Carrying as a known-flaky until rewritten with a tighter "
-    "scheduling primitive (e.g. an Event the action sets *between* "
-    "create_task and _inflight write)."
-)
 @pytest.mark.asyncio
 async def test_barge_in_during_action_startup_window(tmp_path: Path) -> None:
-    """Race window: between the worker dequeueing an action and the action
-    body registering into `_inflight`, voice barge-in could see "no active
-    session, empty queue" and fall through to a regular turn — i.e. "stop"
-    becomes "say stop". `_active_actions` (worker-set before await) closes
-    that window."""
+    """Race window: between the worker creating an action_task (and
+    assigning `_active_actions[room]`) and the action body actually
+    registering into `_inflight`, a voice barge-in could see "no active
+    session, empty queue" and fall through to a regular turn — i.e.
+    "stop" becomes a turn that says stop. `_active_actions` (set by the
+    worker pre-await) closes that window; `_has_active_or_starting_turn`
+    consults it.
 
-    class SlowStartLLM:
-        """First call hangs *before* yielding anything — the action runs
-        but the LLM hasn't started streaming, so the test can race the
-        barge-in into the pre-registration window."""
+    Test strategy: bypass `handle_user_text` and `enqueue` directly with
+    a gated action that pauses on an `asyncio.Event` before running
+    anything. That deterministically reproduces the race window — the
+    worker has the action in `_active_actions` but the body has done
+    nothing, so `_inflight` is empty. Then we fire a voice barge-in and
+    assert no new turn opened. If `_has_active_or_starting_turn` only
+    consulted `_inflight`, this would silently spawn a "say stop" turn
+    and the welcome count would be 1."""
 
-        def __init__(self) -> None:
-            self.calls = 0
+    pause = asyncio.Event()
 
-        async def chat(self, messages, tools):
-            self.calls += 1
-            await asyncio.sleep(3600)
-            yield  # never reached  # pragma: no cover
+    async def gated() -> None:
+        """Stand-in for `_run_user_text`: never reaches the body that
+        would register into `_inflight`. Held until `pause.set()`."""
+        await pause.wait()
 
     async with _make_organizer(
         [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
         tmp_path,
-        SlowStartLLM(),
+        FakeLLM(),  # unused — `gated` never reaches LLM
     ) as (org, sink):
-        await org.handle_user_text("desk-ui", "first")
-        # Yield once so the worker dequeues and creates the action task,
-        # but the action hasn't yet entered _inflight (it's only stamped
-        # right before the LLM call). Without _active_actions, the next
-        # barge-in would fall through.
+        org._queues.enqueue("desk", gated)
+        # Let the worker dequeue, create action_task, assign
+        # `_active_actions[desk]`, and yield at `await action_task`.
+        # action_task then runs to `pause.wait()` and suspends.
+        # Two ticks is enough on all event loops; one tick may not be
+        # because the test and worker can race on the first ready
+        # batch.
         await asyncio.sleep(0)
-        await org.handle_audio_text("desk-ui", "stop")
-        await org.flush()
+        await asyncio.sleep(0)
 
-        # The "stop" must NOT have produced a second welcome.
+        # Race window precondition checks. Without these, a regression
+        # that simply doesn't enter the window would silently pass.
+        assert "desk" in org._queues._active_actions, (
+            "race precondition: worker must have populated _active_actions"
+        )
+        assert not any(rid == "desk" for _, rid in org._inflight.values()), (
+            "race precondition: _inflight must still be empty for desk"
+        )
+        assert org._queues.queue_depth("desk") == 0, (
+            "race precondition: queue empty after worker dequeued"
+        )
+
+        # The actual test: voice "stop" in the race window.
+        await org.handle_audio_text("desk-ui", "stop")
+
+        # The barge-in could have either (a) returned silently because
+        # the room had an active-or-starting turn, or (b) fallen through
+        # to `handle_user_text` and enqueued a brand-new turn behind the
+        # gated one. We can't tell the difference yet because the new
+        # turn (if any) would queue behind `gated` and not run until we
+        # release. So queue-depth is the sentinel here.
+        assert org._queues.queue_depth("desk") == 0, (
+            "barge-in in startup window must not enqueue a follow-up "
+            "turn — `_has_active_or_starting_turn` must consult "
+            "`_active_actions`, not just `_inflight`. Queue depth = "
+            f"{org._queues.queue_depth('desk')}"
+        )
+
+        # Release the gate so the worker drains cleanly. After flush(),
+        # we can also assert no welcome ever appeared (the gated action
+        # doesn't broadcast anything — only real `_run_user_text` does).
+        pause.set()
+        await org.flush()
         welcomes = [m for _, m in sink if m["type"] == "welcome"]
-        assert len(welcomes) <= 1, (
-            f"barge-in in startup window must not spawn a new turn, got "
+        assert len(welcomes) == 0, (
+            f"no real turn was supposed to run, but a welcome appeared: "
             f"{[m for _, m in sink]}"
         )
 
