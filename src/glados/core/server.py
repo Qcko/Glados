@@ -17,6 +17,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Callable
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response
@@ -263,6 +264,11 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     app.state.stt = stt
     app.state.tts = tts
     app.state.llm = llm
+    # VAD has per-stream buffer state, so we hand `_build_pipeline` a
+    # factory rather than an instance and build fresh per connection.
+    # Stored on state so tests can swap it post-`build_app()` the same
+    # way they swap stt/tts.
+    app.state.vad_factory = _build_vad
 
     _register_routes(app)
     return app
@@ -300,7 +306,11 @@ def _register_routes(app: FastAPI) -> None:
             client_id = binding.client_id
             await _replace_connection(state.connections, client_id, ws)
             pipeline = _build_pipeline(
-                state.glados_cfg, state.stt, state.organizer, client_id
+                state.glados_cfg,
+                state.stt,
+                state.organizer,
+                client_id,
+                state.vad_factory,
             )
             await _serve(ws, client_id, pipeline, state.organizer)
         except WebSocketDisconnect:
@@ -324,6 +334,7 @@ def _build_pipeline(
     stt: STT,
     organizer: Organizer,
     client_id: str,
+    vad_factory: Callable[[VADConfig], VAD],
 ) -> AudioPipeline:
     sink = (
         AudioSink(glados_cfg.server.traces_dir, client_id)
@@ -336,7 +347,7 @@ def _build_pipeline(
 
     return AudioPipeline(
         sink=sink,
-        vad=_build_vad(glados_cfg.vad),
+        vad=vad_factory(glados_cfg.vad),
         stt=stt,
         on_utterance=on_utterance,
     )
