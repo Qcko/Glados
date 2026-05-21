@@ -193,6 +193,27 @@ async def test_tool_args_string_decoded() -> None:
 
 
 @pytest.mark.asyncio
+async def test_client_reused_across_chat_calls() -> None:
+    """Pooling: each chat() must reuse the same AsyncClient so httpx keep-alive
+    sockets to Ollama survive across turns, not be torn down per call."""
+    body = _ndjson({"message": {"content": "ok"}, "done": True})
+    adapter = OllamaLLM(transport=_mock_transport(body))
+    await _collect(adapter, [LLMMessage(role="user", content="a")], [])
+    client_after_first = adapter._client
+    await _collect(adapter, [LLMMessage(role="user", content="b")], [])
+    assert adapter._client is client_after_first is not None
+    await adapter.aclose()
+    assert adapter._client is None
+
+
+@pytest.mark.asyncio
+async def test_aclose_is_idempotent() -> None:
+    adapter = OllamaLLM(transport=_mock_transport(_ndjson()))
+    await adapter.aclose()  # never used
+    await adapter.aclose()  # second call must not raise
+
+
+@pytest.mark.asyncio
 async def test_request_payload_shape() -> None:
     captured: list[dict] = []
     body = _ndjson({"message": {"content": "ok"}, "done": True})

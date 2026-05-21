@@ -242,6 +242,11 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             # Stop room workers cleanly. In-flight turns receive CancelledError
             # via their own task and run their finally-block before exit.
             await _app.state.organizer.close()
+            # Close LLM HTTP client (OllamaLLM holds a pooled AsyncClient).
+            # Fakes don't expose aclose — skip silently.
+            llm_aclose = getattr(_app.state.llm, "aclose", None)
+            if llm_aclose is not None:
+                await llm_aclose()
 
     app = FastAPI(title="GLaDOS", version="0.1.0", lifespan=lifespan)
 
@@ -257,6 +262,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     app.state.mcp = mcp
     app.state.stt = stt
     app.state.tts = tts
+    app.state.llm = llm
 
     _register_routes(app)
     return app

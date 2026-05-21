@@ -37,6 +37,28 @@ class OllamaLLM:
         self._temperature = temperature
         self._timeout = timeout
         self._transport = transport
+        # Lazily constructed on first `chat()` so we bind to the running
+        # event loop rather than whichever loop happened to be current at
+        # build time. Reused across calls — httpx keeps a connection pool
+        # internally, so streaming requests reuse keep-alive sockets to
+        # Ollama instead of doing TCP+HTTP setup per turn.
+        self._client: httpx.AsyncClient | None = None
+
+    def _ensure_client(self) -> httpx.AsyncClient:
+        # Intentionally sync: the None-check and assignment cannot interleave
+        # without an `await` between them, so concurrent first-`chat()` calls
+        # share one client. Do NOT add `await` here — that would open a
+        # double-construct window and leak a socket pool.
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=self._timeout, transport=self._transport
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def chat(
         self, messages: list[LLMMessage], tools: list[ToolSpec]
@@ -51,20 +73,18 @@ class OllamaLLM:
         if name_map:
             payload["tools"] = [self._to_ollama_tool(k, v) for k, v in name_map.items()]
 
-        async with httpx.AsyncClient(
-            timeout=self._timeout, transport=self._transport
-        ) as client:
-            async with client.stream(
-                "POST", f"{self._host}/api/chat", json=payload
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    chunk = json.loads(line)
-                    for event in self._events_from_chunk(chunk, name_map):
-                        yield event
+        client = self._ensure_client()
+        async with client.stream(
+            "POST", f"{self._host}/api/chat", json=payload
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                line = line.strip()
+                if not line:
+                    continue
+                chunk = json.loads(line)
+                for event in self._events_from_chunk(chunk, name_map):
+                    yield event
 
     @staticmethod
     def _sanitise(spec: ToolSpec) -> str:
