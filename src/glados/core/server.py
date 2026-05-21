@@ -3,6 +3,11 @@
 Handshake → register client connection → forward `user_text` to the
 Organizer. The Organizer owns sessions, tool dispatch, and egress; this file
 only handles wire I/O and connection bookkeeping.
+
+Construction is done by `build_app(config_dir)` — a factory that wires
+config, components, and the Organizer into a fresh `FastAPI` instance with
+all runtime state on `app.state`. Tests can build isolated apps; production
+imports the module-level `app = build_app()` default.
 """
 
 from __future__ import annotations
@@ -13,7 +18,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -53,16 +58,37 @@ from .traces import TraceStore
 
 log = logging.getLogger(__name__)
 
-CONFIG_DIR = Path(os.environ.get("GLADOS_CONFIG_DIR", "configs"))
+CONFIG_DIR_ENV = "GLADOS_CONFIG_DIR"
 
 # 100 ms of silence at 16 kHz mono int16. Whisper rejects empty PCM but
 # accepts silence; the first call still pays the model-warm-up cost.
 _WARMUP_PCM = b"\x00\x00" * 1_600
 _WARMUP_TEXT = "hi"
 
-_glados_cfg: GladosConfig = load_glados_config(CONFIG_DIR / "glados.toml")
-_rooms_cfg: RoomsConfig = load_rooms_config(CONFIG_DIR / "rooms.toml")
+# Stateless validator — fine at module level.
 _client_msg = TypeAdapter(ClientMessage)
+
+# Source-checkout layout only: src/glados/core/server.py → repo root is parents[3].
+# GLaDOS is self-hosted, not pip-distributed; if that ever changes, ship the
+# built client as package data and resolve via importlib.resources.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_CLIENT_DIST = _REPO_ROOT / "client_web" / "dist"
+_CLIENT_INDEX = _CLIENT_DIST / "index.html"
+_CLIENT_ASSETS = _CLIENT_DIST / "assets"
+
+_NOT_BUILT_HTML = (
+    "<!doctype html><meta charset=utf-8><title>GLaDOS</title>"
+    "<style>body{font-family:system-ui;background:#0e0f12;color:#e6e9ef;"
+    "padding:2rem;max-width:40rem;margin:auto}"
+    "code{background:#16181d;padding:.15rem .35rem;border-radius:3px}</style>"
+    "<h1>Client not built</h1>"
+    "<p>Run <code>cd client_web &amp;&amp; npm install &amp;&amp; npm run build</code>"
+    " (or <code>npm run dev</code> for HMR on port 5173).</p>"
+)
+
+
+# ---- Component builders ------------------------------------------------
+
 
 def _build_llm(cfg: LLMConfig) -> LLM:
     if cfg.backend == "ollama":
@@ -108,52 +134,6 @@ def _build_tts(cfg: TTSConfig) -> TTS:
     return FakeTTS()
 
 
-_traces = TraceStore(_glados_cfg.server.traces_dir)
-_mcp = MCPRegistry()
-_mcp.register(NowTool())
-for _tool in TOY_TOOLS:
-    _mcp.register(_tool)
-_llm: LLM = _build_llm(_glados_cfg.llm)
-# STT and TTS shared across connections (real backends load a model on
-# construct). VAD is per-connection — it carries per-stream buffer state.
-_stt: STT = _build_stt(_glados_cfg.stt)
-_tts: TTS = _build_tts(_glados_cfg.tts)
-_connections: dict[str, WebSocket] = {}
-
-
-async def _send(client_id: str, msg: BaseModel) -> None:
-    ws = _connections.get(client_id)
-    if ws is None:
-        return
-    try:
-        await ws.send_json(msg.model_dump())
-    except Exception:
-        # Recipient went away mid-broadcast. Drop the slot so subsequent
-        # fan-outs skip it, and never let one dead client take the turn down.
-        if _connections.get(client_id) is ws:
-            del _connections[client_id]
-
-
-def _clients_in_room(room_id: str) -> list[str]:
-    return [
-        c.client_id
-        for c in _rooms_cfg.clients
-        if c.room_id == room_id and c.client_id in _connections
-    ]
-
-
-_sessions = SessionRegistry()
-_organizer = Organizer(
-    llm=_llm,
-    tts=_tts,
-    mcp=_mcp,
-    traces=_traces,
-    sessions=_sessions,
-    send=_send,
-    binding_for_client=_rooms_cfg.find,
-    clients_in_room=_clients_in_room,
-)
-
 async def _warmup(stt: STT, tts: TTS) -> None:
     """Hide first-inference latency by exercising each backend once on
     server boot. Real Whisper/Piper load weights at construct time, but
@@ -171,111 +151,194 @@ async def _warmup(stt: STT, tts: TTS) -> None:
         log.exception("TTS warmup failed (continuing — first synth may be slow)")
 
 
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
-    # Background so /healthz answers immediately and a fresh client can
-    # connect while warm-up is still finishing. The first audio utterance
-    # only benefits if warm-up completed first, but completing in 1-3 s
-    # is much better than running it inline at first use.
-    task = asyncio.create_task(_warmup(_stt, _tts))
-    try:
-        yield
-    finally:
-        if not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        # Stop room workers cleanly. In-flight turns receive CancelledError
-        # via their own task and run their finally-block before exit.
-        await _organizer.close()
+# ---- App factory -------------------------------------------------------
 
 
-app = FastAPI(title="GLaDOS", version="0.1.0", lifespan=_lifespan)
-# Source-checkout layout only: src/glados/core/server.py → repo root is parents[3].
-# GLaDOS is self-hosted, not pip-distributed; if that ever changes, ship the
-# built client as package data and resolve via importlib.resources.
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_CLIENT_DIST = _REPO_ROOT / "client_web" / "dist"
-_CLIENT_INDEX = _CLIENT_DIST / "index.html"
-_CLIENT_ASSETS = _CLIENT_DIST / "assets"
+def build_app(config_dir: Path | None = None) -> FastAPI:
+    """Build a fresh FastAPI app with all components bound to `app.state`.
 
-if _CLIENT_ASSETS.is_dir():
-    app.mount("/assets", StaticFiles(directory=_CLIENT_ASSETS), name="assets")
+    `config_dir` defaults to `$GLADOS_CONFIG_DIR` or `"configs"`. Each call
+    produces an independent app instance — no shared module-level state —
+    so tests can construct isolated apps and the lifespan cleans up
+    per-app room workers on shutdown.
+    """
+    cfg_dir = config_dir or Path(os.environ.get(CONFIG_DIR_ENV, "configs"))
+    glados_cfg = load_glados_config(cfg_dir / "glados.toml")
+    rooms_cfg = load_rooms_config(cfg_dir / "rooms.toml")
 
+    traces = TraceStore(glados_cfg.server.traces_dir)
+    mcp = MCPRegistry()
+    mcp.register(NowTool())
+    for tool in TOY_TOOLS:
+        mcp.register(tool)
+    llm = _build_llm(glados_cfg.llm)
+    # STT and TTS are shared across connections (real backends load model
+    # weights on construct). VAD is per-connection — it carries per-stream
+    # buffer state — and is built fresh in `_build_pipeline`.
+    stt = _build_stt(glados_cfg.stt)
+    tts = _build_tts(glados_cfg.tts)
+    connections: dict[str, WebSocket] = {}
 
-_NOT_BUILT_HTML = (
-    "<!doctype html><meta charset=utf-8><title>GLaDOS</title>"
-    "<style>body{font-family:system-ui;background:#0e0f12;color:#e6e9ef;"
-    "padding:2rem;max-width:40rem;margin:auto}"
-    "code{background:#16181d;padding:.15rem .35rem;border-radius:3px}</style>"
-    "<h1>Client not built</h1>"
-    "<p>Run <code>cd client_web &amp;&amp; npm install &amp;&amp; npm run build</code>"
-    " (or <code>npm run dev</code> for HMR on port 5173).</p>"
-)
-
-
-@app.get("/")
-async def index() -> Response:
-    if _CLIENT_INDEX.is_file():
-        return FileResponse(_CLIENT_INDEX)
-    return HTMLResponse(_NOT_BUILT_HTML, status_code=503)
-
-
-@app.get("/healthz")
-async def healthz() -> dict:
-    return {
-        "ok": True,
-        "rooms": len({c.room_id for c in _rooms_cfg.clients}),
-        "tools": [s.qualified for s in _mcp.specs()],
-    }
-
-
-@app.websocket("/ws/v1")
-async def ws_v1(ws: WebSocket) -> None:
-    await ws.accept()
-    client_id: str | None = None
-    pipeline: AudioPipeline | None = None
-    try:
-        binding = await _handshake(ws)
-        if binding is None:
+    async def send(client_id: str, msg: BaseModel) -> None:
+        ws = connections.get(client_id)
+        if ws is None:
             return
-        client_id = binding.client_id
-        await _replace_connection(client_id, ws)
-        pipeline = _build_pipeline(client_id)
-        await _serve(ws, client_id, pipeline)
-    except WebSocketDisconnect:
-        return
-    finally:
-        if pipeline is not None:
-            await pipeline.close()
-        if client_id is not None and _connections.get(client_id) is ws:
-            del _connections[client_id]
-        # In-flight turns continue on their room worker even after this
-        # WS goes away — other room members still see Done/Cancelled,
-        # and `_send` no-ops harmlessly for the now-disconnected client.
+        try:
+            await ws.send_json(msg.model_dump())
+        except Exception:
+            # Recipient went away mid-broadcast. Drop the slot so subsequent
+            # fan-outs skip it, and never let one dead client take the turn down.
+            if connections.get(client_id) is ws:
+                del connections[client_id]
+
+    def clients_in_room(room_id: str) -> list[str]:
+        return [
+            c.client_id
+            for c in rooms_cfg.clients
+            if c.room_id == room_id and c.client_id in connections
+        ]
+
+    sessions = SessionRegistry()
+    organizer = Organizer(
+        llm=llm,
+        tts=tts,
+        mcp=mcp,
+        traces=traces,
+        sessions=sessions,
+        send=send,
+        binding_for_client=rooms_cfg.find,
+        clients_in_room=clients_in_room,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # Background so /healthz answers immediately and a fresh client can
+        # connect while warm-up is still finishing. The first audio utterance
+        # only benefits if warm-up completed first, but completing in 1-3 s
+        # is much better than running it inline at first use.
+        #
+        # Read stt/tts from `_app.state` at startup rather than closing
+        # over the build-time locals — tests routinely swap these via
+        # `app.state.stt = fake` after `build_app()` returns and before
+        # `with TestClient(app)` fires the lifespan.
+        #
+        # Only `stt` and `tts` are safely hot-swappable this way.
+        # `app.state.organizer` is wired into the build-time `send` /
+        # `clients_in_room` closures, so replacing `app.state.organizer`
+        # would leave handlers pointing at a new Organizer while the
+        # original is still active in its workers. If a test needs a
+        # different Organizer, call `build_app()` again with a fresh
+        # config.
+        task = asyncio.create_task(_warmup(_app.state.stt, _app.state.tts))
+        try:
+            yield
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            # Stop room workers cleanly. In-flight turns receive CancelledError
+            # via their own task and run their finally-block before exit.
+            await _app.state.organizer.close()
+
+    app = FastAPI(title="GLaDOS", version="0.1.0", lifespan=lifespan)
+
+    if _CLIENT_ASSETS.is_dir():
+        app.mount("/assets", StaticFiles(directory=_CLIENT_ASSETS), name="assets")
+
+    # All runtime state lives on app.state — handlers fetch it via
+    # `ws.app.state` / `request.app.state`. No module-level singletons.
+    app.state.glados_cfg = glados_cfg
+    app.state.rooms_cfg = rooms_cfg
+    app.state.organizer = organizer
+    app.state.connections = connections
+    app.state.mcp = mcp
+    app.state.stt = stt
+    app.state.tts = tts
+
+    _register_routes(app)
+    return app
 
 
-def _build_pipeline(client_id: str) -> AudioPipeline:
+def _register_routes(app: FastAPI) -> None:
+    """Bind HTTP + WS routes to `app`. Each handler reads runtime state
+    from `app.state` rather than module globals."""
+
+    @app.get("/")
+    async def index() -> Response:
+        if _CLIENT_INDEX.is_file():
+            return FileResponse(_CLIENT_INDEX)
+        return HTMLResponse(_NOT_BUILT_HTML, status_code=503)
+
+    @app.get("/healthz")
+    async def healthz(request: Request) -> dict:
+        s = request.app.state
+        return {
+            "ok": True,
+            "rooms": len({c.room_id for c in s.rooms_cfg.clients}),
+            "tools": [spec.qualified for spec in s.mcp.specs()],
+        }
+
+    @app.websocket("/ws/v1")
+    async def ws_v1(ws: WebSocket) -> None:
+        await ws.accept()
+        state = ws.app.state
+        client_id: str | None = None
+        pipeline: AudioPipeline | None = None
+        try:
+            binding = await _handshake(ws, state.glados_cfg, state.rooms_cfg)
+            if binding is None:
+                return
+            client_id = binding.client_id
+            await _replace_connection(state.connections, client_id, ws)
+            pipeline = _build_pipeline(
+                state.glados_cfg, state.stt, state.organizer, client_id
+            )
+            await _serve(ws, client_id, pipeline, state.organizer)
+        except WebSocketDisconnect:
+            return
+        finally:
+            if pipeline is not None:
+                await pipeline.close()
+            if client_id is not None and state.connections.get(client_id) is ws:
+                del state.connections[client_id]
+            # In-flight turns continue on their room worker even after this
+            # WS goes away — other room members still see Done/Cancelled,
+            # and the closure-bound `send` no-ops harmlessly for the now-
+            # disconnected client.
+
+
+# ---- WS helpers (state passed explicitly; no module globals) -----------
+
+
+def _build_pipeline(
+    glados_cfg: GladosConfig,
+    stt: STT,
+    organizer: Organizer,
+    client_id: str,
+) -> AudioPipeline:
     sink = (
-        AudioSink(_glados_cfg.server.traces_dir, client_id)
-        if _glados_cfg.audio.wav_traces
+        AudioSink(glados_cfg.server.traces_dir, client_id)
+        if glados_cfg.audio.wav_traces
         else None
     )
 
     async def on_utterance(text: str) -> None:
-        await _organizer.handle_audio_text(client_id, text)
+        await organizer.handle_audio_text(client_id, text)
 
     return AudioPipeline(
         sink=sink,
-        vad=_build_vad(_glados_cfg.vad),
-        stt=_stt,
+        vad=_build_vad(glados_cfg.vad),
+        stt=stt,
         on_utterance=on_utterance,
     )
 
 
-async def _handshake(ws: WebSocket):
+async def _handshake(
+    ws: WebSocket, glados_cfg: GladosConfig, rooms_cfg: RoomsConfig
+):
     raw = await ws.receive_json()
     try:
         msg = _client_msg.validate_python(raw)
@@ -288,13 +351,13 @@ async def _handshake(ws: WebSocket):
         await ws.close()
         return None
 
-    expected = _glados_cfg.auth.tokens.get(msg.client_id)
+    expected = glados_cfg.auth.tokens.get(msg.client_id)
     if expected is None or expected != msg.token:
         await _send_error(ws, "auth_failed", "unknown client or bad token")
         await ws.close()
         return None
 
-    binding = _rooms_cfg.find(msg.client_id)
+    binding = rooms_cfg.find(msg.client_id)
     if binding is None:
         await _send_error(ws, "unbound_client", f"{msg.client_id} not in rooms.toml")
         await ws.close()
@@ -311,6 +374,7 @@ async def _serve(
     ws: WebSocket,
     client_id: str,
     pipeline: AudioPipeline,
+    organizer: Organizer,
 ) -> None:
     while True:
         event = await ws.receive()
@@ -332,9 +396,9 @@ async def _serve(
             # Enqueue on the speaker's room FIFO. Returns immediately so
             # the receive loop stays responsive; the turn runs on the
             # room's worker task.
-            await _organizer.handle_user_text(client_id, msg.text)
+            await organizer.handle_user_text(client_id, msg.text)
         elif isinstance(msg, Interrupt):
-            await _organizer.handle_interrupt(client_id, msg.session_id)
+            await organizer.handle_interrupt(client_id, msg.session_id)
 
 
 async def _handle_audio(ws: WebSocket, pipeline: AudioPipeline, data: bytes) -> None:
@@ -348,11 +412,23 @@ async def _send_error(ws: WebSocket, code: str, message: str) -> None:
     await ws.send_json(ErrorMessage(code=code, message=message).model_dump())
 
 
-async def _replace_connection(client_id: str, ws: WebSocket) -> None:
-    prev = _connections.get(client_id)
+async def _replace_connection(
+    connections: dict[str, WebSocket], client_id: str, ws: WebSocket
+) -> None:
+    prev = connections.get(client_id)
     if prev is not None and prev is not ws:
         try:
             await prev.close()
         except Exception:
             pass
-    _connections[client_id] = ws
+    connections[client_id] = ws
+
+
+# ---- Module-level default app (back-compat) ----------------------------
+#
+# Existing callers do `from glados.core.server import app` and hand the
+# result to uvicorn or TestClient. Built lazily at import time using the
+# default config dir. Tests that want isolation should call build_app()
+# directly with a tmp config dir.
+
+app = build_app()

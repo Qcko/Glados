@@ -276,9 +276,8 @@ def test_e2e_time_question(http_client: TestClient) -> None:
 def test_e2e_audio_frame_writes_wav(http_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import struct
     import wave
-    from glados.core import server as srv
 
-    monkeypatch.setattr(srv._glados_cfg.server, "traces_dir", tmp_path)
+    monkeypatch.setattr(http_client.app.state.glados_cfg.server, "traces_dir", tmp_path)
     samples = [0, 1000, -1000, 32767, -32768]
     pcm = b"".join(struct.pack("<h", s) for s in samples)
     frame = struct.pack(">I", 0) + pcm

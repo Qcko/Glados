@@ -195,10 +195,9 @@ def http_client():
 
 
 def test_e2e_interrupt_emits_cancelled(http_client: TestClient, monkeypatch) -> None:
-    from glados.core import server as srv
-
+    # State lives on `app.state.organizer` now, not on the module.
     slow = SlowLLM()
-    monkeypatch.setattr(srv._organizer, "llm", slow)
+    monkeypatch.setattr(http_client.app.state.organizer, "llm", slow)
 
     with http_client.websocket_connect("/ws/v1") as ws:
         ws.send_json({

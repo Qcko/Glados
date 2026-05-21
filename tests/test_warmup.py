@@ -54,23 +54,21 @@ async def test_warmup_swallows_tts_failure(caplog) -> None:
     assert stt.calls == [_WARMUP_PCM]
 
 
-def test_startup_event_schedules_warmup(monkeypatch) -> None:
-    """End-to-end via TestClient: entering the context manager fires
-    FastAPI's startup, which spawns the warmup task. After the first
-    request lands, the task has had a tick to run and both backends
-    have been called."""
+def test_startup_event_schedules_warmup() -> None:
+    """End-to-end: entering the TestClient context manager fires the
+    app's lifespan startup, which spawns the warmup task. The lifespan
+    reads stt/tts from `app.state` at startup time, so the test can
+    swap them after building the app and before the lifespan fires."""
     os.environ["GLADOS_CONFIG_DIR"] = str(Path(__file__).parent.parent / "configs")
-    from glados.core import server as srv
+    from glados.core.server import build_app
 
+    app = build_app()
     stt = FakeSTT()
     tts = FakeTTS()
-    monkeypatch.setattr(srv, "_stt", stt)
-    monkeypatch.setattr(srv, "_tts", tts)
+    app.state.stt = stt
+    app.state.tts = tts
 
-    with TestClient(srv.app) as client:
-        # First HTTP request gives the scheduled warmup task a chance to
-        # run. _on_startup creates the task; the loop runs it before the
-        # next await yields back.
+    with TestClient(app) as client:
         resp = client.get("/healthz")
         assert resp.status_code == 200
 

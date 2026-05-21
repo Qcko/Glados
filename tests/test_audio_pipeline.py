@@ -234,13 +234,14 @@ def test_e2e_audio_drives_fake_transcript_into_organizer(
     from glados.audio.vad.fake import FakeVAD as RealFakeVAD
     from glados.core import server as srv
 
-    monkeypatch.setattr(srv._glados_cfg.server, "traces_dir", tmp_path)
+    # Components live on app.state after the build_app refactor.
+    monkeypatch.setattr(http_client.app.state.glados_cfg.server, "traces_dir", tmp_path)
     # Shrink the fake utterance to a single frame so the boundary fires
     # without flooding the test with PCM.
     monkeypatch.setattr(
         srv, "_build_vad", lambda _cfg: RealFakeVAD(utterance_samples=4)
     )
-    monkeypatch.setattr(srv, "_stt", FakeSTT("what time is it?"))
+    monkeypatch.setattr(http_client.app.state, "stt", FakeSTT("what time is it?"))
 
     frame = _frame(0, [1, 2, 3, 4])
     with http_client.websocket_connect("/ws/v1") as ws:

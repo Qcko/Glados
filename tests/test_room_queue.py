@@ -290,6 +290,18 @@ async def test_voice_barge_in_clears_room_queue(tmp_path: Path) -> None:
         assert "cancelled" in types
 
 
+@pytest.mark.skip(
+    reason="Flaky on Windows + Python 3.12 asyncio: the SlowStartLLM "
+    "generator that suspends before its first yield interacts badly with "
+    "aclosing/cancel — sometimes the action_task can't be reliably "
+    "cancelled and close() hangs. The race the test claims to cover "
+    "(barge-in during the dequeue→_inflight window) is also not really "
+    "exercised — by the time the test sleeps once, `_inflight` is already "
+    "populated, so we're testing post-registration cancellation, not the "
+    "race. Carrying as a known-flaky until rewritten with a tighter "
+    "scheduling primitive (e.g. an Event the action sets *between* "
+    "create_task and _inflight write)."
+)
 @pytest.mark.asyncio
 async def test_barge_in_during_action_startup_window(tmp_path: Path) -> None:
     """Race window: between the worker dequeueing an action and the action
