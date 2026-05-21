@@ -18,7 +18,8 @@ from pydantic import BaseModel
 
 from glados.core.adapters import LLMEvent, LLMMessage, LLMToolCall, ToolSpec
 from glados.core.config import ClientBinding
-from glados.core.organizer import Organizer, _SYSTEM_PROMPT
+from glados.brain.prompts import SYSTEM_PROMPT
+from glados.core.organizer import Organizer
 from glados.core.sessions import SessionRegistry
 from glados.core.traces import TraceStore
 from glados.mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
@@ -218,5 +219,5 @@ def test_system_prompt_warns_about_external_tags() -> None:
     model what <external> means. Asserting on substrings here is fragile
     by design — if someone reflows the prompt and drops the warning the
     test fails loudly."""
-    assert "<external>" in _SYSTEM_PROMPT
-    assert "instructions" in _SYSTEM_PROMPT.lower()
+    assert "<external>" in SYSTEM_PROMPT
+    assert "instructions" in SYSTEM_PROMPT.lower()
