@@ -82,6 +82,7 @@ class Organizer:
         clients_in_room: RoomLookup,
         tts: TTS | None = None,
         room_queues: RoomQueueManager | None = None,
+        tts_cooldown_s: float = 0.200,
     ) -> None:
         self.llm = llm
         self.tts = tts
@@ -95,6 +96,29 @@ class Organizer:
         # session_id -> (task, room_id). Lets handle_interrupt cancel the
         # right turn and route the Cancelled broadcast to the right room.
         self._inflight: dict[str, tuple[asyncio.Task, str]] = {}
+        # TTS feedback gate (server-side mic-mute layer). While a room's
+        # speaker is mid-TTS — or within `_tts_cooldown_s` of finishing —
+        # non-barge-in audio transcripts from that room are dropped to
+        # prevent the speaker→mic loop self-triggering a new turn. Barge-
+        # in regex still passes through so the user can interrupt by
+        # voice. Cooldown catches the TTS tail (decay, room reverb) that
+        # the browser-side AEC may not fully suppress.
+        #
+        # The 200 ms default matches the plan in the 2026-05-20 brainstorm
+        # entry. Browser `AudioContext` buffers can trail the `Done`
+        # broadcast by 100–500 ms depending on fill, so external speakers
+        # or Pi clients (v3) may want a longer value — bump per Organizer
+        # construction once field-tested.
+        #
+        # `_speaking_rooms` is cleared and `_tts_finish_time` is stamped
+        # in `_speak`'s finally, so cancellation also arms the cooldown
+        # (in-flight audio that already crossed the WS still plays out on
+        # the client). The only path that leaks an entry in
+        # `_speaking_rooms` is hard process death before `finally` runs;
+        # asyncio cancellation always runs `finally`.
+        self._tts_cooldown_s = tts_cooldown_s
+        self._speaking_rooms: set[str] = set()
+        self._tts_finish_time: dict[str, float] = {}
 
     async def handle_user_text(self, client_id: str, text: str) -> None:
         """Enqueue a text turn for the speaker's room. Returns once the
@@ -200,7 +224,8 @@ class Organizer:
         ...) cancels the speaker's room's in-flight turn AND drops anything
         else queued for that room — voice "stop" means "shut up", not
         "shut up only about this one thing." Everything else falls through
-        to `handle_user_text`.
+        to `handle_user_text`, except when the TTS feedback gate
+        suppresses it (room is mid-TTS or in post-Done cooldown).
 
         UI Interrupt (via `handle_interrupt`) is finer-grained and does
         NOT clear the queue — typed cancellation targets one session."""
@@ -208,6 +233,9 @@ class Organizer:
         if binding is None:
             return
         if _is_barge_in(text):
+            # Barge-in always passes through the gate — that's the whole
+            # point of voice-driven interrupt. The user is allowed to say
+            # "stop" while GLaDOS is talking.
             pending = self._queues.clear(binding.room_id)
             had_starting = self._has_active_or_starting_turn(binding.room_id)
             active = self._active_session_in_room(binding.room_id)
@@ -220,7 +248,29 @@ class Organizer:
             # Whisper false positive: barge-in regex matched but the room
             # is genuinely idle. Fall through to a normal turn rather than
             # silently swallowing user input.
+        elif self._room_mic_gated(binding.room_id):
+            # Speaker→mic feedback loop guard. The browser already runs
+            # `echoCancellation: true`, but the gate is a second layer
+            # for Pi clients without `webrtc-audio-processing` and for
+            # external speakers where browser AEC is weak (ARCH §3
+            # concurrency consequences).
+            log.debug(
+                "tts gate: dropped audio from %s in %s (text=%r)",
+                client_id, binding.room_id, text,
+            )
+            return
         await self.handle_user_text(client_id, text)
+
+    def _room_mic_gated(self, room_id: str) -> bool:
+        """True if `room_id` is mid-TTS or within the post-Done cooldown
+        that catches the TTS tail (room reverb, late buffered audio that
+        beat the Done broadcast)."""
+        if room_id in self._speaking_rooms:
+            return True
+        finish = self._tts_finish_time.get(room_id)
+        if finish is None:
+            return False
+        return asyncio.get_running_loop().time() - finish < self._tts_cooldown_s
 
     def _active_session_in_room(self, room_id: str) -> str | None:
         # v1 invariant: at most one in-flight session per room (one speaker,
@@ -305,6 +355,10 @@ class Organizer:
     ) -> None:
         if self.tts is None or not text.strip():
             return
+        # Mark the room as speaking BEFORE any chunk goes out so the gate
+        # is up the moment a mic could start hearing TTS audio. Cleared
+        # in finally so cancellation still arms the post-Done cooldown.
+        self._speaking_rooms.add(room_id)
         seq = 0
         try:
             async with aclosing(self.tts.synthesize(text)) as stream:
@@ -331,6 +385,9 @@ class Organizer:
             # TTS is a side-channel — don't break the turn if synth blows up.
             log.exception("tts synthesize failed")
             trace.event("tts_error")
+        finally:
+            self._speaking_rooms.discard(room_id)
+            self._tts_finish_time[room_id] = asyncio.get_running_loop().time()
 
     async def _run_tool_calls(
         self,
