@@ -238,6 +238,21 @@ def test_trace_writes_jsonl(tmp_path: Path) -> None:
     assert parsed[0]["room_id"] == "desk"
 
 
+def test_trace_reopen_appends(tmp_path: Path) -> None:
+    """Multi-turn sessions reopen the same trace file each turn; the
+    second open must NOT truncate the first turn's events."""
+    store = TraceStore(tmp_path)
+    w1 = store.open("desk:qcko:multi")
+    w1.event("turn_start", turn=1)
+    w1.close()
+    w2 = store.open("desk:qcko:multi")
+    w2.event("turn_start", turn=2)
+    w2.close()
+    lines = (tmp_path / "desk_qcko_multi.jsonl").read_text(encoding="utf-8").splitlines()
+    parsed = [json.loads(line) for line in lines]
+    assert [p["turn"] for p in parsed] == [1, 2]
+
+
 # ---- End-to-end via FastAPI TestClient ---------------------------------
 
 

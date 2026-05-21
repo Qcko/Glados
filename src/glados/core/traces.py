@@ -1,4 +1,6 @@
-"""JSONL trace per session. One file per turn; flushed eagerly so a crash
+"""JSONL trace per session. Each turn appends to the session's file
+(`"a"` mode) so multi-turn sessions accumulate one record per file
+rather than truncating on every re-open. Flushed eagerly so a crash
 mid-turn still leaves a readable record."""
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ class TraceWriter:
     def __init__(self, path: Path) -> None:
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = path.open("w", encoding="utf-8")
+        self._fh = path.open("a", encoding="utf-8")
 
     def event(self, kind: str, /, **fields: Any) -> None:
         line = json.dumps({"ts": time.time(), "event": kind, **fields}, default=str)
