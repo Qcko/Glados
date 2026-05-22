@@ -431,14 +431,15 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   backup story).
 - **Family member onboarding UX** — pairing a new client should be one short
   code, not editing config files.
-- **Multilingual STT cost (Czech-in / English-out).** Today's
-  `distil-small.en` is English-only. Multilingual `small` is ~3× slower
-  and ~1 pt WER worse on English; `medium` handles Czech sharper but
-  blows the latency budget. Two-pass (en-only fast path + multilingual
-  fallback on low confidence) was considered and rejected as
-  overengineered — pick one multilingual model and accept the tax.
-  TTS and LLM stay English; the LLM gets a "user may speak Czech;
-  always reply in English" clause.
+- **Multilingual STT cost (Czech-in / English-out). RESOLVED.**
+  `distil-small.en` was English-only; the swap landed and the default
+  is now multilingual `small` (~3× slower, ~1 pt WER worse on English
+  vs. distil-small.en, but Czech now works). `medium` was rejected
+  for blowing the latency budget. Two-pass (en-only fast path +
+  multilingual fallback on low confidence) was considered and
+  rejected as overengineered. TTS and LLM stay English; SYSTEM_PROMPT
+  carries the "user may speak English or Czech; always reply in
+  English" clause so the LLM does the implicit translation.
 - **Voice ACL default policy.** Default-deny for unknown voices keeps
   kids and guests out by accident; default-allow is friendlier but
   defeats the kid-protection use case the moment a new family member's

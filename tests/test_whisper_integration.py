@@ -1,7 +1,7 @@
 """Wiring smoke test for WhisperSTT.
 
 Skipped when faster-whisper isn't importable. The first run downloads
-distil-small.en (~150 MB) to HF_HOME; subsequent runs are fast. We
+multilingual `small` (~450 MB) to HF_HOME; subsequent runs are fast. We
 only assert the contract: `transcribe` returns a `str` and runs the
 heavy work off the asyncio loop (via `asyncio.to_thread`). Accuracy
 is validated with the demo client end-to-end.

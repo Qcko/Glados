@@ -1,7 +1,10 @@
 """WhisperSTT: faster-whisper behind the `core.adapters.STT` Protocol.
 
-Model is loaded once on construct (defaults: distil-small.en CPU int8 —
-~150 MB download to HF_HOME, English-only, runs on consumer CPUs).
+Model is loaded once on construct (defaults: multilingual `small` CPU
+int8 — ~450 MB download to HF_HOME, supports both English and Czech
+inputs per ARCH §13). `language=None` lets the model auto-detect per
+utterance; pass a code (e.g. `"en"`) to pin a single language.
+
 `transcribe` runs the blocking inference call in a worker thread via
 `asyncio.to_thread`, so the asyncio event loop stays responsive to the
 WebSocket and the Organizer while a transcription is in flight.
@@ -17,10 +20,10 @@ class WhisperSTT:
     def __init__(
         self,
         *,
-        model: str = "distil-small.en",
+        model: str = "small",
         device: str = "cpu",
         compute_type: str = "int8",
-        language: str = "en",
+        language: str | None = None,
     ) -> None:
         from faster_whisper import WhisperModel
 

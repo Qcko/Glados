@@ -62,10 +62,12 @@ class STTConfig(BaseModel):
     # model; first call downloads the weights to HF_HOME.
     backend: Literal["fake", "faster-whisper"] = "faster-whisper"
     fake_text: str = "hello world"
-    whisper_model: str = "distil-small.en"
+    whisper_model: str = "small"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
-    whisper_language: str = "en"
+    # None = auto-detect per utterance (multilingual). Pin to a code
+    # (e.g. "en") only if you want to force one language.
+    whisper_language: str | None = None
 
 
 class TTSConfig(BaseModel):
