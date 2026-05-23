@@ -250,11 +250,11 @@ formEl.addEventListener("submit", (e) => {
   const text = inputEl.value.trim();
   if (!text) return;
   inputEl.value = "";
-  if (transport.send({ type: "user_text", text })) {
-    transcript.addUserText(text);
-  } else {
+  if (!transport.send({ type: "user_text", text })) {
     transcript.systemNote("not connected");
   }
+  // Server echoes via `user_transcript` — no local render here, so
+  // typed and voice turns flow through the same code path.
 });
 
 for (const prompt of QUICK_PROMPTS) {
@@ -262,9 +262,7 @@ for (const prompt of QUICK_PROMPTS) {
   b.type = "button";
   b.textContent = prompt;
   b.addEventListener("click", () => {
-    if (transport.send({ type: "user_text", text: prompt })) {
-      transcript.addUserText(prompt);
-    }
+    transport.send({ type: "user_text", text: prompt });
   });
   quickEl.appendChild(b);
 }

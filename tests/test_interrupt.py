@@ -212,6 +212,8 @@ def test_e2e_interrupt_emits_cancelled(http_client: TestClient, monkeypatch) -> 
         welcome = ws.receive_json()
         assert welcome["type"] == "welcome"
         sid = welcome["session_id"]
+        transcript = ws.receive_json()
+        assert transcript["type"] == "user_transcript"
         first_delta = ws.receive_json()
         assert first_delta["type"] == "assistant_delta"
 

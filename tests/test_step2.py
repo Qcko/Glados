@@ -145,7 +145,10 @@ async def test_organizer_runs_tool_loop(tmp_path: Path) -> None:
         await org.flush()
 
         types = [m["type"] for _, m in sink]
-        assert types == ["welcome", "tool_call", "tool_result", "assistant_delta", "done"]
+        assert types == [
+            "welcome", "user_transcript", "tool_call", "tool_result",
+            "assistant_delta", "done",
+        ]
         session_ids = {m["session_id"] for _, m in sink if "session_id" in m}
         assert len(session_ids) == 1
 
@@ -273,19 +276,20 @@ def test_e2e_time_question(http_client: TestClient) -> None:
     with http_client.websocket_connect("/ws/v1") as ws:
         ws.send_json(_hello("desk-ui", "desk", "dev-token-desk"))
         ws.send_json({"type": "user_text", "text": "what time is it?"})
-        msgs = [ws.receive_json() for _ in range(6)]
+        msgs = [ws.receive_json() for _ in range(7)]
     assert [m["type"] for m in msgs] == [
         "welcome",
+        "user_transcript",
         "tool_call",
         "tool_result",
         "assistant_delta",
         "tts_chunk",
         "done",
     ]
-    assert msgs[2]["ok"] is True
-    assert "iso" in msgs[2]["content"]
-    assert msgs[4]["seq"] == 0
-    assert msgs[4]["sample_rate"] == 22_050
+    assert msgs[3]["ok"] is True
+    assert "iso" in msgs[3]["content"]
+    assert msgs[5]["seq"] == 0
+    assert msgs[5]["sample_rate"] == 22_050
 
 
 def test_e2e_audio_frame_writes_wav(http_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

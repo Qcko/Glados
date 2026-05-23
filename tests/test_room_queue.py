@@ -228,6 +228,37 @@ async def test_same_room_user_text_is_fifo(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_user_transcript_broadcast_carries_source(tmp_path: Path) -> None:
+    """Every turn echoes a `user_transcript` to the room so the UI can
+    show what the server believes the user said. Typed input is tagged
+    "text"; audio-derived input is tagged "voice" — the UI flags the
+    latter so STT mistranscriptions (e.g. Czech heard as French) jump
+    out without grepping the trace."""
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        FakeLLM(),
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "typed hello")
+        await org.handle_audio_text("desk-ui", "spoken hello")
+        await org.flush()
+
+        transcripts = [m for _, m in sink if m["type"] == "user_transcript"]
+        assert len(transcripts) == 2
+        assert transcripts[0]["text"] == "typed hello"
+        assert transcripts[0]["source"] == "text"
+        assert transcripts[1]["text"] == "spoken hello"
+        assert transcripts[1]["source"] == "voice"
+
+        # Order: welcome must precede the matching user_transcript so the
+        # UI has a session_id to attach the bubble to.
+        types = [m["type"] for _, m in sink]
+        first_welcome = types.index("welcome")
+        first_transcript = types.index("user_transcript")
+        assert first_welcome < first_transcript
+
+
+@pytest.mark.asyncio
 async def test_cross_room_turns_can_overlap(tmp_path: Path) -> None:
     """Each room has its own worker; the second room's turn starts before
     the first room's turn finishes."""

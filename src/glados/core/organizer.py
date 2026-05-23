@@ -14,7 +14,7 @@ import json
 import logging
 import re
 from contextlib import aclosing
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Literal
 
 from pydantic import BaseModel
 
@@ -29,6 +29,7 @@ from .protocols import (
     ToolCall,
     ToolResult,
     TtsChunk,
+    UserTranscript,
     Welcome,
 )
 from .room_queues import RoomQueueManager
@@ -40,6 +41,7 @@ log = logging.getLogger(__name__)
 SendFn = Callable[[str, BaseModel], Awaitable[None]]
 BindingLookup = Callable[[str], ClientBinding | None]
 RoomLookup = Callable[[str], list[str]]
+UserTextSource = Literal["voice", "text"]
 
 _MAX_TOOL_LOOP = 8
 
@@ -112,16 +114,22 @@ class Organizer:
         self._speaking_rooms: set[str] = set()
         self._tts_finish_time: dict[str, float] = {}
 
-    async def handle_user_text(self, client_id: str, text: str) -> None:
-        """Enqueue a text turn for the speaker's room. Returns once the
-        turn is in the room's FIFO; the turn itself runs on the room's
+    async def handle_user_text(
+        self, client_id: str, text: str, *, source: UserTextSource = "text"
+    ) -> None:
+        """Enqueue a turn for the speaker's room. Returns once the turn
+        is in the room's FIFO; the turn itself runs on the room's
         worker task. Same-room FIFO is enforced here; cross-room is
-        parallel (each room has its own worker)."""
+        parallel (each room has its own worker).
+
+        `source` is forwarded to the broadcast `UserTranscript` so the
+        UI can render voice-derived text differently from typed text."""
         binding = self.binding_for_client(client_id)
         if binding is None:
             return
         self._queues.enqueue(
-            binding.room_id, lambda: self._run_user_text(client_id, text)
+            binding.room_id,
+            lambda: self._run_user_text(client_id, text, source=source),
         )
 
     async def flush(self) -> None:
@@ -132,7 +140,9 @@ class Organizer:
         """Cancel all room workers. Server lifespan calls this on shutdown."""
         await self._queues.close()
 
-    async def _run_user_text(self, client_id: str, text: str) -> None:
+    async def _run_user_text(
+        self, client_id: str, text: str, *, source: UserTextSource = "text"
+    ) -> None:
         binding = self.binding_for_client(client_id)
         if binding is None:
             return
@@ -159,8 +169,14 @@ class Organizer:
                 speaker_id=session.speaker_id,
                 origin_client=client_id,
             )
-            trace.event("user_text", text=text)
+            trace.event("user_text", text=text, source=source)
             await self._broadcast(session.room_id, Welcome(session_id=session.session_id))
+            await self._broadcast(
+                session.room_id,
+                UserTranscript(
+                    session_id=session.session_id, text=text, source=source
+                ),
+            )
 
             messages: list[LLMMessage] = [
                 LLMMessage(role="system", content=SYSTEM_PROMPT),
@@ -251,7 +267,7 @@ class Organizer:
                 client_id, binding.room_id, text,
             )
             return
-        await self.handle_user_text(client_id, text)
+        await self.handle_user_text(client_id, text, source="voice")
 
     def _room_mic_gated(self, room_id: str) -> bool:
         """True if `room_id` is mid-TTS or within the post-Done cooldown

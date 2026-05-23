@@ -51,6 +51,12 @@ header button.disconnect { background: var(--error); color: #fff; }
   white-space: pre-wrap; word-break: break-word; line-height: 1.4;
 }
 .row.user .bubble { background: rgba(74,163,255,.18); border-color: rgba(74,163,255,.4); }
+.row.user.voice .bubble { font-style: italic; }
+.row.user.voice .bubble::before {
+  content: "voice "; font-style: normal; font-size: .65rem;
+  color: var(--muted); letter-spacing: .05em;
+  text-transform: uppercase; margin-right: .35rem;
+}
 .row.assistant .bubble { background: rgba(121,224,138,.12); border-color: rgba(121,224,138,.35); }
 .row.tool .bubble {
   background: rgba(212,164,55,.10); border-color: rgba(212,164,55,.35);

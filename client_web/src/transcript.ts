@@ -9,15 +9,19 @@ export class Transcript {
 
   constructor(private readonly root: HTMLElement) {}
 
-  addUserText(text: string): void {
-    this.row("user", text);
-  }
-
   ingest(msg: ServerMessage): void {
     switch (msg.type) {
       case "welcome":
         this.row("system", `session ${msg.session_id}`);
         break;
+      case "user_transcript": {
+        // Server echoes what it believes the user said. Voice-derived
+        // text is tagged so the UI can flag STT mistranscriptions at a
+        // glance (the whole reason this event exists).
+        const bubble = this.row("user", msg.text);
+        if (msg.source === "voice") bubble.parentElement?.classList.add("voice");
+        break;
+      }
       case "assistant_delta": {
         let bubble = this.liveBubbles.get(msg.session_id);
         if (!bubble) {

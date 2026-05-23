@@ -257,10 +257,13 @@ def test_e2e_audio_drives_fake_transcript_into_organizer(
         )
         ws.send_bytes(frame)
         # FakeLLM + NowTool + FakeTTS sequence.
-        msgs = [ws.receive_json() for _ in range(6)]
+        msgs = [ws.receive_json() for _ in range(7)]
 
     types = [m["type"] for m in msgs]
     assert types == [
-        "welcome", "tool_call", "tool_result", "assistant_delta", "tts_chunk", "done",
+        "welcome", "user_transcript", "tool_call", "tool_result",
+        "assistant_delta", "tts_chunk", "done",
     ]
-    assert msgs[1]["server"] == "time" and msgs[1]["name"] == "now"
+    transcript = msgs[1]
+    assert transcript["source"] == "voice"  # came from STT, not typed
+    assert msgs[2]["server"] == "time" and msgs[2]["name"] == "now"

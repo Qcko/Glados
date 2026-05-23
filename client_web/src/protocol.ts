@@ -33,6 +33,13 @@ export interface Welcome {
   session_id: string;
 }
 
+export interface UserTranscript {
+  type: "user_transcript";
+  session_id: string;
+  text: string;
+  source: "voice" | "text";
+}
+
 export interface AssistantDelta {
   type: "assistant_delta";
   session_id: string;
@@ -83,6 +90,7 @@ export interface ServerError {
 
 export type ServerMessage =
   | Welcome
+  | UserTranscript
   | AssistantDelta
   | ToolCall
   | ToolResult

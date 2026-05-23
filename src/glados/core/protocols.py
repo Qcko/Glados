@@ -54,6 +54,20 @@ class Welcome(BaseModel):
     session_id: str
 
 
+class UserTranscript(BaseModel):
+    """What the server believes the user said for this turn. Broadcast
+    once per turn, right after Welcome. `source` distinguishes a typed
+    `user_text` ingress from an audio-derived STT transcript — the UI
+    shows the latter differently so STT mistranscriptions are visible
+    at a glance (the whole point: catching e.g. Czech misdetected as
+    French without having to grep traces)."""
+
+    type: Literal["user_transcript"] = "user_transcript"
+    session_id: str
+    text: str
+    source: Literal["voice", "text"]
+
+
 class AssistantDelta(BaseModel):
     type: Literal["assistant_delta"] = "assistant_delta"
     session_id: str
@@ -103,6 +117,14 @@ class ErrorMessage(BaseModel):
 
 
 ServerMessage = Annotated[
-    Welcome | AssistantDelta | ToolCall | ToolResult | TtsChunk | Done | Cancelled | ErrorMessage,
+    Welcome
+    | UserTranscript
+    | AssistantDelta
+    | ToolCall
+    | ToolResult
+    | TtsChunk
+    | Done
+    | Cancelled
+    | ErrorMessage,
     Field(discriminator="type"),
 ]
