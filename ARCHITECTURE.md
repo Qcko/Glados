@@ -318,19 +318,28 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   streams back. `interrupt` wired up. Validate the protocol against real
   codec realities here, before the Pi client.
 
-- **v2 — first stdio MCP + permission gates.** The two §7
-  capabilities remaining from v0/v1 land together because the first
-  real third-party MCP needs both. OS keyring (§9) landed early as
-  a standalone slice — see `src/glados/core/secrets.py` and the
-  `python -m glados.secrets` CLI.
-  1. **stdio MCP client adapter** in `src/glados/mcp/`. Spawns
-     subprocesses, speaks JSON-RPC over stdin/stdout per MCP spec,
-     surfaces tool specs into the existing `MCPRegistry`. Prove the
-     transport by re-platforming the in-process toy server as a
-     small Python stdio subprocess first — no external risk.
-  2. **Per-tool permission gate framework** (ARCH §7). Hard-coded
-     list of side-effecting tools, not LLM-decided. Confirms are
-     per-user and routed back to the originating room.
+- **v2 — first stdio MCP + permission gates. LANDED.** Both legs
+  shipped in one session as Parts A + B; OS keyring (§9) landed
+  earlier as a standalone slice.
+  1. **stdio MCP client adapter** in `src/glados/mcp/stdio_client.py`.
+     `StdioServer` spawns a subprocess, multiplexes JSON-RPC over
+     stdin/stdout via incrementing ids + a futures dict, single
+     reader task per server, `_mark_dead` fails pending futures on
+     EOF or reader crash. `StdioToolProxy` implements the existing
+     `Tool` Protocol so the registry doesn't know whether tools run
+     in-process or out-of-process. Spawned + tools registered at
+     lifespan startup from `configs/servers.toml`; auto-restart
+     deferred to v2.5. Soak-tested against
+     `scripts/toy_stdio_server.py`.
+  2. **Per-tool permission gate** keyed on
+     `ToolSpec.requires_confirmation` (hard-coded per tool, NOT
+     LLM-decided). Organizer broadcasts `ToolConfirmRequest` to the
+     originating room before dispatch; awaits `ToolConfirmResponse`
+     under a 30 s timeout; on timeout / denied the dispatch is
+     skipped and the LLM sees `MCPCallResult(ok=False, error="user
+     denied")`. Cross-room replies are dropped. Web UI uses a
+     minimal `window.confirm()` for v1; replace with a styled
+     non-blocking modal when a real gated tool ships.
 
   Concurrency / vLLM moves to §13 as a deferred patch — it's a
   performance improvement, not a milestone in itself, and only
