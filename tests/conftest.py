@@ -14,3 +14,34 @@ os.environ.setdefault("GLADOS_LLM_BACKEND", "fake")
 os.environ.setdefault("GLADOS_VAD_BACKEND", "fake")
 os.environ.setdefault("GLADOS_STT_BACKEND", "fake")
 os.environ.setdefault("GLADOS_TTS_BACKEND", "fake")
+
+import pytest
+
+from glados.core.secrets import InMemorySecrets
+
+
+# Default dev tokens matching configs/glados.toml's [auth] clients list.
+# Real deployments populate the OS keyring via `python -m glados.secrets`.
+_DEV_TOKENS = {
+    ("client-tokens", "desk-ui"): "dev-token-desk",
+    ("client-tokens", "desk2-ui"): "dev-token-desk2",
+}
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _patch_keyring_for_tests():
+    """Replace KeyringSecrets with a dev-seeded InMemorySecrets at the
+    class symbol, so every `build_app()` — module-level default or a
+    fresh one a test constructs — gets a safe store by construction.
+    Tests never touch the OS keyring."""
+    import glados.core.server as srv
+
+    real_cls = srv.KeyringSecrets
+    srv.KeyringSecrets = lambda: InMemorySecrets(_DEV_TOKENS)  # type: ignore[assignment]
+    try:
+        # Re-seed the already-built module-level `app.state.secrets` since
+        # `build_app()` ran at import time before this patch took effect.
+        srv.app.state.secrets = InMemorySecrets(_DEV_TOKENS)
+        yield
+    finally:
+        srv.KeyringSecrets = real_cls

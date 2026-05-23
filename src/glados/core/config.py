@@ -22,7 +22,9 @@ class ServerConfig(BaseModel):
 
 
 class AuthConfig(BaseModel):
-    tokens: dict[str, str] = {}
+    # Client ids allowed to connect. Tokens themselves live in the OS
+    # keyring under service `glados.client-tokens` (see core/secrets.py).
+    clients: list[str] = []
 
 
 class LLMConfig(BaseModel):

@@ -3,11 +3,12 @@ host = "127.0.0.1"
 port = 8765
 traces_dir = "traces"
 
-# v0 only: tokens live in the config so the server boots without a keyring.
-# Real secret storage (OS keyring) lands in v1+.
-[auth.tokens]
-desk-ui = "dev-token-desk"
-desk2-ui = "dev-token-desk2"
+# Real tokens live in the OS keyring under service `glados.client-tokens`
+# (username = client id). Populate via:
+#   python -m glados.secrets set client-tokens desk-ui
+# This file only enumerates which client ids are allowed to connect.
+[auth]
+clients = ["desk-ui", "desk2-ui"]
 
 [llm]
 # backend: "fake" (deterministic, used in tests) or "ollama"

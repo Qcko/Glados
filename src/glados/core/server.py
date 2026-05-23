@@ -46,6 +46,7 @@ from .config import (
     load_rooms_config,
 )
 from .organizer import Organizer
+from .secrets import KeyringSecrets, SecretsStore
 from .protocols import (
     ClientMessage,
     ErrorMessage,
@@ -269,6 +270,9 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     # Stored on state so tests can swap it post-`build_app()` the same
     # way they swap stt/tts.
     app.state.vad_factory = _build_vad
+    # Secrets store: defaults to the real OS keyring. Tests inject
+    # InMemorySecrets via `app.state.secrets = ...` after build_app().
+    app.state.secrets = KeyringSecrets()
 
     _register_routes(app)
     return app
@@ -300,7 +304,9 @@ def _register_routes(app: FastAPI) -> None:
         client_id: str | None = None
         pipeline: AudioPipeline | None = None
         try:
-            binding = await _handshake(ws, state.glados_cfg, state.rooms_cfg)
+            binding = await _handshake(
+                ws, state.glados_cfg, state.rooms_cfg, state.secrets
+            )
             if binding is None:
                 return
             client_id = binding.client_id
@@ -354,7 +360,10 @@ def _build_pipeline(
 
 
 async def _handshake(
-    ws: WebSocket, glados_cfg: GladosConfig, rooms_cfg: RoomsConfig
+    ws: WebSocket,
+    glados_cfg: GladosConfig,
+    rooms_cfg: RoomsConfig,
+    secrets: SecretsStore,
 ):
     raw = await ws.receive_json()
     try:
@@ -368,7 +377,11 @@ async def _handshake(
         await ws.close()
         return None
 
-    expected = glados_cfg.auth.tokens.get(msg.client_id)
+    if msg.client_id not in glados_cfg.auth.clients:
+        await _send_error(ws, "auth_failed", "unknown client or bad token")
+        await ws.close()
+        return None
+    expected = secrets.get("client-tokens", msg.client_id)
     if expected is None or expected != msg.token:
         await _send_error(ws, "auth_failed", "unknown client or bad token")
         await ws.close()

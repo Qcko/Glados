@@ -33,6 +33,12 @@ async def turn(client_id: str, room_id: str, token: str, text: str) -> None:
 
 
 async def main() -> None:
+    # Dev-fixture tokens. The server now reads tokens from the OS keyring
+    # (scope `glados.client-tokens`); for this script to work, populate the
+    # keyring first with matching values:
+    #   python -m glados.secrets set client-tokens desk-ui
+    #   python -m glados.secrets set client-tokens desk2-ui
+    # Never reuse the literals below in any non-dev deploy.
     print("== happy path: desk-ui (echo) ==")
     await turn("desk-ui", "desk", "dev-token-desk", "hello glados")
 

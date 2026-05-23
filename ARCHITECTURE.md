@@ -241,8 +241,12 @@ Invariants:
   MCP servers receive only the structured arguments the LLM produces.
 - *External content is data, never instructions.* See §7 untrusted-content
   discipline; this is the main mitigation against indirect prompt injection.
-- *Secrets live in the OS keyring.* Config holds handles. No plaintext
-  credentials in `glados.toml` or environment dumps.
+- *Secrets live in the OS keyring.* Config enumerates client ids /
+  handle names only — never values. The `keyring` package backs onto
+  Windows Credential Manager / libsecret / macOS Keychain under service
+  names `glados.<scope>` (e.g. `glados.client-tokens`, `glados.dunnes`).
+  Populate via `python -m glados.secrets set <scope> <name>`. See
+  `src/glados/core/secrets.py`.
 - *Auth is per-client, revocable.* Token loss compromises one client, not the
   house.
 
@@ -314,10 +318,11 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   streams back. `interrupt` wired up. Validate the protocol against real
   codec realities here, before the Pi client.
 
-- **v2 — first stdio MCP + permission gates + secrets keyring.** The
-  three §7/§9 capabilities that have been carried since v0 land
-  together because they enable each other and the first real third-
-  party MCP needs all three.
+- **v2 — first stdio MCP + permission gates.** The two §7
+  capabilities remaining from v0/v1 land together because the first
+  real third-party MCP needs both. OS keyring (§9) landed early as
+  a standalone slice — see `src/glados/core/secrets.py` and the
+  `python -m glados.secrets` CLI.
   1. **stdio MCP client adapter** in `src/glados/mcp/`. Spawns
      subprocesses, speaks JSON-RPC over stdin/stdout per MCP spec,
      surfaces tool specs into the existing `MCPRegistry`. Prove the
@@ -326,10 +331,6 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   2. **Per-tool permission gate framework** (ARCH §7). Hard-coded
      list of side-effecting tools, not LLM-decided. Confirms are
      per-user and routed back to the originating room.
-  3. **OS keyring for secrets** (ARCH §9). Windows Credential
-     Manager / libsecret. `glados.toml` holds handles, never
-     values. Long-parked debt; lands here because the next slice
-     needs real credentials.
 
   Concurrency / vLLM moves to §13 as a deferred patch — it's a
   performance improvement, not a milestone in itself, and only
@@ -352,7 +353,7 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   - **Every side-effecting tool routed through the v2 gate
     framework** — cart writes, checkout, login. Selenium = real
     money. Not optional.
-  - Dunnes credentials in the v2 keyring.
+  - Dunnes credentials in the OS keyring (scope `glados.dunnes`).
   - Per-tool timeout raised (default 8 s is too tight for
     Selenium page loads; ~30 s for Dunnes tools).
   - Tool-name namespacing: flat `dunnes.X` (collapse C# class
