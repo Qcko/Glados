@@ -8,10 +8,15 @@ from __future__ import annotations
 
 from typing import Annotated, AsyncIterator, Literal, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ToolSpec(BaseModel):
+    # Reject unknown keys on construction. Catches typos in stdio MCP
+    # servers' `tools/list` payloads — a misspelled `require_confirmation`
+    # would otherwise silently default to False and gate nothing.
+    model_config = ConfigDict(extra="forbid")
+
     server: str
     name: str
     description: str

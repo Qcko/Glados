@@ -474,7 +474,8 @@ class Organizer:
                 error=result.error,
             )
             raw = json.dumps(result.content) if result.ok else (result.error or "error")
-            spec = self.mcp.spec_for(tc.server, tc.name)
+            # `spec` already fetched above for the requires_confirmation
+            # check — reuse rather than another registry lookup.
             if spec is not None and spec.untrusted:
                 # Defang any literal `</external>` inside the payload so an
                 # attacker-controlled page can't close the wrapper early and
@@ -513,38 +514,57 @@ class Organizer:
         broadcast is per-room; replies from outside the room are dropped
         by `handle_tool_confirm_response`."""
         request_id = uuid.uuid4().hex
-        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        self._pending_confirms[request_id] = fut
-        self._confirm_room[request_id] = room_id
-        trace.event(
-            "tool_confirm_request",
-            request_id=request_id,
-            tool=tool_qualified,
-            ttl_s=self._confirm_timeout_s,
-        )
-        await self._broadcast(
-            room_id,
-            ToolConfirmRequest(
-                session_id=session_id,
+        # Short-circuit: no clients in the room means the broadcast would
+        # land nowhere and we'd waste the full ttl waiting for nobody.
+        # Common case is a UI client that just dropped mid-turn.
+        if not self.clients_in_room(room_id):
+            trace.event(
+                "tool_confirm_no_clients",
                 request_id=request_id,
                 tool=tool_qualified,
-                args_summary=args,
-                ttl_s=self._confirm_timeout_s,
-            ),
-        )
-        try:
-            granted = await asyncio.wait_for(fut, timeout=self._confirm_timeout_s)
-        except asyncio.TimeoutError:
-            granted = False
-            trace.event("tool_confirm_timeout", request_id=request_id)
-        else:
-            trace.event(
-                "tool_confirm_response", request_id=request_id, granted=granted
             )
+            return False
+        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        # Register + broadcast + await all under a single try/finally so a
+        # cancellation between any two of them still cleans up the maps.
+        # Cancellation between the dict insert and the try start would
+        # leak the entries until the Organizer dies.
+        try:
+            self._pending_confirms[request_id] = fut
+            self._confirm_room[request_id] = room_id
+            trace.event(
+                "tool_confirm_request",
+                request_id=request_id,
+                tool=tool_qualified,
+                ttl_s=self._confirm_timeout_s,
+            )
+            await self._broadcast(
+                room_id,
+                ToolConfirmRequest(
+                    session_id=session_id,
+                    request_id=request_id,
+                    tool=tool_qualified,
+                    args_summary=args,
+                    ttl_s=self._confirm_timeout_s,
+                ),
+            )
+            try:
+                granted = await asyncio.wait_for(
+                    fut, timeout=self._confirm_timeout_s
+                )
+            except asyncio.TimeoutError:
+                granted = False
+                trace.event("tool_confirm_timeout", request_id=request_id)
+            else:
+                trace.event(
+                    "tool_confirm_response",
+                    request_id=request_id,
+                    granted=granted,
+                )
+            return granted
         finally:
             self._pending_confirms.pop(request_id, None)
             self._confirm_room.pop(request_id, None)
-        return granted
 
     async def handle_tool_confirm_response(
         self, client_id: str, response: ToolConfirmResponse
