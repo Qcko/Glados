@@ -92,6 +92,22 @@ class GladosConfig(BaseModel):
     tts: TTSConfig = TTSConfig()
 
 
+class ServerEntry(BaseModel):
+    id: str
+    command: str
+    args: list[str] = []
+    env: dict[str, str] = {}
+    autostart: bool = True
+
+
+class ServersConfig(BaseModel):
+    server: list[ServerEntry] = []
+
+
+def load_servers_config(path: Path) -> ServersConfig:
+    return ServersConfig(**_read_toml(path))
+
+
 class ClientBinding(BaseModel):
     client_id: str
     room_id: str

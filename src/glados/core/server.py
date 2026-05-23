@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Callable
@@ -31,6 +32,7 @@ from ..audio.vad.fake import FakeVAD
 from ..brain.llm.fake import FakeLLM
 from ..brain.llm.ollama import OllamaLLM
 from ..mcp.registry import MCPRegistry
+from ..mcp.stdio_client import StdioServer, StdioToolProxy
 from ..servers.time_server import NowTool
 from ..servers.toy_server import TOY_TOOLS
 from .adapters import LLM, STT, TTS, VAD
@@ -39,11 +41,13 @@ from .config import (
     GladosConfig,
     LLMConfig,
     RoomsConfig,
+    ServersConfig,
     STTConfig,
     TTSConfig,
     VADConfig,
     load_glados_config,
     load_rooms_config,
+    load_servers_config,
 )
 from .organizer import Organizer
 from .secrets import KeyringSecrets, SecretsStore
@@ -167,12 +171,17 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     cfg_dir = config_dir or Path(os.environ.get(CONFIG_DIR_ENV, "configs"))
     glados_cfg = load_glados_config(cfg_dir / "glados.toml")
     rooms_cfg = load_rooms_config(cfg_dir / "rooms.toml")
+    servers_cfg = load_servers_config(cfg_dir / "servers.toml")
 
     traces = TraceStore(glados_cfg.server.traces_dir)
     mcp = MCPRegistry()
     mcp.register(NowTool())
     for tool in TOY_TOOLS:
         mcp.register(tool)
+    # Subprocess MCP servers are wired in the lifespan startup because they
+    # need to be spawned + queried inside the running event loop. Tracked
+    # here for shutdown:
+    stdio_servers: list[StdioServer] = []
     llm = _build_llm(glados_cfg.llm)
     # STT and TTS are shared across connections (real backends load model
     # weights on construct). VAD is per-connection — it carries per-stream
@@ -232,6 +241,44 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         # different Organizer, call `build_app()` again with a fresh
         # config.
         task = asyncio.create_task(_warmup(_app.state.stt, _app.state.tts))
+        # Spawn autostart stdio MCP servers and register their tools.
+        # Done inline (not in a background task) so the registry is
+        # populated before the first WS connection can call a tool.
+        for entry in _app.state.servers_cfg.server:
+            if not entry.autostart:
+                continue
+            # "python" / "python3" resolves against PATH, which on Windows
+            # can pick a stranger interpreter that lacks the venv's deps.
+            # Substitute the running interpreter so a stdio server sees the
+            # same packages GLaDOS itself does.
+            command = (
+                sys.executable if entry.command in ("python", "python3") else entry.command
+            )
+            # Run subprocesses from the repo root so relative script paths
+            # in servers.toml (e.g. `scripts/toy_stdio_server.py`) resolve
+            # regardless of where GLaDOS was launched from.
+            server = StdioServer(
+                command,
+                entry.args,
+                env=entry.env,
+                cwd=str(_REPO_ROOT),
+                server_id=entry.id,
+            )
+            await server.start()
+            try:
+                await server.initialize()
+                specs = await server.list_tools()
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "stdio server %s failed to initialise: %s — skipping",
+                    entry.id,
+                    e,
+                )
+                await server.aclose()
+                continue
+            for spec in specs:
+                _app.state.mcp.register(StdioToolProxy(server, spec))
+            _app.state.stdio_servers.append(server)
         try:
             yield
         finally:
@@ -249,6 +296,11 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             llm_aclose = getattr(_app.state.llm, "aclose", None)
             if llm_aclose is not None:
                 await llm_aclose()
+            # Tear down stdio MCP subprocesses last so any in-flight tool
+            # call gets cancelled by the organizer.close() above before
+            # its subprocess vanishes.
+            for srv in _app.state.stdio_servers:
+                await srv.aclose()
 
     app = FastAPI(title="GLaDOS", version="0.1.0", lifespan=lifespan)
 
@@ -259,9 +311,11 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     # `ws.app.state` / `request.app.state`. No module-level singletons.
     app.state.glados_cfg = glados_cfg
     app.state.rooms_cfg = rooms_cfg
+    app.state.servers_cfg = servers_cfg
     app.state.organizer = organizer
     app.state.connections = connections
     app.state.mcp = mcp
+    app.state.stdio_servers = stdio_servers
     app.state.stt = stt
     app.state.tts = tts
     app.state.llm = llm
