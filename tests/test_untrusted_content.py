@@ -221,11 +221,3 @@ def test_system_prompt_warns_about_external_tags() -> None:
     test fails loudly."""
     assert "<external>" in SYSTEM_PROMPT
     assert "instructions" in SYSTEM_PROMPT.lower()
-
-
-def test_system_prompt_pins_always_english_reply() -> None:
-    """ARCH §13 always-English-output rule. STT is multilingual (EN/CS
-    inputs), but the LLM must do the implicit translation and never
-    reply in Czech. If someone reflows the prompt and drops this clause,
-    the multilingual feature silently degrades."""
-    assert "always reply in english" in SYSTEM_PROMPT.lower()

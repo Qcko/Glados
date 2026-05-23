@@ -431,15 +431,17 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   backup story).
 - **Family member onboarding UX** — pairing a new client should be one short
   code, not editing config files.
-- **Multilingual STT cost (Czech-in / English-out). RESOLVED.**
-  `distil-small.en` was English-only; the swap landed and the default
-  is now multilingual `small` (~3× slower, ~1 pt WER worse on English
-  vs. distil-small.en, but Czech now works). `medium` was rejected
-  for blowing the latency budget. Two-pass (en-only fast path +
-  multilingual fallback on low confidence) was considered and
-  rejected as overengineered. TTS and LLM stay English; SYSTEM_PROMPT
-  carries the "user may speak English or Czech; always reply in
-  English" clause so the LLM does the implicit translation.
+- **Multilingual STT cost (Czech-in / English-out). DEFERRED.**
+  The swap to multilingual `small` landed in f1f2045; defaults were
+  then rolled back after a live demo:
+  on CPU int8 the auto-detect mis-fired on short Czech utterances
+  (transcribed "Ahoj" as French "Merci."), and `medium`/`large-v3`
+  blow the latency budget without a GPU. Default is back to
+  English-only `distil-small.en` with `whisper_language = "en"`.
+  Recipe to re-enable lives in configs/glados.toml; the
+  always-English SYSTEM_PROMPT clause was removed with the revert
+  (re-add it together with the multilingual model). Revisit when
+  GPU offload is in play or a smaller Czech-capable model exists.
 - **Voice ACL default policy.** Default-deny for unknown voices keeps
   kids and guests out by accident; default-allow is friendlier but
   defeats the kid-protection use case the moment a new family member's

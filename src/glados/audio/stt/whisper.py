@@ -1,9 +1,10 @@
 """WhisperSTT: faster-whisper behind the `core.adapters.STT` Protocol.
 
-Model is loaded once on construct (defaults: multilingual `small` CPU
-int8 — ~450 MB download to HF_HOME, supports both English and Czech
-inputs per ARCH §13). `language=None` lets the model auto-detect per
-utterance; pass a code (e.g. `"en"`) to pin a single language.
+Model is loaded once on construct (defaults: English-only
+`distil-small.en` CPU int8 — ~250 MB download to HF_HOME). `language`
+defaults to `None` (auto-detect); pin to a code (e.g. `"en"`) to skip
+detection. For multilingual operation see the recipe in
+configs/glados.toml.
 
 `transcribe` runs the blocking inference call in a worker thread via
 `asyncio.to_thread`, so the asyncio event loop stays responsive to the
@@ -20,7 +21,7 @@ class WhisperSTT:
     def __init__(
         self,
         *,
-        model: str = "small",
+        model: str = "distil-small.en",
         device: str = "cpu",
         compute_type: str = "int8",
         language: str | None = None,

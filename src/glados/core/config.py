@@ -62,12 +62,13 @@ class STTConfig(BaseModel):
     # model; first call downloads the weights to HF_HOME.
     backend: Literal["fake", "faster-whisper"] = "faster-whisper"
     fake_text: str = "hello world"
-    whisper_model: str = "small"
+    whisper_model: str = "distil-small.en"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
-    # None = auto-detect per utterance (multilingual). Pin to a code
-    # (e.g. "en") only if you want to force one language.
-    whisper_language: str | None = None
+    # Default "en" pins English-only decoding. Set to None for
+    # auto-detect (paired with a multilingual model like `small`);
+    # see configs/glados.toml for the full recipe.
+    whisper_language: str | None = "en"
 
 
 class TTSConfig(BaseModel):

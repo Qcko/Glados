@@ -1,19 +1,18 @@
 """STT benchmark: WER + latency on a manifest of (audio, reference) pairs.
 
-Why: built to baseline `distil-small.en` before the multilingual swap.
-That swap landed (default is now multilingual `small`, see ARCH §13),
-so the harness is now the tool for benchmarking *any* future STT
-change — model upgrade, compute_type tweak, language pinning, etc.
-Run twice with two manifests for cross-language compare (English on
-LibriSpeech dev-clean, Czech on Common Voice cs).
+Why: built to baseline `distil-small.en` before the multilingual swap,
+which has since been rolled back (ARCH §13: DEFERRED). The harness is
+now the tool for benchmarking *any* future STT change — model upgrade,
+compute_type tweak, language pinning, multilingual retry. Run twice
+with two manifests for cross-language compare when needed.
 
 Usage:
     uv run python scripts/stt_benchmark.py \\
         --manifest benchmarks/english.jsonl \\
-        --model small \\
+        --model distil-small.en \\
         --language en \\
         --device cpu \\
-        --out benchmarks/small-en.json
+        --out benchmarks/distil-small.en.json
 
 Manifest format (JSONL, one record per line):
     {"audio": "path/to/clip.wav", "text": "the reference transcript"}
@@ -193,7 +192,7 @@ def _percentile(values: list[float], p: float) -> float:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--manifest", required=True, help="path to JSONL manifest")
-    ap.add_argument("--model", default="small")
+    ap.add_argument("--model", default="distil-small.en")
     ap.add_argument("--language", default=None,
                     help="ISO code (e.g. 'en', 'cs'); omit for auto-detect")
     ap.add_argument("--device", default="cpu")
