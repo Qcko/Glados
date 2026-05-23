@@ -134,12 +134,34 @@ transport.onServerMessage((msg) => {
     case "done":
       if (activeSessionId === msg.session_id) setActiveSession(null);
       break;
+    case "tool_confirm_request":
+      handleConfirmRequest(msg);
+      break;
     case "error":
       setActiveSession(null);
       break;
   }
   transcript.ingest(msg);
 });
+
+function handleConfirmRequest(req: {
+  request_id: string;
+  tool: string;
+  args_summary: Record<string, unknown>;
+  ttl_s: number;
+}): void {
+  // Minimal blocking-modal-via-confirm — replace with a styled modal
+  // when a real gated tool ships (today's only one is toy_stdio.roll_dice).
+  const argsText = JSON.stringify(req.args_summary, null, 2);
+  const ok = window.confirm(
+    `GLaDOS wants to run ${req.tool}\n\nargs:\n${argsText}\n\nAllow?`,
+  );
+  transport.send({
+    type: "tool_confirm_response",
+    request_id: req.request_id,
+    granted: ok,
+  });
+}
 
 stopBtn.addEventListener("click", () => {
   if (activeSessionId === null) return;

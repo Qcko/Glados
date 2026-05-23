@@ -13,13 +13,14 @@ import base64
 import json
 import logging
 import re
+import uuid
 from contextlib import aclosing
 from typing import Awaitable, Callable, Literal
 
 from pydantic import BaseModel
 
 from ..brain.prompts import SYSTEM_PROMPT
-from ..mcp.registry import CallEnvelope, MCPRegistry
+from ..mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
 from .adapters import LLM, TTS, LLMMessage, LLMText, LLMToolCall
 from .config import ClientBinding
 from .protocols import (
@@ -27,6 +28,8 @@ from .protocols import (
     Cancelled,
     Done,
     ToolCall,
+    ToolConfirmRequest,
+    ToolConfirmResponse,
     ToolResult,
     TtsChunk,
     UserTranscript,
@@ -77,6 +80,7 @@ class Organizer:
         tts: TTS | None = None,
         room_queues: RoomQueueManager | None = None,
         tts_cooldown_s: float = 0.200,
+        confirm_timeout_s: float = 30.0,
     ) -> None:
         self.llm = llm
         self.tts = tts
@@ -113,6 +117,17 @@ class Organizer:
         self._tts_cooldown_s = tts_cooldown_s
         self._speaking_rooms: set[str] = set()
         self._tts_finish_time: dict[str, float] = {}
+        # Permission gate state. When a tool with requires_confirmation
+        # is about to dispatch, the Organizer parks a Future in
+        # _pending_confirms keyed by request_id, broadcasts a
+        # ToolConfirmRequest to the originating room, and resumes when
+        # `handle_tool_confirm_response` (called from server.py on the
+        # client's reply) sets the Future, OR when the timeout fires.
+        # The room map enforces "only clients in the originating room
+        # can answer" — responses from other rooms are dropped silently.
+        self._confirm_timeout_s = confirm_timeout_s
+        self._pending_confirms: dict[str, asyncio.Future[bool]] = {}
+        self._confirm_room: dict[str, str] = {}
 
     async def handle_user_text(
         self, client_id: str, text: str, *, source: UserTextSource = "text"
@@ -424,7 +439,23 @@ class Organizer:
                 name=tc.name,
                 args=tc.args,
             )
-            result = await self.mcp.dispatch(tc.server, tc.name, tc.args, envelope)
+            spec = self.mcp.spec_for(tc.server, tc.name)
+            if spec is not None and spec.requires_confirmation:
+                granted = await self._await_confirmation(
+                    session_id=session_id,
+                    room_id=room_id,
+                    tool_qualified=spec.qualified,
+                    args=tc.args,
+                    trace=trace,
+                )
+                if not granted:
+                    result = MCPCallResult(ok=False, error="user denied")
+                else:
+                    result = await self.mcp.dispatch(
+                        tc.server, tc.name, tc.args, envelope
+                    )
+            else:
+                result = await self.mcp.dispatch(tc.server, tc.name, tc.args, envelope)
             await self._broadcast(
                 room_id,
                 ToolResult(
@@ -465,3 +496,85 @@ class Organizer:
     async def _broadcast(self, room_id: str, msg: BaseModel) -> None:
         for cid in self.clients_in_room(room_id):
             await self.send(cid, msg)
+
+    # ---- Permission gates -------------------------------------------------
+
+    async def _await_confirmation(
+        self,
+        *,
+        session_id: str,
+        room_id: str,
+        tool_qualified: str,
+        args: dict,
+        trace,
+    ) -> bool:
+        """Ask the originating room to confirm a side-effecting tool call.
+        Returns True on `granted`, False on `denied` or timeout. The
+        broadcast is per-room; replies from outside the room are dropped
+        by `handle_tool_confirm_response`."""
+        request_id = uuid.uuid4().hex
+        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._pending_confirms[request_id] = fut
+        self._confirm_room[request_id] = room_id
+        trace.event(
+            "tool_confirm_request",
+            request_id=request_id,
+            tool=tool_qualified,
+            ttl_s=self._confirm_timeout_s,
+        )
+        await self._broadcast(
+            room_id,
+            ToolConfirmRequest(
+                session_id=session_id,
+                request_id=request_id,
+                tool=tool_qualified,
+                args_summary=args,
+                ttl_s=self._confirm_timeout_s,
+            ),
+        )
+        try:
+            granted = await asyncio.wait_for(fut, timeout=self._confirm_timeout_s)
+        except asyncio.TimeoutError:
+            granted = False
+            trace.event("tool_confirm_timeout", request_id=request_id)
+        else:
+            trace.event(
+                "tool_confirm_response", request_id=request_id, granted=granted
+            )
+        finally:
+            self._pending_confirms.pop(request_id, None)
+            self._confirm_room.pop(request_id, None)
+        return granted
+
+    async def handle_tool_confirm_response(
+        self, client_id: str, response: ToolConfirmResponse
+    ) -> None:
+        """Route a `tool_confirm_response` from a WS client to the waiting
+        Future. Enforces that the responder is in the originating room —
+        a client in another room replying to the wrong request_id is
+        silently ignored (logged at debug). The first valid response
+        wins; subsequent replies are no-ops."""
+        binding = self.binding_for_client(client_id)
+        if binding is None:
+            return
+        expected_room = self._confirm_room.get(response.request_id)
+        if expected_room is None:
+            # Stale or unknown request_id (already resolved / timed out).
+            log.debug(
+                "drop tool_confirm_response: unknown request_id=%s from %s",
+                response.request_id,
+                client_id,
+            )
+            return
+        if binding.room_id != expected_room:
+            log.debug(
+                "drop tool_confirm_response: client %s in room %s, expected %s",
+                client_id,
+                binding.room_id,
+                expected_room,
+            )
+            return
+        fut = self._pending_confirms.get(response.request_id)
+        if fut is None or fut.done():
+            return
+        fut.set_result(response.granted)

@@ -33,8 +33,19 @@ class Interrupt(BaseModel):
     session_id: str
 
 
+class ToolConfirmResponse(BaseModel):
+    """Reply to a ToolConfirmRequest. `granted=False` denies the tool
+    call; the LLM sees `MCPCallResult(ok=False, error="user denied")`
+    and can recover. The Organizer enforces that the responder is in the
+    originating room — replies from other rooms are dropped."""
+
+    type: Literal["tool_confirm_response"] = "tool_confirm_response"
+    request_id: str
+    granted: bool
+
+
 ClientMessage = Annotated[
-    Hello | UserText | Interrupt,
+    Hello | UserText | Interrupt | ToolConfirmResponse,
     Field(discriminator="type"),
 ]
 
@@ -110,6 +121,22 @@ class Cancelled(BaseModel):
     session_id: str
 
 
+class ToolConfirmRequest(BaseModel):
+    """Sent to clients in the originating room when the LLM tries to
+    call a tool whose ToolSpec.requires_confirmation is True. Any client
+    in the room can answer; the first response wins. The UI renders a
+    confirm modal showing `tool` and `args_summary`. `ttl_s` is the
+    server's deny-deadline; the UI may render a countdown but the
+    server enforces the truth."""
+
+    type: Literal["tool_confirm_request"] = "tool_confirm_request"
+    session_id: str
+    request_id: str
+    tool: str
+    args_summary: dict
+    ttl_s: float
+
+
 class ErrorMessage(BaseModel):
     type: Literal["error"] = "error"
     code: str
@@ -125,6 +152,7 @@ ServerMessage = Annotated[
     | TtsChunk
     | Done
     | Cancelled
+    | ToolConfirmRequest
     | ErrorMessage,
     Field(discriminator="type"),
 ]

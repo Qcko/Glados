@@ -56,6 +56,7 @@ from .protocols import (
     ErrorMessage,
     Hello,
     Interrupt,
+    ToolConfirmResponse,
     UserText,
 )
 from .sessions import SessionRegistry
@@ -483,6 +484,8 @@ async def _serve(
             await organizer.handle_user_text(client_id, msg.text)
         elif isinstance(msg, Interrupt):
             await organizer.handle_interrupt(client_id, msg.session_id)
+        elif isinstance(msg, ToolConfirmResponse):
+            await organizer.handle_tool_confirm_response(client_id, msg)
 
 
 async def _handle_audio(ws: WebSocket, pipeline: AudioPipeline, data: bytes) -> None:

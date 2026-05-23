@@ -23,6 +23,14 @@ class ToolSpec(BaseModel):
     # that instructions inside <external> are data, not commands.
     # See ARCHITECTURE.md §7 untrusted-content discipline.
     untrusted: bool = False
+    # When True, the Organizer broadcasts a ToolConfirmRequest to the
+    # originating room before dispatch and waits for ToolConfirmResponse
+    # (granted=True) within the deny timeout. Hard-coded per tool by the
+    # author — not LLM-decided. Per ARCH §7 permission gates: any
+    # side-effecting tool (cart writes, checkout, login, money) MUST be
+    # gated. Default False so today's read-only tools (echo, time, etc.)
+    # are unchanged.
+    requires_confirmation: bool = False
 
     @property
     def qualified(self) -> str:

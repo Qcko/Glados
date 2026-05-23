@@ -1,0 +1,154 @@
+"""Tests for the v2 per-tool permission gate.
+
+Exercises the Organizer's `_await_confirmation` path end-to-end:
+- gate-granted: client says yes; dispatch happens; LLM sees the result.
+- gate-denied: client says no; dispatch skipped; LLM sees "user denied".
+- gate-timeout: no response within ttl_s; same as denied.
+- cross-room reply rejected: a client in another room cannot answer.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import pytest
+from pydantic import BaseModel
+
+from glados.core.adapters import LLMText, LLMToolCall, ToolSpec
+from glados.core.config import ClientBinding
+from glados.core.organizer import Organizer
+from glados.core.protocols import ToolConfirmResponse
+from glados.core.sessions import SessionRegistry
+from glados.core.traces import TraceStore
+from glados.mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
+
+
+class _GatedTool:
+    spec = ToolSpec(
+        server="t",
+        name="boom",
+        description="side-effecting test tool",
+        parameters={"type": "object"},
+        requires_confirmation=True,
+    )
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def call(self, args: dict, envelope: CallEnvelope) -> MCPCallResult:
+        self.calls.append(args)
+        return MCPCallResult(ok=True, content={"did": "the thing"})
+
+
+class _ToolCallingLLM:
+    """First turn: emit one tool_call for `t.boom`. Second turn: a final
+    text reply. Mimics the loop the Organizer drives until no more tool
+    calls arrive."""
+
+    def __init__(self) -> None:
+        self._n = 0
+
+    async def chat(self, messages, tools):
+        self._n += 1
+        if self._n == 1:
+            yield LLMToolCall(call_id="c1", server="t", name="boom", args={"x": 1})
+        else:
+            yield LLMText(text="done")
+
+
+@asynccontextmanager
+async def _make_org(tmp: Path, *, confirm_timeout_s: float = 30.0):
+    sink: list[tuple[str, dict]] = []
+
+    async def send(client_id: str, msg: BaseModel) -> None:
+        sink.append((client_id, msg.model_dump()))
+
+    bindings = [
+        ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="u"),
+        ClientBinding(client_id="kitchen-ui", room_id="kitchen", role="ui", default_user="u"),
+    ]
+    by_id = {b.client_id: b for b in bindings}
+    mcp = MCPRegistry()
+    tool = _GatedTool()
+    mcp.register(tool)
+    org = Organizer(
+        llm=_ToolCallingLLM(),
+        mcp=mcp,
+        traces=TraceStore(tmp),
+        sessions=SessionRegistry(),
+        send=send,
+        binding_for_client=by_id.get,
+        clients_in_room=lambda r: [b.client_id for b in bindings if b.room_id == r],
+        confirm_timeout_s=confirm_timeout_s,
+    )
+    try:
+        yield org, sink, tool
+    finally:
+        await org.close()
+
+
+async def _wait_for_confirm_request(sink: list, timeout_s: float = 2.0) -> dict:
+    """Spin until a tool_confirm_request lands in the sink, or fail."""
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while asyncio.get_running_loop().time() < deadline:
+        for _, msg in sink:
+            if msg.get("type") == "tool_confirm_request":
+                return msg
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"no tool_confirm_request after {timeout_s}s; sink={sink}")
+
+
+async def test_gate_granted_dispatches(tmp_path: Path) -> None:
+    async with _make_org(tmp_path) as (org, sink, tool):
+        await org.handle_user_text("desk-ui", "do it")
+        req = await _wait_for_confirm_request(sink)
+        await org.handle_tool_confirm_response(
+            "desk-ui",
+            ToolConfirmResponse(request_id=req["request_id"], granted=True),
+        )
+        await org.flush()
+        assert tool.calls == [{"x": 1}]
+        results = [m for _, m in sink if m["type"] == "tool_result"]
+        assert results and results[0]["ok"] is True
+
+
+async def test_gate_denied_skips_dispatch(tmp_path: Path) -> None:
+    async with _make_org(tmp_path) as (org, sink, tool):
+        await org.handle_user_text("desk-ui", "do it")
+        req = await _wait_for_confirm_request(sink)
+        await org.handle_tool_confirm_response(
+            "desk-ui",
+            ToolConfirmResponse(request_id=req["request_id"], granted=False),
+        )
+        await org.flush()
+        assert tool.calls == []
+        results = [m for _, m in sink if m["type"] == "tool_result"]
+        assert results and results[0]["ok"] is False
+        assert results[0]["error"] == "user denied"
+
+
+async def test_gate_timeout_denies(tmp_path: Path) -> None:
+    async with _make_org(tmp_path, confirm_timeout_s=0.10) as (org, sink, tool):
+        await org.handle_user_text("desk-ui", "do it")
+        await org.flush()  # waits past the 100ms timeout
+        assert tool.calls == []
+        results = [m for _, m in sink if m["type"] == "tool_result"]
+        assert results and results[0]["ok"] is False
+        assert results[0]["error"] == "user denied"
+
+
+async def test_cross_room_response_is_ignored(tmp_path: Path) -> None:
+    async with _make_org(tmp_path, confirm_timeout_s=0.50) as (org, sink, tool):
+        await org.handle_user_text("desk-ui", "do it")
+        req = await _wait_for_confirm_request(sink)
+        # kitchen-ui is bound to room=kitchen; the request went to room=desk.
+        await org.handle_tool_confirm_response(
+            "kitchen-ui",
+            ToolConfirmResponse(request_id=req["request_id"], granted=True),
+        )
+        await org.flush()  # timeout still wins -> denied
+        assert tool.calls == []
+        results = [m for _, m in sink if m["type"] == "tool_result"]
+        assert results and results[0]["error"] == "user denied"

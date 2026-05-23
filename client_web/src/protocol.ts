@@ -20,7 +20,13 @@ export interface Interrupt {
   session_id: string;
 }
 
-export type ClientMessage = Hello | UserText | Interrupt;
+export interface ToolConfirmResponse {
+  type: "tool_confirm_response";
+  request_id: string;
+  granted: boolean;
+}
+
+export type ClientMessage = Hello | UserText | Interrupt | ToolConfirmResponse;
 
 // Audio frames are sent as raw binary WebSocket messages, not JSON.
 // Wire layout: big-endian uint32 seq + PCM16-LE samples at 16 kHz mono.
@@ -88,6 +94,15 @@ export interface ServerError {
   message: string;
 }
 
+export interface ToolConfirmRequest {
+  type: "tool_confirm_request";
+  session_id: string;
+  request_id: string;
+  tool: string;
+  args_summary: Record<string, unknown>;
+  ttl_s: number;
+}
+
 export type ServerMessage =
   | Welcome
   | UserTranscript
@@ -97,4 +112,5 @@ export type ServerMessage =
   | TtsChunk
   | Done
   | Cancelled
+  | ToolConfirmRequest
   | ServerError;

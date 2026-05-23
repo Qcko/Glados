@@ -68,8 +68,11 @@ _TOOLS = [
             "required": ["sides"],
             "additionalProperties": False,
         },
-        # Flagged as requires_confirmation=True in glados.mcp.stdio_client
-        # (Part B of the v2 slice gates this for permission-prompt coverage).
+        # Gated by the v2 permission framework so we have a real
+        # confirm-prompt path to exercise from the demo without
+        # inventing a side-effecting tool. Rolling dice isn't actually
+        # destructive — it's just here as scaffolding.
+        "requires_confirmation": True,
     },
 ]
 
