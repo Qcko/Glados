@@ -10,6 +10,16 @@ from glados.core.secrets import InMemorySecrets, KeyringSecrets
 from glados.secrets.__main__ import run as cli_run
 
 
+def test_jaraco_tarball_is_blocked() -> None:
+    """Importing glados.core.secrets stubs out jaraco.context.tarball as
+    defense-in-depth against the CVE-2026-23949 family. Confirm any
+    accidental caller fails loud."""
+    import jaraco.context
+
+    with pytest.raises(RuntimeError, match="disabled in GLaDOS"):
+        jaraco.context.tarball("nope")
+
+
 def test_in_memory_round_trip() -> None:
     s = InMemorySecrets()
     assert s.get("client-tokens", "desk-ui") is None

@@ -13,8 +13,33 @@ from __future__ import annotations
 
 from typing import Protocol
 
+import jaraco.context
 import keyring
 from keyring.errors import PasswordDeleteError
+
+
+def _block_jaraco_tarball() -> None:
+    """Defense-in-depth: neutralise `jaraco.context.tarball`.
+
+    GLaDOS never extracts tar archives via jaraco.context — `keyring` only
+    uses its decorator helpers (`@suppress`, `@on_interrupt`, etc.). The
+    `tarball` helper has had a zip-slip path-traversal CVE in the past
+    (CVE-2026-23949, fixed in 6.1.0; we ship >=6.1.2 so we're not exposed
+    today). Stubbing it out at import time means any future regression or
+    new caller that tries to use it fails loud instead of silently
+    extracting attacker-controlled paths.
+    """
+
+    def _blocked(*_args, **_kwargs):
+        raise RuntimeError(
+            "jaraco.context.tarball is disabled in GLaDOS (see core/secrets.py)"
+        )
+
+    jaraco.context.tarball = _blocked  # type: ignore[attr-defined]
+
+
+_block_jaraco_tarball()
+
 
 _SERVICE_PREFIX = "glados"
 
