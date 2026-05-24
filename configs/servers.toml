@@ -50,9 +50,9 @@ requires_confirmation = true
 # Selenium = real money once the user advances to payment manually.
 #
 # First-time setup (one-off):
-#   1. Ensure the profile dir exists: E:\dev\secrets\dunnes-chrome-profile
+#   1. Ensure the profile dir exists: E:\dev\secrets\dunnes-edge-profile
 #   2. From an MCP client, call BootstrapLogin and complete login in the
-#      Chrome window that opens. Profile cookies persist; future
+#      Edge window that opens. Profile cookies persist; future
 #      StartBrowser calls reuse them headlessly until cookies expire.
 
 [[server]]
@@ -66,7 +66,7 @@ args = [
     "D:/dev/repos/DunnesStoresMCP/DunnesStoresMCP/McpServer/bin/Release/net10.0/win-x64/McpServer.dll",
 ]
 autostart = true
-env.DUNNES_CHROME_PROFILE = "E:/dev/secrets/dunnes-chrome-profile"
+env.DUNNES_EDGE_PROFILE = "E:/dev/secrets/dunnes-edge-profile"
 
 # NOTE: tool keys here are snake_case — the .NET MCP SDK auto-converts
 # C# PascalCase method names (`AddToCart`) to snake_case (`add_to_cart`)
