@@ -24,31 +24,44 @@ from glados.mcp.stdio_client import StdioServer, StdioServerError, StdioToolProx
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _make_inline_server(body: str) -> StdioServer:
+def _make_inline_server(body: str, server_id: str = "inline") -> StdioServer:
     """Spawn a one-shot Python subprocess that runs `body` as its main
-    loop. `body` should read stdin lines and write JSON-RPC responses."""
-    return StdioServer(sys.executable, ["-c", body])
+    loop. `body` should read stdin lines and write JSON-RPC responses.
+    `server_id` becomes the `server` prefix on every tool's qualified
+    name (real MCP doesn't carry server identity on the wire)."""
+    return StdioServer(sys.executable, ["-c", body], server_id=server_id)
 
 
-# Minimal stdio echo server inline. Implements only `tools/list` (returns
-# one tool spec) and `tools/call` for `echo`.
+# Minimal real-MCP echo server inline. Implements `initialize`,
+# `tools/list`, `tools/call` for one `echo` tool. Drops notifications
+# silently (rid=None). Content rides as a JSON-encoded text block per
+# real-MCP shape; StdioServer parses it back into a dict.
 _INLINE_SERVER = """
 import json, sys
-TOOLS = [{"server": "inline", "name": "echo", "description": "echo",
-          "parameters": {"type": "object", "properties": {"text": {"type": "string"}}}}]
+TOOLS = [{"name": "echo", "description": "echo",
+          "inputSchema": {"type": "object",
+                          "properties": {"text": {"type": "string"}}}}]
 for line in sys.stdin:
     line = line.strip()
     if not line: continue
     req = json.loads(line)
     rid = req.get("id")
     m = req.get("method")
+    if rid is None:
+        continue  # notification, no response
     if m == "initialize":
-        out = {"jsonrpc":"2.0","id":rid,"result":{}}
+        out = {"jsonrpc":"2.0","id":rid,"result":{
+            "protocolVersion":"2024-11-05",
+            "capabilities":{"tools":{}},
+            "serverInfo":{"name":"inline","version":"0.1"}}}
     elif m == "tools/list":
         out = {"jsonrpc":"2.0","id":rid,"result":{"tools":TOOLS}}
     elif m == "tools/call":
         args = req["params"]["arguments"]
-        out = {"jsonrpc":"2.0","id":rid,"result":{"ok":True,"content":{"text":args["text"]}}}
+        body = json.dumps({"text": args["text"]})
+        out = {"jsonrpc":"2.0","id":rid,"result":{
+            "content":[{"type":"text","text":body}],
+            "isError":False}}
     else:
         out = {"jsonrpc":"2.0","id":rid,"error":{"code":-32601,"message":"unknown"}}
     sys.stdout.write(json.dumps(out)+"\\n"); sys.stdout.flush()
@@ -101,7 +114,10 @@ async def test_stdio_server_dies_fails_pending_calls() -> None:
 import json, sys
 line = sys.stdin.readline()
 req = json.loads(line)
-sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{}})+"\\n")
+sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{
+    "protocolVersion":"2024-11-05",
+    "capabilities":{"tools":{}},
+    "serverInfo":{"name":"dying","version":"0.1"}}})+"\\n")
 sys.stdout.flush()
 sys.exit(0)
 """
@@ -130,6 +146,8 @@ sys.exit(0)
 
 # Subprocess that handles initialize + tools/call normally, but exits on
 # a "die" call. Used to verify the next call_tool transparently respawns.
+# Real-MCP shape: content rides as JSON-encoded text blocks; notifications
+# (rid=None) get no response.
 _RESTARTABLE_SERVER = """
 import json, sys
 for line in sys.stdin:
@@ -138,16 +156,22 @@ for line in sys.stdin:
     req = json.loads(line)
     rid = req.get("id")
     m = req.get("method")
+    if rid is None:
+        continue
     if m == "initialize":
-        sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":rid,"result":{}})+"\\n")
+        sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":rid,"result":{
+            "protocolVersion":"2024-11-05",
+            "capabilities":{"tools":{}},
+            "serverInfo":{"name":"restartable","version":"0.1"}}})+"\\n")
         sys.stdout.flush()
     elif m == "tools/call":
         name = req["params"]["name"]
         if name == "die":
             sys.exit(1)
+        body = json.dumps({"name":name})
         sys.stdout.write(json.dumps({
             "jsonrpc":"2.0","id":rid,
-            "result":{"ok":True,"content":{"name":name}}})+"\\n")
+            "result":{"content":[{"type":"text","text":body}],"isError":False}})+"\\n")
         sys.stdout.flush()
 """
 
@@ -192,7 +216,10 @@ async def test_stdio_server_circuit_breaker_after_max_restarts() -> None:
 import json, sys
 line = sys.stdin.readline()
 req = json.loads(line)
-sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{}})+"\\n")
+sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{
+    "protocolVersion":"2024-11-05",
+    "capabilities":{"tools":{}},
+    "serverInfo":{"name":"dying","version":"0.1"}}})+"\\n")
 sys.stdout.flush()
 sys.exit(0)
 """
@@ -250,6 +277,21 @@ def test_toy_stdio_tools_registered_via_lifespan(stdio_app: TestClient) -> None:
     spec = registry.spec_for("toy_stdio", "add")
     assert spec is not None
     assert spec.description.startswith("Return the sum")
+
+
+def test_toy_stdio_overlay_applies_requires_confirmation(stdio_app: TestClient) -> None:
+    """servers.toml `[server.tool_overlays.roll_dice]` should flip the
+    spec's `requires_confirmation` to True after `tools/list` — the wire
+    schema doesn't carry that flag, so the overlay is the only place it
+    can come from for a third-party server."""
+    registry = stdio_app.app.state.mcp
+    roll = registry.spec_for("toy_stdio", "roll_dice")
+    assert roll is not None
+    assert roll.requires_confirmation is True
+    # Sibling without an overlay entry stays at the wire default.
+    add = registry.spec_for("toy_stdio", "add")
+    assert add is not None
+    assert add.requires_confirmation is False
 
 
 async def test_toy_stdio_dispatch_round_trip(stdio_app: TestClient) -> None:

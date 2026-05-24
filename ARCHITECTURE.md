@@ -331,6 +331,18 @@ Each version is its own session-sized chunk. Heavy work is deferred.
      lifespan startup from `configs/servers.toml`; auto-restart
      deferred to v2.5. Soak-tested against
      `scripts/toy_stdio_server.py`.
+
+     **Transport speaks real MCP** (initialize handshake with
+     `protocolVersion` / `clientInfo`, `notifications/initialized`
+     follow-up notification, `inputSchema` → `parameters` translation,
+     text-content blocks → dict via JSON parse with fallback). Server
+     identity (`ToolSpec.server`) is injected from `servers.toml` —
+     the wire schema has no slot for it. GLaDOS-only flags
+     (`untrusted`, `requires_confirmation`, `timeout_s`) ride in
+     `[server.tool_overlays.<ToolName>]` tables in `servers.toml`,
+     applied via `spec.model_copy` after `tools/list` — third-party
+     servers don't know about them, so the wire side must stay
+     vanilla MCP.
   2. **Per-tool permission gate** keyed on
      `ToolSpec.requires_confirmation` (hard-coded per tool, NOT
      LLM-decided). Organizer broadcasts `ToolConfirmRequest` to the

@@ -278,6 +278,22 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
                 await server.aclose()
                 continue
             for spec in specs:
+                overlay = entry.tool_overlays.get(spec.name)
+                if overlay is not None:
+                    # Real MCP wire shape can't carry GLaDOS-only flags;
+                    # apply them from servers.toml here. model_copy keeps
+                    # the spec immutable elsewhere. A partial overlay
+                    # (only one field in TOML) writes all three from the
+                    # ToolOverlay defaults (False / None) — that's fine
+                    # because real MCP doesn't define these on the wire
+                    # anyway, so the wire side is always at those defaults.
+                    spec = spec.model_copy(
+                        update={
+                            "untrusted": overlay.untrusted,
+                            "requires_confirmation": overlay.requires_confirmation,
+                            "timeout_s": overlay.timeout_s,
+                        }
+                    )
                 _app.state.mcp.register(StdioToolProxy(server, spec))
             _app.state.stdio_servers.append(server)
         try:

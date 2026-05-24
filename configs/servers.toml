@@ -2,24 +2,39 @@
 #
 # Each entry spawns a subprocess on app start (when autostart=true) and
 # registers every tool returned by its `tools/list` response into the
-# MCPRegistry as `<server.id>.<tool.name>`.
+# MCPRegistry as `<server.id>.<tool.name>`. Transport is real MCP (line-
+# delimited JSON-RPC 2.0); see scripts/toy_stdio_server.py for a worked
+# example of the wire shape.
 #
-# Schema (v1):
-#   id        — server identifier; must match the `server` field on each
-#               tool spec the subprocess returns (it does — `toy_stdio`
-#               returns tools with server="toy_stdio").
-#   command   — executable to launch.
-#   args      — list of command-line args.
-#   env       — env-var dict layered on top of the parent process env.
-#   autostart — spawn on app startup. False = present but inert (manual
-#               start later; useful for tools you only need on demand).
+# Schema:
+#   id              — server identifier; becomes the `server` prefix on
+#                     every tool's qualified name. Real MCP doesn't put
+#                     the server name on the wire, so this is the only
+#                     place it's defined.
+#   command         — executable to launch.
+#   args            — list of command-line args.
+#   env             — env-var dict layered on top of the parent process env.
+#   autostart       — spawn on app startup. False = present but inert.
+#   [server.tool_overlays.<ToolName>] — per-tool overlay applied after
+#                     `tools/list`. GLaDOS-only flags don't ride the wire
+#                     (third-party servers don't know about them), so we
+#                     carry them here. Fields: untrusted, requires_confirmation,
+#                     timeout_s (overrides the 8s dispatch default — needed
+#                     for slow tools like Selenium page loads).
 #
-# Crash semantics for v1: if a subprocess dies, its tools' calls fail
-# loud with `RuntimeError("stdio server died")` and the voice loop keeps
-# running. Auto-restart is a follow-up (ARCH §7).
+# Crash semantics: a subprocess that dies is auto-restarted with bounded
+# attempts within a rolling window (default 3 / 60s, exponential backoff).
+# Once the budget is spent the circuit opens and tool calls return a clean
+# error rather than respawning forever. See ARCH §7.
 
 [[server]]
 id = "toy_stdio"
 command = "python"
 args = ["scripts/toy_stdio_server.py"]
 autostart = true
+
+# Gated by the v2 permission framework so the demo has a real confirm-prompt
+# path to exercise without inventing a side-effecting tool. Rolling dice is
+# not actually destructive — this is scaffolding.
+[server.tool_overlays.roll_dice]
+requires_confirmation = true

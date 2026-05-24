@@ -10,7 +10,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from .protocols import Role
 
@@ -92,16 +92,45 @@ class GladosConfig(BaseModel):
     tts: TTSConfig = TTSConfig()
 
 
+class ToolOverlay(BaseModel):
+    """GLaDOS-only flags applied on top of a tool spec fetched via real
+    MCP `tools/list`. The MCP wire schema has no slot for trust/confirm
+    flags — third-party servers don't know about them. We carry the
+    flags in `servers.toml`, keyed by the tool's `name`, and overlay
+    them after listing."""
+
+    untrusted: bool = False
+    requires_confirmation: bool = False
+    timeout_s: float | None = None
+
+
 class ServerEntry(BaseModel):
     id: str
     command: str
     args: list[str] = []
     env: dict[str, str] = {}
     autostart: bool = True
+    # Per-tool overlays keyed by the tool's `name` (not qualified).
+    # Missing tools fall back to wire defaults (all flags False / None).
+    tool_overlays: dict[str, ToolOverlay] = {}
 
 
 class ServersConfig(BaseModel):
     server: list[ServerEntry] = []
+
+    @model_validator(mode="after")
+    def _unique_server_ids(self) -> "ServersConfig":
+        seen: set[str] = set()
+        for entry in self.server:
+            if entry.id in seen:
+                # Duplicate ids would silently overwrite each other's
+                # tools in MCPRegistry (last writer wins), losing tools
+                # without a peep. Fail loud at config-load time instead.
+                raise ValueError(
+                    f"duplicate server id in servers.toml: {entry.id!r}"
+                )
+            seen.add(entry.id)
+        return self
 
 
 def load_servers_config(path: Path) -> ServersConfig:

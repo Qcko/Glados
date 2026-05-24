@@ -34,6 +34,13 @@ from .registry import CallEnvelope, MCPCallResult
 
 _log = logging.getLogger(__name__)
 
+# MCP protocol version we advertise in the initialize handshake. Servers
+# may pin to an older version in their response; we don't gate on the
+# match because today's set of methods (initialize, tools/list,
+# tools/call) is stable across the 2024-11-05 / 2025-03-26 line. Bump
+# when we adopt a method that requires a newer protocol.
+_MCP_PROTOCOL_VERSION = "2024-11-05"
+
 
 class StdioServerError(RuntimeError):
     pass
@@ -150,6 +157,30 @@ class StdioServer:
                 fut.set_exception(StdioServerError(reason))
         self._pending.clear()
 
+    async def _send_notification(self, method: str, params: dict | None = None) -> None:
+        """JSON-RPC notification — no id, no response expected. Used by
+        the MCP `notifications/initialized` handshake step."""
+        if self._closed or self._dead or self._proc is None or self._proc.stdin is None:
+            return
+        req: dict = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            req["params"] = params
+        payload = (json.dumps(req) + "\n").encode("utf-8")
+        try:
+            async with self._write_lock:
+                self._proc.stdin.write(payload)
+                await self._proc.stdin.drain()
+        except Exception as e:  # noqa: BLE001 - pipe broken, reader will mark dead
+            # Notification failures are non-fatal (the recipient doesn't
+            # ack) but worth a debug line so a partial-restart "succeeded
+            # then died" is traceable later.
+            _log.debug(
+                "stdio %s: notification %s failed: %s",
+                self.server_id,
+                method,
+                e,
+            )
+
     async def _call_method(self, method: str, params: dict | None = None) -> dict:
         if self._closed:
             raise StdioServerError(f"stdio server {self.server_id} is closed")
@@ -177,13 +208,50 @@ class StdioServer:
         return await fut
 
     async def initialize(self) -> dict:
-        resp = await self._call_method("initialize")
-        return _result_or_raise(resp)
+        """Real MCP initialize handshake. Sends protocolVersion +
+        clientInfo, awaits the server's serverInfo/capabilities, then
+        fires the `notifications/initialized` notification per the MCP
+        spec. The server is allowed to refuse tool calls until that
+        notification arrives."""
+        resp = await self._call_method(
+            "initialize",
+            {
+                "protocolVersion": _MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "glados", "version": "0.1"},
+            },
+        )
+        result = _result_or_raise(resp)
+        await self._send_notification("notifications/initialized")
+        return result
 
     async def list_tools(self) -> list[ToolSpec]:
+        """Fetch the server's tool catalogue and translate real-MCP shape
+        (`{name, description, inputSchema}`) into GLaDOS's `ToolSpec`
+        (`{server, name, description, parameters, ...}`). The `server`
+        field is injected from our configured `server_id` because real
+        MCP doesn't carry a per-tool server identifier — server identity
+        is implicit in the subprocess. GLaDOS-only flags (`untrusted`,
+        `requires_confirmation`, `timeout_s`) are NOT on the wire; they
+        live in `servers.toml` `tool_overlays` and are applied after this
+        method returns."""
         resp = await self._call_method("tools/list")
         result = _result_or_raise(resp)
-        return [ToolSpec(**t) for t in result.get("tools", [])]
+        specs: list[ToolSpec] = []
+        for t in result.get("tools", []):
+            name = t.get("name")
+            if not isinstance(name, str) or not name:
+                _log.warning("stdio %s: skipping tool with missing name", self.server_id)
+                continue
+            specs.append(
+                ToolSpec(
+                    server=self.server_id,
+                    name=name,
+                    description=t.get("description", ""),
+                    parameters=t.get("inputSchema") or {"type": "object", "properties": {}},
+                )
+            )
+        return specs
 
     async def call_tool(self, name: str, args: dict) -> MCPCallResult:
         if self._dead and not self._closed:
@@ -202,15 +270,7 @@ class StdioServer:
         if "error" in resp:
             err = resp["error"]
             return MCPCallResult(ok=False, error=err.get("message", "rpc error"))
-        result = resp.get("result") or {}
-        # The wire shape already matches MCPCallResult — the toy server
-        # returns {"ok": bool, "content": ..., "error": ...}. Validate
-        # defensively so a malformed third-party server can't crash us.
-        return MCPCallResult(
-            ok=bool(result.get("ok")),
-            content=result.get("content") if isinstance(result.get("content"), dict) else None,
-            error=result.get("error") if isinstance(result.get("error"), str) else None,
-        )
+        return _translate_tool_result(resp.get("result") or {})
 
     async def _try_restart(self) -> bool:
         """Bounded auto-restart. Returns True if the server is live after
@@ -296,6 +356,50 @@ class StdioToolProxy:
         # the subprocess (audit logging, per-user routing in Dunnes).
         # Today's toy server doesn't read them.
         return await self._server.call_tool(self.spec.name, args)
+
+
+def _translate_tool_result(result: dict) -> MCPCallResult:
+    """Translate a real-MCP `tools/call` result into `MCPCallResult`.
+
+    Real MCP carries an array of typed content blocks
+    (`[{"type":"text","text":"..."}, ...]`) plus an `isError` flag.
+    GLaDOS uses a flat `{ok, content (dict|None), error (str|None)}`.
+
+    Translation rules:
+    - Concatenate all text-typed blocks into one string. Non-text blocks
+      (images, embedded resources) are dropped today — bring back when a
+      real consumer needs them.
+    - If `isError`, return ok=False with that text as the error.
+    - Otherwise, try to parse the text as JSON. If it's a JSON object,
+      use it directly as `content`. This is how MCP servers ship
+      structured data (the spec has no first-class object response —
+      everything rides in `text` blocks). Falling back to wrapping the
+      raw string as `{"text": "..."}` keeps non-JSON tools usable.
+    """
+    is_error = bool(result.get("isError"))
+    content_items = result.get("content") or []
+    text_parts: list[str] = []
+    for item in content_items:
+        if isinstance(item, dict) and item.get("type") == "text":
+            t = item.get("text")
+            if isinstance(t, str):
+                text_parts.append(t)
+    text = "\n".join(text_parts)
+    if is_error:
+        return MCPCallResult(ok=False, error=text or "tool error")
+    if text:
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            return MCPCallResult(ok=True, content=parsed)
+        if parsed is not None:
+            # Valid JSON but not an object — list, scalar, bool, null.
+            # MCPCallResult.content is dict-only, so wrap under "value"
+            # rather than discarding the parse and re-stringifying.
+            return MCPCallResult(ok=True, content={"value": parsed})
+    return MCPCallResult(ok=True, content={"text": text})
 
 
 def _result_or_raise(resp: dict) -> dict:
