@@ -38,3 +38,135 @@ autostart = true
 # not actually destructive — this is scaffolding.
 [server.tool_overlays.roll_dice]
 requires_confirmation = true
+
+
+# ---- Dunnes Stores: Selenium-driven grocery shopping ------------------
+#
+# Unofficial MCP server at D:\dev\repos\DunnesStoresMCP that drives
+# dunnesstoresgrocery.com via a persistent Chrome profile. Login is
+# always manual (BootstrapLogin opens visible Chrome; the server never
+# sees credentials). All tool results are live scrapes — every tool is
+# untrusted. Cart writes + delivery-slot commitment are gated because
+# Selenium = real money once the user advances to payment manually.
+#
+# First-time setup (one-off):
+#   1. Ensure the profile dir exists: E:\dev\secrets\dunnes-chrome-profile
+#   2. From an MCP client, call BootstrapLogin and complete login in the
+#      Chrome window that opens. Profile cookies persist; future
+#      StartBrowser calls reuse them headlessly until cookies expire.
+
+[[server]]
+id = "dunnes"
+command = "dotnet"
+# Invoke the built assembly directly. `dotnet run` rebuilds on every
+# launch (~6s) and clutters stdout with MSBuild banners that can confuse
+# the JSON-RPC reader on slow machines. Rebuild manually after pulling:
+#   dotnet build D:\dev\repos\DunnesStoresMCP\DunnesStoresMCP\McpServer -c Release
+args = [
+    "D:/dev/repos/DunnesStoresMCP/DunnesStoresMCP/McpServer/bin/Release/net10.0/win-x64/McpServer.dll",
+]
+autostart = true
+env.DUNNES_CHROME_PROFILE = "E:/dev/secrets/dunnes-chrome-profile"
+
+# NOTE: tool keys here are snake_case — the .NET MCP SDK auto-converts
+# C# PascalCase method names (`AddToCart`) to snake_case (`add_to_cart`)
+# on the wire. Confirmed against /healthz on first boot. Overlay keys
+# match the `tool.name` returned by `tools/list`, not the C# source.
+
+# --- Browser session ---------------------------------------------------
+# Selenium operations need ~30s for SPA page loads; 35s gives headroom.
+
+[server.tool_overlays.start_browser]
+untrusted = true
+timeout_s = 35.0
+
+[server.tool_overlays.bootstrap_login]
+untrusted = true
+# Manual login — user types credentials in a visible Chrome window. Can
+# easily take a minute or three. Gated because (a) the LLM should never
+# fire it on its own; (b) the long timeout would otherwise starve the
+# room worker if it fires unattended.
+requires_confirmation = true
+timeout_s = 300.0
+
+[server.tool_overlays.open_login_page]
+untrusted = true
+timeout_s = 35.0
+
+[server.tool_overlays.check_login_status]
+untrusted = true
+timeout_s = 35.0
+
+[server.tool_overlays.stop_browser]
+untrusted = true
+timeout_s = 35.0
+
+# --- Shop & favourites -------------------------------------------------
+
+[server.tool_overlays.search_products]
+untrusted = true
+timeout_s = 35.0
+
+[server.tool_overlays.add_to_cart]
+untrusted = true
+# Cart write — confirm before letting the LLM add anything.
+requires_confirmation = true
+timeout_s = 35.0
+
+[server.tool_overlays.view_favorites]
+untrusted = true
+timeout_s = 35.0
+
+[server.tool_overlays.scan_favorites_for_sales]
+untrusted = true
+timeout_s = 35.0
+
+# --- Cart --------------------------------------------------------------
+
+[server.tool_overlays.view_cart]
+untrusted = true
+timeout_s = 35.0
+
+[server.tool_overlays.set_cart_quantity]
+untrusted = true
+requires_confirmation = true
+timeout_s = 35.0
+
+[server.tool_overlays.remove_from_cart]
+untrusted = true
+requires_confirmation = true
+timeout_s = 35.0
+
+# --- Checkout (stops at slot selection) --------------------------------
+
+[server.tool_overlays.list_delivery_slots]
+untrusted = true
+timeout_s = 35.0
+
+[server.tool_overlays.set_delivery_slot]
+untrusted = true
+# Last automated step before payment; commits a delivery window. Gate.
+requires_confirmation = true
+timeout_s = 35.0
+
+# --- Local catalog (no network — cached JSON) --------------------------
+# Untrusted because the data was originally scraped, but no Selenium so
+# the 8s dispatch default is fine.
+
+[server.tool_overlays.catalog_search]
+untrusted = true
+
+[server.tool_overlays.get_catalog_product]
+untrusted = true
+
+[server.tool_overlays.list_catalog]
+untrusted = true
+
+[server.tool_overlays.catalog_path]
+untrusted = true
+
+[server.tool_overlays.get_price_history]
+untrusted = true
+
+[server.tool_overlays.get_price_stats]
+untrusted = true

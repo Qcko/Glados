@@ -267,13 +267,19 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             )
             await server.start()
             try:
-                await server.initialize()
-                specs = await server.list_tools()
-            except Exception as e:  # noqa: BLE001
+                # A wedged third-party server (slow start, broken
+                # handshake) would otherwise block GLaDOS boot forever
+                # because initialize() has no inherent timeout. 20s is
+                # generous for any sane MCP server's handshake and well
+                # short of the room worker's patience.
+                async with asyncio.timeout(20.0):
+                    await server.initialize()
+                    specs = await server.list_tools()
+            except (Exception, asyncio.TimeoutError) as e:  # noqa: BLE001
                 log.warning(
                     "stdio server %s failed to initialise: %s — skipping",
                     entry.id,
-                    e,
+                    type(e).__name__ if isinstance(e, asyncio.TimeoutError) else e,
                 )
                 await server.aclose()
                 continue
