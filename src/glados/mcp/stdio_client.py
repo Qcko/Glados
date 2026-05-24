@@ -9,10 +9,15 @@ A `StdioToolProxy` wraps `(StdioServer, ToolSpec)` and implements the
 existing `Tool` Protocol so the `MCPRegistry` doesn't care whether a
 tool runs in-process or in a subprocess.
 
-Crash semantics for v1: when the reader task observes EOF or the
-subprocess exits, every pending future fails with `RuntimeError("stdio
-server died")` and all subsequent `call()` invocations also fail.
-Auto-restart / circuit-breaker is deferred — see ARCH §7 follow-up.
+Crash semantics: when the reader observes EOF or the subprocess exits,
+every pending future fails with `StdioServerError`. The next `call_tool`
+invocation triggers a bounded auto-restart — up to `max_restarts` within
+`restart_window_s` with exponential backoff. Once the budget is spent
+the circuit stays open: subsequent calls return a clean
+`MCPCallResult(ok=False, error=...)` until `aclose()` (no manual reset
+yet; field signal will tell us if we need one). The bound exists so a
+hard-crashing server (Selenium browser process gone for good) can't burn
+the event loop in a tight respawn loop.
 """
 
 from __future__ import annotations
@@ -43,6 +48,9 @@ class StdioServer:
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         server_id: str | None = None,
+        max_restarts: int = 3,
+        restart_window_s: float = 60.0,
+        restart_backoff_s: float = 0.5,
     ) -> None:
         self._command = command
         self._args = list(args)
@@ -59,6 +67,17 @@ class StdioServer:
         self._write_lock = asyncio.Lock()
         self._dead = False
         self._died_reason: str | None = None
+        self._closed = False
+        # Auto-restart budget: up to `max_restarts` attempts within a
+        # rolling `restart_window_s` window. Successful restarts also
+        # count — three crashes in a minute is a sign of a deeper problem
+        # and we'd rather surface "circuit open" to the LLM than chew
+        # CPU respawning forever.
+        self._max_restarts = max_restarts
+        self._restart_window_s = restart_window_s
+        self._restart_backoff_s = restart_backoff_s
+        self._restart_attempts: list[float] = []
+        self._restart_lock = asyncio.Lock()
 
     async def start(self) -> None:
         if self._proc is not None:
@@ -121,10 +140,10 @@ class StdioServer:
             return
         self._dead = True
         self._died_reason = reason
-        # Logged at error level the first (and only) time a server dies,
-        # so a stale-tools situation surfaces in the logs even though
-        # auto-restart is deferred. /healthz could surface this too in a
-        # follow-up.
+        # Logged at error level each time a server dies. With auto-restart
+        # the same server can die multiple times across a session; each
+        # death is interesting on its own. /healthz could surface a
+        # persistent dead state in a follow-up.
         _log.error("stdio server %s died: %s", self.server_id, reason)
         for fut in self._pending.values():
             if not fut.done():
@@ -132,6 +151,8 @@ class StdioServer:
         self._pending.clear()
 
     async def _call_method(self, method: str, params: dict | None = None) -> dict:
+        if self._closed:
+            raise StdioServerError(f"stdio server {self.server_id} is closed")
         if self._dead:
             raise StdioServerError(self._died_reason or "stdio server is dead")
         if self._proc is None or self._proc.stdin is None:
@@ -165,6 +186,13 @@ class StdioServer:
         return [ToolSpec(**t) for t in result.get("tools", [])]
 
     async def call_tool(self, name: str, args: dict) -> MCPCallResult:
+        if self._dead and not self._closed:
+            ok = await self._try_restart()
+            if not ok:
+                return MCPCallResult(
+                    ok=False,
+                    error=self._died_reason or "stdio server unavailable",
+                )
         try:
             resp = await self._call_method(
                 "tools/call", {"name": name, "arguments": args}
@@ -184,7 +212,57 @@ class StdioServer:
             error=result.get("error") if isinstance(result.get("error"), str) else None,
         )
 
+    async def _try_restart(self) -> bool:
+        """Bounded auto-restart. Returns True if the server is live after
+        this call. Idempotent — concurrent callers serialise on the lock
+        and only one respawn actually fires per dead-window."""
+        async with self._restart_lock:
+            if not self._dead or self._closed:
+                # Another caller already brought it back, or aclose ran.
+                return not self._closed and not self._dead
+            now = asyncio.get_running_loop().time()
+            cutoff = now - self._restart_window_s
+            self._restart_attempts = [t for t in self._restart_attempts if t > cutoff]
+            if len(self._restart_attempts) >= self._max_restarts:
+                self._died_reason = (
+                    f"stdio server {self.server_id} circuit open: "
+                    f"{self._max_restarts} restart attempts in the last "
+                    f"{self._restart_window_s:.0f}s"
+                )
+                return False
+            backoff = self._restart_backoff_s * (2 ** len(self._restart_attempts))
+            await asyncio.sleep(backoff)
+            self._restart_attempts.append(now)
+            # Drain whatever's left of the dead instance. _mark_dead has
+            # already failed _pending and cancelled nothing; we leave the
+            # old proc handle alone (it's already exited) and just null it
+            # so start() respawns a fresh one.
+            self._proc = None
+            self._reader_task = None
+            self._dead = False
+            self._died_reason = None
+            try:
+                await self.start()
+                await self.initialize()
+            except Exception as e:  # noqa: BLE001
+                # initialize() raises StdioServerError if the new subprocess
+                # also dies before responding; _mark_dead has already set
+                # _died_reason in that case.
+                if not self._dead:
+                    self._mark_dead(f"restart failed: {type(e).__name__}: {e}")
+                return False
+            _log.info(
+                "stdio server %s restarted (%d/%d in window)",
+                self.server_id,
+                len(self._restart_attempts),
+                self._max_restarts,
+            )
+            return True
+
     async def aclose(self) -> None:
+        # Mark closed first so a concurrent call_tool doesn't kick off an
+        # auto-restart against the proc we're tearing down.
+        self._closed = True
         if self._reader_task is not None and not self._reader_task.done():
             self._reader_task.cancel()
             try:

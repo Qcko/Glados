@@ -18,7 +18,7 @@ from glados.core.config import ClientBinding
 from glados.core.organizer import Organizer
 from glados.core.sessions import SessionRegistry
 from glados.core.traces import TraceStore
-from glados.mcp.registry import CallEnvelope, MCPRegistry
+from glados.mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
 from glados.servers.time_server import NowTool
 
 
@@ -98,6 +98,54 @@ async def test_mcp_dispatch_timeout() -> None:
     result = await reg.dispatch("slow", "hang", {}, env, timeout=0.05)
     assert not result.ok
     assert "timeout" in result.error
+
+
+@pytest.mark.asyncio
+async def test_mcp_dispatch_per_tool_timeout_override() -> None:
+    """spec.timeout_s overrides the dispatch default — both shorter
+    (forces timeout against a slow tool) and longer (lets a slow tool
+    finish despite a tight default)."""
+
+    class SlowTool:
+        spec = ToolSpec(
+            server="slow",
+            name="hang",
+            description="",
+            parameters={},
+            timeout_s=0.02,
+        )
+
+        async def call(self, args, envelope):
+            await asyncio.sleep(5)
+            raise AssertionError("should have been cancelled")
+
+    class QuickButOverBudget:
+        spec = ToolSpec(
+            server="patient",
+            name="wait",
+            description="",
+            parameters={},
+            timeout_s=1.0,
+        )
+
+        async def call(self, args, envelope):
+            await asyncio.sleep(0.05)
+            return MCPCallResult(ok=True, content={"done": True})
+
+    reg = MCPRegistry()
+    reg.register(SlowTool())
+    reg.register(QuickButOverBudget())
+    env = CallEnvelope(session_id="s", room_id="desk", speaker_id="qcko")
+
+    # Spec override (0.02s) wins over the generous dispatch default (5s).
+    result = await reg.dispatch("slow", "hang", {}, env, timeout=5.0)
+    assert not result.ok
+    assert "0.02" in result.error
+
+    # Spec override (1s) wins over the tight dispatch default (0.01s).
+    result = await reg.dispatch("patient", "wait", {}, env, timeout=0.01)
+    assert result.ok
+    assert result.content == {"done": True}
 
 
 # ---- Organizer ----------------------------------------------------------

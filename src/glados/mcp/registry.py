@@ -1,7 +1,10 @@
 """Tool registry + dispatcher.
 
-v0 step 2: in-process tools only. Real MCP stdio transport lands in v3 once
-the protocol shape is stable.
+Holds both in-process tools and `StdioToolProxy` instances for subprocess
+MCP servers — the dispatcher doesn't care which transport sits behind a
+spec. Per-tool timeout overrides (`ToolSpec.timeout_s`) win over the
+dispatch default; slow tools (Selenium page loads) carry their own
+budget that way.
 """
 
 from __future__ import annotations
@@ -59,9 +62,13 @@ class MCPRegistry:
         tool = self._tools.get(key)
         if tool is None:
             return MCPCallResult(ok=False, error=f"unknown tool: {key}")
+        # Per-tool override on the spec wins over the dispatch default. Lets
+        # slow tools (Selenium page loads) carry their own budget instead of
+        # forcing every call site to know.
+        effective = tool.spec.timeout_s if tool.spec.timeout_s is not None else timeout
         try:
-            return await asyncio.wait_for(tool.call(args, envelope), timeout)
+            return await asyncio.wait_for(tool.call(args, envelope), effective)
         except asyncio.TimeoutError:
-            return MCPCallResult(ok=False, error=f"timeout after {timeout}s")
+            return MCPCallResult(ok=False, error=f"timeout after {effective}s")
         except Exception as e:  # noqa: BLE001 - report any tool error to the LLM
             return MCPCallResult(ok=False, error=f"{type(e).__name__}: {e}")

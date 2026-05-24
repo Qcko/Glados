@@ -125,6 +125,109 @@ sys.exit(0)
         await server.aclose()
 
 
+# ---- Auto-restart / circuit-breaker ------------------------------------
+
+
+# Subprocess that handles initialize + tools/call normally, but exits on
+# a "die" call. Used to verify the next call_tool transparently respawns.
+_RESTARTABLE_SERVER = """
+import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    req = json.loads(line)
+    rid = req.get("id")
+    m = req.get("method")
+    if m == "initialize":
+        sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":rid,"result":{}})+"\\n")
+        sys.stdout.flush()
+    elif m == "tools/call":
+        name = req["params"]["name"]
+        if name == "die":
+            sys.exit(1)
+        sys.stdout.write(json.dumps({
+            "jsonrpc":"2.0","id":rid,
+            "result":{"ok":True,"content":{"name":name}}})+"\\n")
+        sys.stdout.flush()
+"""
+
+
+async def test_stdio_server_auto_restarts_after_crash() -> None:
+    """A crash + a follow-up call should transparently respawn the
+    subprocess and the second call should succeed against the fresh
+    instance."""
+    import asyncio
+
+    server = StdioServer(
+        sys.executable,
+        ["-c", _RESTARTABLE_SERVER],
+        restart_backoff_s=0.01,
+    )
+    await server.start()
+    try:
+        await server.initialize()
+        # First call kills the subprocess.
+        result = await server.call_tool("die", {})
+        assert not result.ok
+        # Wait for the reader to observe EOF.
+        for _ in range(40):
+            if server._dead:  # noqa: SLF001
+                break
+            await asyncio.sleep(0.02)
+        assert server._dead  # noqa: SLF001
+        # Second call should trigger restart and answer cleanly.
+        result = await server.call_tool("hello", {})
+        assert result.ok, f"expected ok after restart, got error={result.error!r}"
+        assert result.content == {"name": "hello"}
+        assert len(server._restart_attempts) == 1  # noqa: SLF001
+    finally:
+        await server.aclose()
+
+
+async def test_stdio_server_circuit_breaker_after_max_restarts() -> None:
+    """A subprocess that exits immediately after initialize should
+    exhaust the restart budget and then return a clean circuit-open
+    error rather than retrying forever."""
+    body = """
+import json, sys
+line = sys.stdin.readline()
+req = json.loads(line)
+sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{}})+"\\n")
+sys.stdout.flush()
+sys.exit(0)
+"""
+    server = StdioServer(
+        sys.executable,
+        ["-c", body],
+        max_restarts=2,
+        restart_backoff_s=0.01,
+    )
+    import asyncio
+
+    await server.start()
+    try:
+        await server.initialize()
+        for _ in range(40):
+            if server._dead:  # noqa: SLF001
+                break
+            await asyncio.sleep(0.02)
+        # Each call_tool triggers a restart attempt; subprocess dies again
+        # before tools/call can be sent, so call_tool returns ok=False.
+        # After max_restarts attempts the circuit opens.
+        for _ in range(server._max_restarts):  # noqa: SLF001
+            result = await server.call_tool("x", {})
+            assert not result.ok
+        # Budget spent: next call should report circuit-open without
+        # spawning another subprocess.
+        attempts_before = len(server._restart_attempts)  # noqa: SLF001
+        result = await server.call_tool("x", {})
+        assert not result.ok
+        assert "circuit open" in result.error
+        assert len(server._restart_attempts) == attempts_before  # noqa: SLF001
+    finally:
+        await server.aclose()
+
+
 # ---- End-to-end via build_app() spawning the real toy_stdio_server -----
 
 

@@ -36,6 +36,11 @@ class ToolSpec(BaseModel):
     # gated. Default False so today's read-only tools (echo, time, etc.)
     # are unchanged.
     requires_confirmation: bool = False
+    # Per-tool override for the registry's dispatch timeout. None falls back
+    # to the registry default (8s). Selenium-driven scrapers (Dunnes, etc.)
+    # need ~30s for a page load — bake the override into the tool's spec
+    # rather than threading a timeout argument through every call site.
+    timeout_s: float | None = None
 
     @property
     def qualified(self) -> str:
