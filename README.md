@@ -55,18 +55,19 @@ ollama pull qwen2.5:7b-instruct
 uv run glados
 ```
 
-> **Storage convention.** Large caches and model files live on `E:\` to keep
-> `C:\` lean. Persist these once with `setx`:
+> **Storage convention.** If you want large caches and model files off the
+> system drive, point the relevant env vars at a roomy disk before first
+> run. Persist once with `setx` (paths below are examples — substitute your own):
 >
 > ```powershell
-> setx OLLAMA_MODELS       "E:\ollama\models"
-> setx UV_PYTHON_INSTALL_DIR "E:\uv\python"
-> setx UV_CACHE_DIR        "E:\uv\cache"
-> setx HF_HOME             "E:\hf"
+> setx OLLAMA_MODELS         "<data-drive>\ollama\models"
+> setx UV_PYTHON_INSTALL_DIR "<data-drive>\uv\python"
+> setx UV_CACHE_DIR          "<data-drive>\uv\cache"
+> setx HF_HOME               "<data-drive>\hf"
 > ```
 >
 > If Ollama was already pulled to its default path, stop the service, move
-> `~/.ollama/models` → `E:\ollama\models`, then start it again.
+> `~/.ollama/models` to your new `OLLAMA_MODELS` location, then start it again.
 
 Build the web client once before opening the UI:
 
@@ -96,8 +97,8 @@ $env:GLADOS_LLM_BACKEND = "fake"; uv run glados
 `GLADOS_LLM_MODEL` and `GLADOS_LLM_HOST` also work as overrides.
 
 > uv stores its Python and cache on the same drive as the repo (cross-drive
-> renames fail on Windows). If the repo lives on E:, set
-> `UV_PYTHON_INSTALL_DIR=E:/uv/python` and `UV_CACHE_DIR=E:/uv/cache` first.
+> renames fail on Windows). If the repo lives off the system drive, point
+> `UV_PYTHON_INSTALL_DIR` and `UV_CACHE_DIR` at the same drive first.
 
 Configs live in [configs/](configs/): `glados.toml` for auth tokens,
 `rooms.toml` for client → room/role bindings.

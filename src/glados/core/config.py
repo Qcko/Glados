@@ -79,7 +79,10 @@ class TTSConfig(BaseModel):
     # voice from HuggingFace into `voices_dir` if not already cached.
     backend: Literal["fake", "piper"] = "piper"
     piper_voice: str = "en_GB-cori-high"
-    piper_voices_dir: Path = Path(r"E:\dev\piper\voices")
+    piper_voices_dir: Path = Path(
+        os.environ.get("GLADOS_PIPER_VOICES_DIR")
+        or (Path.home() / ".cache" / "piper" / "voices")
+    )
 
 
 class GladosConfig(BaseModel):

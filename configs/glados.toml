@@ -33,7 +33,7 @@ silero_speech_pad_ms = 30
 
 [stt]
 # "fake": returns `fake_text`. "faster-whisper": real STT (first run
-# downloads the model to HF_HOME ~ E:\hf). Default is English-only
+# downloads the model to HF_HOME). Default is English-only
 # `distil-small.en` for the latency win on CPU int8.
 #
 # To re-enable multilingual (EN + CS) input:

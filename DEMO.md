@@ -17,8 +17,8 @@ uv run glados                   # in another; serves on http://127.0.0.1:8765
 
 Open http://127.0.0.1:8765/ in a browser, grant mic permission, click the
 mic button to start streaming. First boot downloads the Whisper model
-(~250 MB) to `HF_HOME` (E:\hf) and pays a cold-start tax on the very
-first LLM call (~10–15 s while Ollama lifts the model into VRAM).
+(~250 MB) to `HF_HOME` and pays a cold-start tax on the very first LLM
+call (~10–15 s while Ollama lifts the model into VRAM).
 
 Trace files land in `traces/` (per-session JSONL) — useful to grep after
 the demo for any scenario where the in-browser feel was off.

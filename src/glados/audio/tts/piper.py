@@ -11,8 +11,9 @@ benefit: PiperTTS can be constructed in tests without touching the
 disk as long as `synthesize()` is never called.
 
 Voice files are downloaded from the rhasspy/piper-voices HuggingFace
-repo on first use into `voices_dir` (default `E:\\dev\\piper\\voices`)
-if not already present. Single-speaker voices only for v1 step 3 —
+repo on first use into `voices_dir` (default
+`$GLADOS_PIPER_VOICES_DIR` or `~/.cache/piper/voices`) if not already
+present. Single-speaker voices only for v1 step 3 —
 multi-speaker (`libritts_r` etc.) would need a `speaker_id` arg.
 
 License heads-up: piper-tts 1.4.x is GPL-3 (OHF-Voice/piper1-gpl).
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import urllib.request
 from pathlib import Path
@@ -37,13 +39,18 @@ log = logging.getLogger(__name__)
 
 _HF_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 
+_DEFAULT_VOICES_DIR = Path(
+    os.environ.get("GLADOS_PIPER_VOICES_DIR")
+    or (Path.home() / ".cache" / "piper" / "voices")
+)
+
 
 class PiperTTS:
     def __init__(
         self,
         *,
         voice: str = "en_GB-cori-high",
-        voices_dir: Path = Path(r"E:\dev\piper\voices"),
+        voices_dir: Path = _DEFAULT_VOICES_DIR,
     ) -> None:
         self._voice_name = voice
         self._voices_dir = voices_dir

@@ -42,15 +42,19 @@ requires_confirmation = true
 
 # ---- Dunnes Stores: Selenium-driven grocery shopping ------------------
 #
-# Unofficial MCP server at D:\dev\repos\DunnesStoresMCP that drives
+# Unofficial MCP server at <path-to>/DunnesStoresMCP that drives
 # dunnesstoresgrocery.com via a persistent Chrome profile. Login is
 # always manual (BootstrapLogin opens visible Chrome; the server never
 # sees credentials). All tool results are live scrapes — every tool is
 # untrusted. Cart writes + delivery-slot commitment are gated because
 # Selenium = real money once the user advances to payment manually.
 #
+# Substitute the two placeholders below for your local layout, then
+# locally run `git update-index --skip-worktree configs/servers.toml`
+# to keep your real paths out of future commits.
+#
 # First-time setup (one-off):
-#   1. Ensure the profile dir exists: E:\dev\secrets\dunnes-edge-profile
+#   1. Ensure the profile dir exists: <your-secrets-dir>/dunnes-edge-profile
 #   2. From an MCP client, call BootstrapLogin and complete login in the
 #      Edge window that opens. Profile cookies persist; future
 #      StartBrowser calls reuse them headlessly until cookies expire.
@@ -61,12 +65,12 @@ command = "dotnet"
 # Invoke the built assembly directly. `dotnet run` rebuilds on every
 # launch (~6s) and clutters stdout with MSBuild banners that can confuse
 # the JSON-RPC reader on slow machines. Rebuild manually after pulling:
-#   dotnet build D:\dev\repos\DunnesStoresMCP\DunnesStoresMCP\McpServer -c Release
+#   dotnet build <path-to>/DunnesStoresMCP/DunnesStoresMCP/McpServer -c Release
 args = [
-    "D:/dev/repos/DunnesStoresMCP/DunnesStoresMCP/McpServer/bin/Release/net10.0/win-x64/McpServer.dll",
+    "<path-to>/DunnesStoresMCP/DunnesStoresMCP/McpServer/bin/Release/net10.0/win-x64/McpServer.dll",
 ]
 autostart = true
-env.DUNNES_EDGE_PROFILE = "E:/dev/secrets/dunnes-edge-profile"
+env.DUNNES_EDGE_PROFILE = "<your-secrets-dir>/dunnes-edge-profile"
 
 # NOTE: tool keys here are snake_case — the .NET MCP SDK auto-converts
 # C# PascalCase method names (`AddToCart`) to snake_case (`add_to_cart`)
