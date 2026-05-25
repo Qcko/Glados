@@ -49,6 +49,7 @@ from .config import (
     load_rooms_config,
     load_servers_config,
 )
+from .ollama_lifecycle import OllamaLifecycle
 from .organizer import Organizer
 from .secrets import KeyringSecrets, SecretsStore
 from .protocols import (
@@ -224,6 +225,14 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        # Make sure the Ollama daemon is up before the first turn can land.
+        # Runs inline (not as a task) because warmup below depends on it
+        # being reachable. ensure() is best-effort: a failure here logs and
+        # continues, and the user-facing failure mode falls through to the
+        # existing httpx ConnectError path in OllamaLLM.chat.
+        ollama_lifecycle: OllamaLifecycle | None = _app.state.ollama_lifecycle
+        if ollama_lifecycle is not None:
+            await ollama_lifecycle.ensure()
         # Background so /healthz answers immediately and a fresh client can
         # connect while warm-up is still finishing. The first audio utterance
         # only benefits if warm-up completed first, but completing in 1-3 s
@@ -315,7 +324,9 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             # via their own task and run their finally-block before exit.
             await _app.state.organizer.close()
             # Close LLM HTTP client (OllamaLLM holds a pooled AsyncClient).
-            # Fakes don't expose aclose — skip silently.
+            # Fakes don't expose aclose — skip silently. NOTE: llm.aclose()
+            # must not require Ollama to be reachable — it only tears down
+            # the local httpx pool. We kill the daemon AFTER this step.
             llm_aclose = getattr(_app.state.llm, "aclose", None)
             if llm_aclose is not None:
                 await llm_aclose()
@@ -324,6 +335,10 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             # its subprocess vanishes.
             for srv in _app.state.stdio_servers:
                 await srv.aclose()
+            # Stop Ollama only if GLaDOS started it. A daemon that was
+            # already up when we booted may have other consumers.
+            if ollama_lifecycle is not None:
+                await ollama_lifecycle.stop_if_started()
 
     app = FastAPI(title="GLaDOS", version="0.1.0", lifespan=lifespan)
 
@@ -342,6 +357,12 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     app.state.stt = stt
     app.state.tts = tts
     app.state.llm = llm
+    # Only manage the daemon when we're actually pointed at one. Fakes don't
+    # need it; tests run with backend="fake" and get None here, so the
+    # lifespan skips both ensure() and stop_if_started().
+    app.state.ollama_lifecycle = (
+        OllamaLifecycle(glados_cfg.llm.host) if glados_cfg.llm.backend == "ollama" else None
+    )
     # VAD has per-stream buffer state, so we hand `_build_pipeline` a
     # factory rather than an instance and build fresh per connection.
     # Stored on state so tests can swap it post-`build_app()` the same
