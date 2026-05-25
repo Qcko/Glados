@@ -1,5 +1,12 @@
 # MCP stdio servers GLaDOS spawns + manages.
 #
+# === Setup ===
+# This file is the tracked TEMPLATE. The loader prefers `servers.toml`
+# (gitignored) and falls back here with a warning if it's missing.
+# Before running GLaDOS, copy this file to `configs/servers.toml` and
+# fill in the `<path-to>` / `<your-secrets-dir>` placeholders below for
+# your local layout. The real `servers.toml` will never be committed.
+#
 # Each entry spawns a subprocess on app start (when autostart=true) and
 # registers every tool returned by its `tools/list` response into the
 # MCPRegistry as `<server.id>.<tool.name>`. Transport is real MCP (line-

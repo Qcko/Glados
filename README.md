@@ -101,4 +101,16 @@ $env:GLADOS_LLM_BACKEND = "fake"; uv run glados
 > `UV_PYTHON_INSTALL_DIR` and `UV_CACHE_DIR` at the same drive first.
 
 Configs live in [configs/](configs/): `glados.toml` for auth tokens,
-`rooms.toml` for client → room/role bindings.
+`rooms.toml` for client → room/role bindings, `servers.toml` for the
+MCP subprocess servers GLaDOS spawns.
+
+`servers.toml` is **gitignored** because it carries machine-specific
+paths. Before first run, copy the tracked template:
+
+```powershell
+cp configs/servers.example.toml configs/servers.toml
+# then edit configs/servers.toml — replace every <path-to> / <your-secrets-dir>
+```
+
+If `servers.toml` is missing, GLaDOS falls back to the example with a
+warning so smoke-tests still work; for real use, copy and customize.

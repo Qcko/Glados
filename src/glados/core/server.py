@@ -68,6 +68,25 @@ log = logging.getLogger(__name__)
 
 CONFIG_DIR_ENV = "GLADOS_CONFIG_DIR"
 
+
+def _resolve_servers_toml(cfg_dir: Path) -> Path:
+    real = cfg_dir / "servers.toml"
+    if real.exists():
+        return real
+    example = cfg_dir / "servers.example.toml"
+    if example.exists():
+        log.warning(
+            "configs/servers.toml not found; falling back to "
+            "configs/servers.example.toml. Copy it to configs/servers.toml "
+            "and fill in the placeholders for your local layout."
+        )
+        return example
+    raise FileNotFoundError(
+        f"Neither {real} nor {example} exists. Copy "
+        "configs/servers.example.toml to configs/servers.toml and fill "
+        "in the placeholders for your local layout."
+    )
+
 # 100 ms of silence at 16 kHz mono int16. Whisper rejects empty PCM but
 # accepts silence; the first call still pays the model-warm-up cost.
 _WARMUP_PCM = b"\x00\x00" * 1_600
@@ -173,7 +192,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     cfg_dir = config_dir or Path(os.environ.get(CONFIG_DIR_ENV, "configs"))
     glados_cfg = load_glados_config(cfg_dir / "glados.toml")
     rooms_cfg = load_rooms_config(cfg_dir / "rooms.toml")
-    servers_cfg = load_servers_config(cfg_dir / "servers.toml")
+    servers_cfg = load_servers_config(_resolve_servers_toml(cfg_dir))
 
     traces = TraceStore(glados_cfg.server.traces_dir)
     mcp = MCPRegistry()
