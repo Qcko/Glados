@@ -5,6 +5,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 traces/
+*.log
 .env.uv
 configs/servers.toml
 client_web/node_modules/
