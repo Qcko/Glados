@@ -10,11 +10,27 @@ budget that way.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Protocol
 
 from pydantic import BaseModel
 
 from ..core.adapters import ToolSpec
+
+
+# Keep error-message arg dumps short so the LLM-visible failure stays
+# readable even when a tool was called with a large payload.
+_ARG_DUMP_MAX = 120
+
+
+def _format_args(args: dict) -> str:
+    try:
+        rendered = json.dumps(args, default=str, ensure_ascii=False)
+    except (TypeError, ValueError):
+        rendered = repr(args)
+    if len(rendered) > _ARG_DUMP_MAX:
+        rendered = rendered[: _ARG_DUMP_MAX - 1] + "…"
+    return rendered
 
 
 class CallEnvelope(BaseModel):
@@ -69,6 +85,6 @@ class MCPRegistry:
         try:
             return await asyncio.wait_for(tool.call(args, envelope), effective)
         except asyncio.TimeoutError:
-            return MCPCallResult(ok=False, error=f"timeout after {effective}s")
+            return MCPCallResult(ok=False, error=f"timeout after {effective}s calling {key}({_format_args(args)})")
         except Exception as e:  # noqa: BLE001 - report any tool error to the LLM
-            return MCPCallResult(ok=False, error=f"{type(e).__name__}: {e}")
+            return MCPCallResult(ok=False, error=f"{type(e).__name__} calling {key}({_format_args(args)}): {e}")
