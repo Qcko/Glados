@@ -443,7 +443,55 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   LLM backend still serialises — so the bottleneck has moved to the
   backend, not the Organizer. Defer until measured.
 - **Skills layer:** still skipped. Reconsider when a multi-step routine
-  (morning routine, weekly shop) repeatedly fumbles.
+  (morning routine, weekly shop, "plan my weekend" → weather + calendar
+  + local events + synthesis) repeatedly fumbles or the user asks GLaDOS
+  to *remember a process* so the second run is consistent. Shape when it
+  lands: `configs/skills/*.md` with frontmatter (`name`, `description`,
+  `tools` allowlist, optional `persona`) + markdown body; loader in
+  `brain/skills/`; Organizer matches user text against descriptions per
+  turn and prepends the skill body to the system prompt. This is the
+  answer to "should GLaDOS be multi-agent for planning?" — no, a recipe
+  store covers the *memorise-the-process* ask without IPC, and the
+  `tools` allowlist pairs naturally with the dynamic-tool-exposure item
+  below.
+- **Parallel tool dispatch in the Organizer.** Today's loop appears to
+  issue tool calls sequentially within a turn. For fan-out tasks
+  (weather + calendar + web search in one go) wall-clock collapses to
+  1× if the Organizer `asyncio.gather`s independent calls from a single
+  model turn. Preserve trace ordering by tagging calls with their issue
+  index. Cheap; do it alongside the Skills slice when that lands.
+- **Lazy MCP child spawn + idle reap.** `autostart=true` boots Chrome
+  (Dunnes Selenium) on every GLaDOS start even for sessions that never
+  shop. Add `lazy = true` in `servers.toml` (default false to preserve
+  current behaviour); `MCPRegistry` spawns + initialises + lists tools
+  on first dispatch and caches the proxy. Per-server `idle_timeout_s`
+  (default 300 s) reaps children with no activity in that window. Flip
+  Dunnes to lazy once stable. Independent of everything else here.
+- **Dynamic tool exposure.** Today ~25 tools ship in every system prompt
+  (1 NowTool + toy + 22 Dunnes). Small models start degrading around
+  30–50, and one more big MCP doubles us. Add a `ToolRouter` in `brain/`
+  that, per turn, picks a subset of `MCPRegistry.specs()` from: the
+  active skill's `tools` allowlist (free wiring from the Skills item),
+  else a keyword/embedding match against tool descriptions, plus a
+  "core tools always on" allowlist. Becomes essential past ~35 tools;
+  cheap to add earlier.
+- **Multi-agent / subagent processes.** Considered and deferred. The
+  per-MCP-plugin and per-Ollama-orchestrator splits don't pay off:
+  MCP already gives the process boundary, and an orchestrator split
+  from `MCPRegistry` would IPC across shared per-turn state (sessions,
+  traces, room queues). The legitimate case is a *single feature* with
+  long-running / context-heavy work (e.g. a `research` subagent that
+  reads 50 pages and reports 200 tokens back); build it as one tool
+  when needed, not as an architecture refactor. Skills + parallel
+  tools cover the "plan my weekend"-class scenarios that motivated the
+  question.
+- **Voice STT/TTS out-of-process.** Today STT/TTS live in the FastAPI
+  process and are shared across rooms. Splitting only pays off if
+  remote audio devices (kitchen Pi without local model weights, etc.)
+  enter the roadmap — i.e. coupled to v3 / v7. Until then, the IPC
+  hop is pure cost. Decision point: when v3 work starts, ask whether
+  the Pi runs STT locally (current plan) or streams PCM to a server-
+  side STT pool (this item). No design work until then.
 - **Pi update channel:** systemd + `/client/latest` endpoint sketched, not
   designed.
 - **Voice cloning legality** for GLaDOS-cloned voice (Valve IP). Personal use
