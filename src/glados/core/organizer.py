@@ -277,7 +277,10 @@ class Organizer:
             # for Pi clients without `webrtc-audio-processing` and for
             # external speakers where browser AEC is weak (ARCH §3
             # concurrency consequences).
-            log.debug(
+            # INFO (not DEBUG) so the silent-drop is visible in glados.log
+            # — otherwise an entire demo's worth of voice turns can vanish
+            # without a trace in production logs.
+            log.info(
                 "tts gate: dropped audio from %s in %s (text=%r)",
                 client_id, binding.room_id, text,
             )

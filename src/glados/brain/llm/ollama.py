@@ -50,8 +50,22 @@ class OllamaLLM:
         # share one client. Do NOT add `await` here — that would open a
         # double-construct window and leak a socket pool.
         if self._client is None:
+            # Streaming LLM: bound connect/write/pool to the configured
+            # timeout, but use a long per-chunk read timeout. Ollama can
+            # stall many seconds between tokens on a cold model or long
+            # prompt; the previous default (60s shared with dispatch)
+            # killed two turns mid-generation during the 2026-05-26 demo.
+            # 600s is the safety net so a fully-wedged Ollama still
+            # terminates instead of hanging the room queue forever; the
+            # MCPRegistry dispatch timeout does NOT wrap LLM streams.
             self._client = httpx.AsyncClient(
-                timeout=self._timeout, transport=self._transport
+                timeout=httpx.Timeout(
+                    connect=self._timeout,
+                    read=600.0,
+                    write=self._timeout,
+                    pool=self._timeout,
+                ),
+                transport=self._transport,
             )
         return self._client
 

@@ -71,6 +71,13 @@ header button.disconnect { background: var(--error); color: #fff; }
   background: rgba(239,91,91,.12); border-color: rgba(239,91,91,.4); color: var(--error);
 }
 .meta { font-size: .65rem; color: var(--muted); margin-top: .25rem; }
+.tool-bubble summary { cursor: pointer; list-style: revert; }
+.tool-bubble summary::-webkit-details-marker { color: var(--muted); }
+.tool-payload {
+  margin: .5rem 0 0; padding: .5rem; border-radius: 4px;
+  background: rgba(0,0,0,.18); white-space: pre-wrap; word-break: break-word;
+  max-height: 18rem; overflow: auto; font-size: .8rem;
+}
 
 footer {
   padding: .75rem 1rem; border-top: 1px solid var(--line);
