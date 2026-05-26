@@ -69,11 +69,17 @@ class OllamaLifecycle:
             # DETACHED_PROCESS so a GLaDOS crash leaves Ollama running
             # instead of orphaning a half-dead process tree; next clean
             # boot will find it up and started_by_us stays False.
+            # SW_SHOWMINNOACTIVE (7): tray starts minimized without
+            # stealing focus — GLaDOS boot shouldn't pop windows.
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 7
             await asyncio.to_thread(
                 subprocess.Popen,  # noqa: S603 — path is from env or known-good probe
                 [str(tray)],
                 close_fds=True,
                 creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
+                startupinfo=startupinfo,
             )
         except OSError as e:
             log.error("Failed to launch Ollama tray: %s — first LLM call will fail", e)

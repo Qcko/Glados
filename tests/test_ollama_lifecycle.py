@@ -76,6 +76,10 @@ async def test_ensure_launches_tray_and_marks_started(monkeypatch, tmp_path):
     assert lc.started_by_us is True
     assert len(popen_calls) == 1
     assert popen_calls[0][0][0] == [str(fake_tray)]
+    si = popen_calls[0][1]["startupinfo"]
+    import subprocess as _sp
+    assert si.dwFlags & _sp.STARTF_USESHOWWINDOW
+    assert si.wShowWindow == 7  # SW_SHOWMINNOACTIVE
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="taskkill is Windows-only")
