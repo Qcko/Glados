@@ -66,6 +66,26 @@ def _is_barge_in(text: str) -> bool:
     return bool(text) and _BARGE_IN_RE.match(text.strip()) is not None
 
 
+# Strip-for-TTS pass: kill the markdown punctuation Piper would otherwise
+# read aloud ("asterisk asterisk milk asterisk asterisk"). Whitelisted —
+# we only undo formatting tokens, not real punctuation. Chat surface keeps
+# the original text via assistant_delta; only audio synthesis sees this.
+_MD_BOLD_ITALIC_RE = re.compile(r"\*{1,3}([^*\n]+?)\*{1,3}")
+_MD_UNDERSCORE_EMPH_RE = re.compile(r"(?<!\w)_{1,2}([^_\n]+?)_{1,2}(?!\w)")
+_MD_CODE_RE = re.compile(r"`+([^`\n]+?)`+")
+_MD_BULLET_RE = re.compile(r"^[ \t]*[-*+][ \t]+", flags=re.MULTILINE)
+_MD_HEADING_RE = re.compile(r"^#{1,6}[ \t]+", flags=re.MULTILINE)
+
+
+def _strip_markdown_for_tts(text: str) -> str:
+    text = _MD_BOLD_ITALIC_RE.sub(r"\1", text)
+    text = _MD_UNDERSCORE_EMPH_RE.sub(r"\1", text)
+    text = _MD_CODE_RE.sub(r"\1", text)
+    text = _MD_BULLET_RE.sub("", text)
+    text = _MD_HEADING_RE.sub("", text)
+    return text
+
+
 class Organizer:
     def __init__(
         self,
@@ -380,6 +400,14 @@ class Organizer:
         self, session_id: str, room_id: str, text: str, trace
     ) -> None:
         if self.tts is None or not text.strip():
+            return
+        # The LLM emits markdown for the chat surface (bold via **, bullets
+        # via "- "). Piper reads those characters literally — "asterisk
+        # asterisk Item asterisk asterisk" — so strip them for the audio
+        # path only. The chat surface still receives the original text via
+        # assistant_delta upstream.
+        text = _strip_markdown_for_tts(text)
+        if not text.strip():
             return
         # Mark the room as speaking BEFORE any chunk goes out so the gate
         # is up the moment a mic could start hearing TTS audio. Cleared
