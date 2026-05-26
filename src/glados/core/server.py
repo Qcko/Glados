@@ -49,6 +49,7 @@ from .config import (
     load_rooms_config,
     load_servers_config,
 )
+from .logging_setup import setup_logging
 from .ollama_lifecycle import OllamaLifecycle
 from .organizer import Organizer
 from .secrets import KeyringSecrets, SecretsStore
@@ -189,6 +190,8 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     so tests can construct isolated apps and the lifespan cleans up
     per-app room workers on shutdown.
     """
+    log_path = setup_logging()
+    log.info("glados starting (logging to %s)", log_path)
     cfg_dir = config_dir or Path(os.environ.get(CONFIG_DIR_ENV, "configs"))
     glados_cfg = load_glados_config(cfg_dir / "glados.toml")
     rooms_cfg = load_rooms_config(cfg_dir / "rooms.toml")

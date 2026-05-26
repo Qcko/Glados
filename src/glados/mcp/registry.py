@@ -11,11 +11,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from typing import Protocol
 
 from pydantic import BaseModel
 
 from ..core.adapters import ToolSpec
+
+
+_log = logging.getLogger(__name__)
 
 
 # Keep error-message arg dumps short so the LLM-visible failure stays
@@ -82,9 +87,18 @@ class MCPRegistry:
         # slow tools (Selenium page loads) carry their own budget instead of
         # forcing every call site to know.
         effective = tool.spec.timeout_s if tool.spec.timeout_s is not None else timeout
+        # Same truncated rendering used for entry, exit, timeout, and error
+        # lines — avoids a multi-KB tool argument flooding the log.
+        rendered_args = _format_args(args)
+        _log.info("dispatch %s args=%s timeout=%ss", key, rendered_args, effective)
+        started = time.monotonic()
         try:
-            return await asyncio.wait_for(tool.call(args, envelope), effective)
+            result = await asyncio.wait_for(tool.call(args, envelope), effective)
+            _log.info("dispatch %s ok=%s elapsed=%dms", key, result.ok, int((time.monotonic() - started) * 1000))
+            return result
         except asyncio.TimeoutError:
-            return MCPCallResult(ok=False, error=f"timeout after {effective}s calling {key}({_format_args(args)})")
+            _log.warning("dispatch %s timeout after %ss", key, effective)
+            return MCPCallResult(ok=False, error=f"timeout after {effective}s calling {key}({rendered_args})")
         except Exception as e:  # noqa: BLE001 - report any tool error to the LLM
-            return MCPCallResult(ok=False, error=f"{type(e).__name__} calling {key}({_format_args(args)}): {e}")
+            _log.exception("dispatch %s raised", key)
+            return MCPCallResult(ok=False, error=f"{type(e).__name__} calling {key}({rendered_args}): {e}")

@@ -66,6 +66,7 @@ class StdioServer:
         self.server_id = server_id or command
         self._proc: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task | None = None
+        self._stderr_task: asyncio.Task | None = None
         self._pending: dict[int, asyncio.Future[dict]] = {}
         self._next_id = 1
         # Serialises writes so two concurrent `call()` invocations cannot
@@ -95,21 +96,42 @@ class StdioServer:
         # non-ASCII text — set PYTHONIOENCODING and pass the env through.
         env = dict(self._env or {})
         env.setdefault("PYTHONIOENCODING", "utf-8")
-        # stderr inherits the parent's so a verbose third-party server
-        # never deadlocks on a full pipe buffer (~64KB on Windows). We
-        # don't capture stderr today; a follow-up could pipe + drain it
-        # into the logger if structured server logs become useful.
+        # stderr piped + drained into the logger so server diagnostics
+        # land in glados.log regardless of how the parent process was
+        # launched. A dedicated drain task keeps the pipe from filling
+        # (Windows pipe buffers cap around 64KB).
         self._proc = await asyncio.create_subprocess_exec(
             self._command,
             *self._args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
             env={**_os_environ(), **env},
             cwd=self._cwd,
         )
         self._reader_task = asyncio.create_task(
             self._read_loop(), name=f"stdio-reader-{self.server_id}"
         )
+        self._stderr_task = asyncio.create_task(
+            self._drain_stderr(), name=f"stdio-stderr-{self.server_id}"
+        )
+
+    async def _drain_stderr(self) -> None:
+        assert self._proc is not None and self._proc.stderr is not None
+        child_log = logging.getLogger(f"mcp.stdio.{self.server_id}")
+        try:
+            while True:
+                line = await self._proc.stderr.readline()
+                if not line:
+                    return
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    child_log.info(text)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Never let the drain task tear down the server.
+            _log.exception("stdio %s: stderr drain crashed", self.server_id)
 
     async def _read_loop(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
@@ -299,6 +321,7 @@ class StdioServer:
             # so start() respawns a fresh one.
             self._proc = None
             self._reader_task = None
+            self._stderr_task = None
             self._dead = False
             self._died_reason = None
             try:
@@ -327,6 +350,12 @@ class StdioServer:
             self._reader_task.cancel()
             try:
                 await self._reader_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self._stderr_task is not None and not self._stderr_task.done():
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
             except (asyncio.CancelledError, Exception):
                 pass
         if self._proc is not None:

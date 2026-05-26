@@ -118,10 +118,16 @@ timeout_s = 35.0
 untrusted = true
 timeout_s = 35.0
 
+# Cart writes (add_to_cart, set_cart_quantity, remove_from_cart) and the
+# delivery-slot commit are intentionally NOT gated by requires_confirmation.
+# The hard safety boundary is the manual payment step in the visible Edge
+# window — Dunnes MCP never submits payment, the user reviews the cart and
+# pays themselves. Inserting a per-call confirmation modal on top of that
+# would break the conversation flow ("add milk" -> "may I add milk?" ->
+# "yes" makes no sense as voice UX) without adding real money safety.
+
 [server.tool_overlays.add_to_cart]
 untrusted = true
-# Cart write — confirm before letting the LLM add anything.
-requires_confirmation = true
 timeout_s = 35.0
 
 [server.tool_overlays.view_favorites]
@@ -140,12 +146,10 @@ timeout_s = 35.0
 
 [server.tool_overlays.set_cart_quantity]
 untrusted = true
-requires_confirmation = true
 timeout_s = 35.0
 
 [server.tool_overlays.remove_from_cart]
 untrusted = true
-requires_confirmation = true
 timeout_s = 35.0
 
 # --- Checkout (stops at slot selection) --------------------------------
@@ -156,8 +160,8 @@ timeout_s = 35.0
 
 [server.tool_overlays.set_delivery_slot]
 untrusted = true
-# Last automated step before payment; commits a delivery window. Gate.
-requires_confirmation = true
+# Last automated step before payment; ungated for the same reason as the
+# cart writes — manual payment is the safety boundary.
 timeout_s = 35.0
 
 # --- Local catalog (no network — cached JSON) --------------------------
