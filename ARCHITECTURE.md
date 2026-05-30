@@ -390,6 +390,37 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   same platform. Different stack (Web API + OAuth, no Selenium),
   so the credentials story exercises the keyring differently.
 
+- **v2.6 — hybrid LLM router (local brain + cloud brain).** After the
+  bake-off picks a local model, accept that even the best local 14b will
+  fumble open-ended reasoning. Add a router between STT and the LLM
+  layer that, per turn, picks one of two end-to-end paths:
+  1. **Local path.** Existing flow: local LLM reasons, calls tools via
+     MCP registry, streams reply tokens.
+  2. **Cloud path.** A zero-retention cloud LLM reasons and calls the
+     *same* MCP tools directly (the registry doesn't care which model
+     drives it). Local side is a pure dispatcher on this path — no
+     local LLM in the loop, so no semantic-loss "brain/hands" split.
+
+  Both paths terminate in local Piper TTS. The router lives in
+  `brain/router/` and ships **deterministic first** (keyword + length
+  + clause-shape rules, mirroring the effort-router pattern): tool-trigger
+  verbs and short imperatives → local; "why" / "explain" / "compare" /
+  long multi-clause → cloud; ambiguous → local with a refusal/low-confidence
+  signal that retries on cloud. An LLM-driven router is an optimisation
+  layered on top once a week of logged decisions shows the rules
+  mis-route in ways the retry loop can't absorb.
+
+  Privacy consequence worth flagging up front: on the cloud path, *tool
+  arguments and tool results* cross the wire alongside the transcript —
+  basket contents, calendar entries, search hits. Not just conversation.
+  §9's invariant tightens to "no cloud LLM call carries data the user
+  hasn't explicitly opted into routing externally"; the router's
+  deterministic rules are the gate.
+
+  Demo path: ask GLaDOS something the local model is known to mangle
+  (multi-step reasoning, niche knowledge) → router selects cloud →
+  cloud calls `get_time` or similar → reply spoken via Piper.
+
 - **v3 — Pi room client.** Python + PortAudio + WebSocket + AEC. systemd
   unit, auto-update from server. One Pi per room.
 
@@ -545,6 +576,22 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   framing softens to "no data leaves the user's own devices." This is
   a material change to the project's framing and should land in BRIEF
   when v8 ships, not silently in this doc.
+- **Cloud LLM provider for the v2.6 hybrid router.** Several
+  zero-retention options exist and the choice doesn't need to be made
+  before the local-model bake-off concludes. Realistic shortlist:
+  Anthropic (Haiku 4.5 for cheap/fast, Sonnet/Opus for heavy turns;
+  zero-retention available on request), OpenAI (zero-retention via
+  enterprise / explicit opt-out), Azure OpenAI (no-logging deployments
+  by config), self-hosted on a rented GPU VPS (full control, ops cost).
+  Pick after v2.6 router lands and a week of real cloud-path traffic
+  reveals the actual mix of "smart turn" workloads.
+- **Router escalation policy for v2.6.** Open question whether
+  low-confidence local turns should silently retry on cloud (cheap,
+  better UX, privacy-leaks a turn the rules said was local) or surface
+  "I'm not sure — try again, or say 'use cloud'" (preserves the
+  privacy invariant strictly, worse UX). Default-position: silent
+  retry, with a config knob to flip strict. Revisit once traces show
+  how often retries fire.
 - **Mobile audio path.** Android Auto's published app categories
   don't admit a general voice assistant; sideloaded media-session PTT
   sidesteps the category problem entirely (no Play Store; personal
