@@ -121,6 +121,20 @@ class Cancelled(BaseModel):
     session_id: str
 
 
+class TurnOutcome(BaseModel):
+    """Typed verdict on how the turn ended, broadcast right before `Done`.
+
+    Derived deterministically from observed tool results (see
+    `core/turn_outcome.py`), never from the model's self-report. The UI can
+    surface a failed/needs-user turn that the model narrated as success, and
+    the v2.6 router consumes it as an escalation input ("did the local model
+    actually finish?")."""
+
+    type: Literal["turn_outcome"] = "turn_outcome"
+    session_id: str
+    outcome: Literal["done", "needs-user", "failed"]
+
+
 class ToolConfirmRequest(BaseModel):
     """Sent to clients in the originating room when the LLM tries to
     call a tool whose ToolSpec.requires_confirmation is True. Any client
@@ -152,6 +166,7 @@ ServerMessage = Annotated[
     | TtsChunk
     | Done
     | Cancelled
+    | TurnOutcome
     | ToolConfirmRequest
     | ErrorMessage,
     Field(discriminator="type"),

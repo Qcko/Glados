@@ -32,12 +32,14 @@ from .protocols import (
     ToolConfirmResponse,
     ToolResult,
     TtsChunk,
+    TurnOutcome,
     UserTranscript,
     Welcome,
 )
 from .room_queues import RoomQueueManager
 from .sessions import SessionRegistry
 from .traces import TraceStore
+from .turn_outcome import TurnRecord, classify
 
 log = logging.getLogger(__name__)
 
@@ -218,6 +220,7 @@ class Organizer:
                 LLMMessage(role="user", content=text),
             ]
             final_text = ""
+            outcome = TurnRecord()
             for _ in range(_MAX_TOOL_LOOP):
                 pending_calls, assistant_text = await self._run_one_llm_pass(
                     session.session_id, session.room_id, messages, trace
@@ -233,13 +236,18 @@ class Organizer:
                     )
                 )
                 await self._run_tool_calls(
-                    session.session_id, session.room_id, envelope, pending_calls, messages, trace
+                    session.session_id, session.room_id, envelope, pending_calls, messages, trace, outcome
                 )
             else:
+                outcome.loop_exhausted = True
                 final_text = await self._handle_loop_exhausted(
                     session.session_id, session.room_id, trace
                 )
+            outcome.final_text = final_text
             await self._speak(session.session_id, session.room_id, final_text, trace)
+            await self._emit_turn_outcome(
+                session.session_id, session.room_id, outcome, trace
+            )
             await self._broadcast(session.room_id, Done(session_id=session.session_id))
             trace.event("done")
         except asyncio.CancelledError:
@@ -396,6 +404,15 @@ class Organizer:
         trace.event("tool_loop_exhausted", limit=_MAX_TOOL_LOOP)
         return msg
 
+    async def _emit_turn_outcome(
+        self, session_id: str, room_id: str, outcome: TurnRecord, trace
+    ) -> None:
+        kind = classify(outcome)
+        trace.event("turn_outcome", outcome=kind)
+        await self._broadcast(
+            room_id, TurnOutcome(session_id=session_id, outcome=kind)
+        )
+
     async def _speak(
         self, session_id: str, room_id: str, text: str, trace
     ) -> None:
@@ -451,6 +468,7 @@ class Organizer:
         calls: list[LLMToolCall],
         messages: list[LLMMessage],
         trace,
+        outcome: TurnRecord,
     ) -> None:
         for tc in calls:
             await self._broadcast(
@@ -471,6 +489,7 @@ class Organizer:
                 args=tc.args,
             )
             spec = self.mcp.spec_for(tc.server, tc.name)
+            denied = False
             if spec is not None and spec.requires_confirmation:
                 granted = await self._await_confirmation(
                     session_id=session_id,
@@ -480,6 +499,7 @@ class Organizer:
                     trace=trace,
                 )
                 if not granted:
+                    denied = True
                     result = MCPCallResult(ok=False, error="user denied")
                 else:
                     result = await self.mcp.dispatch(
@@ -504,6 +524,20 @@ class Organizer:
                 content=result.content,
                 error=result.error,
             )
+            # A user-denied confirmation is a deliberate boundary, not a tool
+            # failure — don't let it poison the turn outcome as `failed` (and
+            # so spuriously escalate to the v2.6 cloud router). Skip recording
+            # it entirely; the model still sees `user denied` in the transcript.
+            #
+            # requires_confirmation is the existing per-tool "mutates external
+            # state" flag — reuse it as the mutating signal for outcome
+            # classification rather than inventing a second taxonomy.
+            if not denied:
+                outcome.record_tool(
+                    f"{tc.server}.{tc.name}",
+                    result.ok,
+                    mutating=spec.requires_confirmation if spec is not None else False,
+                )
             raw = json.dumps(result.content) if result.ok else (result.error or "error")
             # `spec` already fetched above for the requires_confirmation
             # check — reuse rather than another registry lookup.

@@ -195,7 +195,7 @@ async def test_organizer_runs_tool_loop(tmp_path: Path) -> None:
         types = [m["type"] for _, m in sink]
         assert types == [
             "welcome", "user_transcript", "tool_call", "tool_result",
-            "assistant_delta", "done",
+            "assistant_delta", "turn_outcome", "done",
         ]
         session_ids = {m["session_id"] for _, m in sink if "session_id" in m}
         assert len(session_ids) == 1
@@ -324,7 +324,7 @@ def test_e2e_time_question(http_client: TestClient) -> None:
     with http_client.websocket_connect("/ws/v1") as ws:
         ws.send_json(_hello("desk-ui", "desk", "dev-token-desk"))
         ws.send_json({"type": "user_text", "text": "what time is it?"})
-        msgs = [ws.receive_json() for _ in range(7)]
+        msgs = [ws.receive_json() for _ in range(8)]
     assert [m["type"] for m in msgs] == [
         "welcome",
         "user_transcript",
@@ -332,6 +332,7 @@ def test_e2e_time_question(http_client: TestClient) -> None:
         "tool_result",
         "assistant_delta",
         "tts_chunk",
+        "turn_outcome",
         "done",
     ]
     assert msgs[3]["ok"] is True
