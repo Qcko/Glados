@@ -14,6 +14,11 @@ os.environ.setdefault("GLADOS_LLM_BACKEND", "fake")
 os.environ.setdefault("GLADOS_VAD_BACKEND", "fake")
 os.environ.setdefault("GLADOS_STT_BACKEND", "fake")
 os.environ.setdefault("GLADOS_TTS_BACKEND", "fake")
+# Pin the v2.6 router OFF for the default app, independent of whatever the
+# shipped configs/glados.toml sets. The end-to-end wire-sequence tests assert
+# exact frame order and must not gain a `route_notice` just because routing is
+# enabled by default; routing itself is covered in test_router.py.
+os.environ.setdefault("GLADOS_ROUTER_ENABLED", "false")
 
 import pytest
 
