@@ -31,6 +31,7 @@ from ..audio.tts.fake import FakeTTS
 from ..audio.vad.fake import FakeVAD
 from ..brain.llm.fake import FakeLLM
 from ..brain.llm.ollama import OllamaLLM
+from ..brain.router import Router
 from ..mcp.registry import MCPRegistry
 from ..mcp.stdio_client import StdioServer, StdioToolProxy
 from ..servers.time_server import NowTool
@@ -41,6 +42,7 @@ from .config import (
     GladosConfig,
     LLMConfig,
     RoomsConfig,
+    RouterConfig,
     ServersConfig,
     STTConfig,
     TTSConfig,
@@ -129,6 +131,52 @@ def _build_llm(cfg: LLMConfig) -> LLM:
     return FakeLLM()
 
 
+def _build_cloud_llm(
+    cfg: RouterConfig, llm_cfg: LLMConfig, local_llm: LLM
+) -> LLM | None:
+    """Construct the smart ("cloud") brain for the v2.6 router, or None when
+    it isn't wired. Returns None unless the router is enabled.
+
+    provider="local" is a loopback: the smart path runs on a local Ollama
+    model too. Nothing leaves the box, so it needs neither the cloud opt-in nor
+    an API key — it exists so the router, escalation, and UI can be exercised
+    before a real cloud provider is chosen. An empty `local_smart_model`
+    reuses the already-built local brain instance (identical behaviour).
+
+    provider="anthropic" is the real cloud path and fails closed: the cloud
+    opt-in must be set AND the API key present in the configured env var (TOML
+    never holds the key — ARCH §9). A missing key logs a warning and disables
+    cloud rather than crashing boot."""
+    if not cfg.enabled:
+        return None
+    if cfg.provider == "local":
+        if not cfg.local_smart_model or cfg.local_smart_model == llm_cfg.model:
+            return local_llm  # true loopback — same instance, same model
+        return OllamaLLM(
+            host=llm_cfg.host,
+            model=cfg.local_smart_model,
+            temperature=llm_cfg.temperature,
+            timeout=llm_cfg.timeout,
+        )
+    if not cfg.cloud_enabled:
+        return None
+    api_key = os.environ.get(cfg.api_key_env)
+    if not api_key:
+        log.warning(
+            "router.cloud_enabled is set but %s is empty — cloud path disabled, "
+            "all turns run local",
+            cfg.api_key_env,
+        )
+        return None
+    from ..brain.llm.anthropic import AnthropicLLM
+
+    return AnthropicLLM(api_key=api_key, model=cfg.cloud_model)
+
+
+def _build_router(cfg: RouterConfig) -> Router | None:
+    return Router(max_words_local=cfg.max_words_local) if cfg.enabled else None
+
+
 def _build_vad(cfg: VADConfig) -> VAD:
     if cfg.backend == "silero":
         from ..audio.vad.silero import SileroVAD
@@ -207,6 +255,8 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     # here for shutdown:
     stdio_servers: list[StdioServer] = []
     llm = _build_llm(glados_cfg.llm)
+    cloud_llm = _build_cloud_llm(glados_cfg.router, glados_cfg.llm, llm)
+    router = _build_router(glados_cfg.router)
     # STT and TTS are shared across connections (real backends load model
     # weights on construct). VAD is per-connection — it carries per-stream
     # buffer state — and is built fresh in `_build_pipeline`.
@@ -243,6 +293,9 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         send=send,
         binding_for_client=rooms_cfg.find,
         clients_in_room=clients_in_room,
+        router=router,
+        cloud_llm=cloud_llm,
+        escalate_on_failed=glados_cfg.router.escalate_on_failed,
     )
 
     @asynccontextmanager
@@ -352,6 +405,14 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             llm_aclose = getattr(_app.state.llm, "aclose", None)
             if llm_aclose is not None:
                 await llm_aclose()
+            # Cloud brain (v2.6 router) holds its own pooled AsyncClient.
+            # In provider="local" loopback the cloud brain IS the local llm
+            # instance — already closed above — so skip it to avoid a
+            # double-aclose.
+            cloud = _app.state.cloud_llm
+            cloud_aclose = getattr(cloud, "aclose", None)
+            if cloud_aclose is not None and cloud is not _app.state.llm:
+                await cloud_aclose()
             # Tear down stdio MCP subprocesses last so any in-flight tool
             # call gets cancelled by the organizer.close() above before
             # its subprocess vanishes.
@@ -379,6 +440,8 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     app.state.stt = stt
     app.state.tts = tts
     app.state.llm = llm
+    app.state.cloud_llm = cloud_llm
+    app.state.router = router
     # Only manage the daemon when we're actually pointed at one. Fakes don't
     # need it; tests run with backend="fake" and get None here, so the
     # lifespan skips both ensure() and stop_if_started().

@@ -20,6 +20,7 @@ from typing import Awaitable, Callable, Literal
 from pydantic import BaseModel
 
 from ..brain.prompts import SYSTEM_PROMPT
+from ..brain.router import Router
 from ..mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
 from .adapters import LLM, TTS, LLMMessage, LLMText, LLMToolCall
 from .config import ClientBinding
@@ -27,6 +28,7 @@ from .protocols import (
     AssistantDelta,
     Cancelled,
     Done,
+    RouteNotice,
     ToolCall,
     ToolConfirmRequest,
     ToolConfirmResponse,
@@ -39,7 +41,7 @@ from .protocols import (
 from .room_queues import RoomQueueManager
 from .sessions import SessionRegistry
 from .traces import TraceStore
-from .turn_outcome import TurnRecord, classify
+from .turn_outcome import TurnRecord, classify, is_action_request
 
 log = logging.getLogger(__name__)
 
@@ -103,8 +105,19 @@ class Organizer:
         room_queues: RoomQueueManager | None = None,
         tts_cooldown_s: float = 0.200,
         confirm_timeout_s: float = 30.0,
+        router: Router | None = None,
+        cloud_llm: LLM | None = None,
+        escalate_on_failed: bool = True,
     ) -> None:
         self.llm = llm
+        # v2.6 hybrid router. When `router` is None the organizer behaves
+        # exactly as before — every turn runs on `self.llm` (local) with no
+        # RouteNotice emitted. `cloud_llm` is the second brain; it is only
+        # constructed by the server when the privacy opt-in + an API key are
+        # both present, so `cloud_llm is not None` IS the privacy gate here.
+        self._router = router
+        self._cloud_llm = cloud_llm
+        self._escalate_on_failed = escalate_on_failed
         self.tts = tts
         self.mcp = mcp
         self.traces = traces
@@ -215,35 +228,22 @@ class Organizer:
                 ),
             )
 
-            messages: list[LLMMessage] = [
-                LLMMessage(role="system", content=SYSTEM_PROMPT),
-                LLMMessage(role="user", content=text),
-            ]
-            final_text = ""
-            outcome = TurnRecord()
-            for _ in range(_MAX_TOOL_LOOP):
-                pending_calls, assistant_text = await self._run_one_llm_pass(
-                    session.session_id, session.room_id, messages, trace
+            llm, target, reason = self._select_path(text)
+            if self._router is not None:
+                trace.event("route", target=target, reason=reason)
+                await self._broadcast(
+                    session.room_id,
+                    RouteNotice(
+                        session_id=session.session_id, target=target, reason=reason
+                    ),
                 )
-                if not pending_calls:
-                    final_text = assistant_text
-                    break
-                messages.append(
-                    LLMMessage(
-                        role="assistant",
-                        content=assistant_text or None,
-                        tool_calls=pending_calls,
-                    )
+            final_text, outcome = await self._drive(
+                llm, session.session_id, session.room_id, envelope, text, trace
+            )
+            if self._should_escalate(target, outcome):
+                final_text, outcome = await self._escalate_to_cloud(
+                    session.session_id, session.room_id, envelope, text, trace
                 )
-                await self._run_tool_calls(
-                    session.session_id, session.room_id, envelope, pending_calls, messages, trace, outcome
-                )
-            else:
-                outcome.loop_exhausted = True
-                final_text = await self._handle_loop_exhausted(
-                    session.session_id, session.room_id, trace
-                )
-            outcome.final_text = final_text
             await self._speak(session.session_id, session.room_id, final_text, trace)
             await self._emit_turn_outcome(
                 session.session_id, session.room_id, outcome, trace
@@ -364,8 +364,106 @@ class Organizer:
             return
         task.cancel()
 
+    async def _drive(
+        self,
+        llm: LLM,
+        session_id: str,
+        room_id: str,
+        envelope: CallEnvelope,
+        text: str,
+        trace,
+    ) -> tuple[str, TurnRecord]:
+        """Run one end-to-end turn (tool loop) on `llm` and return the final
+        spoken text plus the classified turn record. Pure of routing — the
+        caller decides which `llm` to hand in and whether to re-run on cloud."""
+        messages: list[LLMMessage] = [
+            LLMMessage(role="system", content=SYSTEM_PROMPT),
+            LLMMessage(role="user", content=text),
+        ]
+        final_text = ""
+        outcome = TurnRecord(action_intent=is_action_request(text))
+        for _ in range(_MAX_TOOL_LOOP):
+            pending_calls, assistant_text = await self._run_one_llm_pass(
+                llm, session_id, room_id, messages, trace
+            )
+            if not pending_calls:
+                final_text = assistant_text
+                break
+            messages.append(
+                LLMMessage(
+                    role="assistant",
+                    content=assistant_text or None,
+                    tool_calls=pending_calls,
+                )
+            )
+            await self._run_tool_calls(
+                session_id, room_id, envelope, pending_calls, messages, trace, outcome
+            )
+        else:
+            outcome.loop_exhausted = True
+            final_text = await self._handle_loop_exhausted(session_id, room_id, trace)
+        outcome.final_text = final_text
+        return final_text, outcome
+
+    def _select_path(self, text: str) -> tuple[LLM, Literal["local", "cloud"], str]:
+        """Pick the brain for this turn. Falls back to local whenever the
+        router is absent, or routes cloud but the cloud brain isn't wired
+        (no opt-in / no key) — the privacy gate fails closed, toward local."""
+        if self._router is None:
+            return self.llm, "local", "router disabled"
+        decision = self._router.decide(text)
+        if decision.target == "cloud":
+            if self._cloud_llm is not None:
+                return self._cloud_llm, "cloud", decision.reason
+            return self.llm, "local", f"cloud unavailable ({decision.reason})"
+        return self.llm, "local", decision.reason
+
+    def _should_escalate(
+        self, target: Literal["local", "cloud"], outcome: TurnRecord
+    ) -> bool:
+        """A local turn that came back `failed` is the escalation trigger —
+        the deterministic outcome says the local brain didn't finish. Cloud
+        turns never escalate (there's nowhere further to go), and escalation
+        needs the cloud brain wired and the feature enabled.
+
+        A turn that already landed a successful mutating call is never
+        escalated even when it classifies `failed` (loop exhaustion, or a
+        later unrelated tool error): re-driving the user request cold on cloud
+        would fire that side effect a second time (double cart-add / checkout).
+        Better a visible local `failed` than a duplicated mutation."""
+        return (
+            target == "local"
+            and self._escalate_on_failed
+            and self._cloud_llm is not None
+            and not outcome.made_successful_mutation()
+            and classify(outcome) == "failed"
+        )
+
+    async def _escalate_to_cloud(
+        self,
+        session_id: str,
+        room_id: str,
+        envelope: CallEnvelope,
+        text: str,
+        trace,
+    ) -> tuple[str, TurnRecord]:
+        trace.event("escalate", reason="local outcome failed")
+        await self._broadcast(
+            room_id,
+            RouteNotice(
+                session_id=session_id,
+                target="cloud",
+                reason="local turn failed — retrying on cloud",
+                escalated=True,
+            ),
+        )
+        return await self._drive(
+            self._cloud_llm, session_id, room_id, envelope, text, trace
+        )
+
     async def _run_one_llm_pass(
         self,
+        llm: LLM,
         session_id: str,
         room_id: str,
         messages: list[LLMMessage],
@@ -380,9 +478,9 @@ class Organizer:
         pending: list[LLMToolCall] = []
         text_chunks: list[str] = []
         # aclosing guarantees the upstream HTTP stream gets aclose()'d on
-        # CancelledError — otherwise Ollama keeps generating tokens we'll
+        # CancelledError — otherwise the model keeps generating tokens we'll
         # never read (ARCH §6: cancellation must propagate end-to-end).
-        async with aclosing(self.llm.chat(messages, specs)) as stream:
+        async with aclosing(llm.chat(messages, specs)) as stream:
             async for event in stream:
                 if isinstance(event, LLMText):
                     text_chunks.append(event.text)

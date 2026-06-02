@@ -21,6 +21,40 @@ host = "http://localhost:11434"
 temperature = 0.2
 timeout = 60.0
 
+[router]
+# v2.6 hybrid local/cloud router. Off by default — GLaDOS stays a pure local
+# assistant until you opt in. Two switches, both required for the cloud path:
+#   enabled        — turn on per-turn routing (local-only rules still apply)
+#   cloud_enabled  — the explicit privacy opt-in. On the cloud path, tool
+#                    ARGUMENTS and RESULTS cross to the provider, not just the
+#                    transcript (ARCHITECTURE §9). Leave false to keep all data
+#                    local even while routing logic runs.
+# The API key is read from `api_key_env` at boot and never stored here
+# (ARCH §9 — TOML holds handles, not secrets). Set it in your shell:
+#   setx ANTHROPIC_API_KEY "<key>"   # persists for future sessions
+# provider:
+#   "anthropic" — real cloud brain (needs cloud_enabled = true + an API key).
+#   "local"     — loopback: the smart path runs on a local Ollama model too.
+#                 Nothing leaves the box, so cloud_enabled / the API key are
+#                 NOT required. Use this to see the router, escalation, and the
+#                 violet "cloud" bubble work end-to-end before picking a cloud
+#                 provider. To try it: enabled = true, provider = "local".
+enabled = false
+cloud_enabled = false
+provider = "anthropic"
+cloud_model = "claude-haiku-4-5-20251001"
+# provider="local" only: Ollama tag for the smart path. Empty = reuse the
+# local brain's model (true loopback). Point at a bigger local model (e.g. the
+# 14b while [llm] runs a 7b) for a realistic fast-vs-smart split.
+local_smart_model = ""
+api_key_env = "ANTHROPIC_API_KEY"
+# Retry a turn the local brain finished as `failed` (deterministic outcome)
+# on the cloud brain. This is the TurnOutcome escalation input.
+escalate_on_failed = true
+# Requests longer than this many words route to cloud (long/multi-clause
+# reasoning the local 14b fumbles).
+max_words_local = 30
+
 [audio]
 # Tee inbound mic frames to traces/audio/<client>/<utc>.wav for offline
 # replay. Disable in production to keep disk usage bounded.

@@ -88,10 +88,24 @@ export interface Cancelled {
   session_id: string;
 }
 
+export interface TurnOutcome {
+  type: "turn_outcome";
+  session_id: string;
+  outcome: "done" | "needs-user" | "failed";
+}
+
 export interface ServerError {
   type: "error";
   code: string;
   message: string;
+}
+
+export interface RouteNotice {
+  type: "route_notice";
+  session_id: string;
+  target: "local" | "cloud";
+  reason: string;
+  escalated: boolean;
 }
 
 export interface ToolConfirmRequest {
@@ -112,5 +126,7 @@ export type ServerMessage =
   | TtsChunk
   | Done
   | Cancelled
+  | TurnOutcome
+  | RouteNotice
   | ToolConfirmRequest
   | ServerError;

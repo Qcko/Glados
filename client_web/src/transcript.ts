@@ -34,6 +34,10 @@ function summariseValue(v: unknown): string {
 
 export class Transcript {
   private liveBubbles = new Map<string, HTMLDivElement>();
+  // Which brain handled each in-flight turn, so the assistant bubble can be
+  // colour-coded local vs. cloud. Set from route_notice, read when the bubble
+  // is first created on the next assistant_delta.
+  private routeBySession = new Map<string, "local" | "cloud">();
 
   constructor(private readonly root: HTMLElement) {}
 
@@ -54,6 +58,11 @@ export class Transcript {
         let bubble = this.liveBubbles.get(msg.session_id);
         if (!bubble) {
           bubble = this.row("assistant", "");
+          // Tag the bubble with the brain that produced it (router on). With
+          // the router off no route_notice arrives, so the bubble keeps its
+          // default styling.
+          const route = this.routeBySession.get(msg.session_id);
+          if (route) bubble.classList.add(`llm-${route}`);
           this.liveBubbles.set(msg.session_id, bubble);
         }
         bubble.textContent = (bubble.textContent ?? "") + msg.text;
@@ -77,12 +86,38 @@ export class Transcript {
       case "tts_chunk":
         // Audio frames are handled by the (future) speaker module, not the transcript.
         break;
+      case "route_notice": {
+        // Remember the brain for this turn so the assistant bubble gets the
+        // matching colour when it's created on the next delta.
+        this.routeBySession.set(msg.session_id, msg.target);
+        // The cloud path sends data externally (ARCH §9) — always surface it.
+        // The initial local path is the silent default; no note for it.
+        if (msg.escalated) {
+          // The local reply already streamed into a bubble and came back
+          // failed. Drop it so the cloud retry starts a clean bubble, and
+          // mark the boundary.
+          this.liveBubbles.delete(msg.session_id);
+          this.row("system", `↑ escalated to cloud — ${msg.reason}`);
+        } else if (msg.target === "cloud") {
+          this.row("system", `routed to cloud — ${msg.reason}`);
+        }
+        break;
+      }
+      case "turn_outcome":
+        // Deterministic verdict on how the turn ended (see
+        // core/turn_outcome.py). A `done` turn is the silent default — no
+        // badge. `needs-user` / `failed` get a badge so a turn the model
+        // narrated cheerfully but didn't finish is visible at a glance.
+        if (msg.outcome !== "done") this.outcomeBadge(msg.session_id, msg.outcome);
+        break;
       case "done":
         this.liveBubbles.delete(msg.session_id);
+        this.routeBySession.delete(msg.session_id);
         break;
       case "cancelled":
         this.row("system", `cancelled ${msg.session_id}`);
         this.liveBubbles.delete(msg.session_id);
+        this.routeBySession.delete(msg.session_id);
         break;
       case "error":
         this.row("error", `${msg.code}: ${msg.message}`);
@@ -92,6 +127,24 @@ export class Transcript {
 
   systemNote(text: string): void {
     this.row("system", text);
+  }
+
+  private outcomeBadge(sessionId: string, outcome: "needs-user" | "failed"): void {
+    const label = outcome === "failed" ? "task not completed" : "awaiting your input";
+    const badge = document.createElement("span");
+    badge.className = `outcome-badge outcome-${outcome}`;
+    badge.textContent = label;
+    // Prefer pinning the badge to the assistant bubble for this turn so it
+    // reads as a verdict on that reply. If the turn produced no spoken text
+    // (tool-only), there's no bubble — fall back to a centred system row.
+    const bubble = this.liveBubbles.get(sessionId);
+    if (bubble) {
+      bubble.appendChild(badge);
+      this.scroll();
+    } else {
+      const r = this.row("system", "");
+      r.appendChild(badge);
+    }
   }
 
   private toolRow(headline: string, payload: unknown, meta: string): void {

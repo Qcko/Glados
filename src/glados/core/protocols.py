@@ -135,6 +135,21 @@ class TurnOutcome(BaseModel):
     outcome: Literal["done", "needs-user", "failed"]
 
 
+class RouteNotice(BaseModel):
+    """Which brain (local or cloud) handled the turn, broadcast when the v2.6
+    hybrid router is active. `escalated=True` marks the *second* notice of a
+    turn: the local path produced a `failed` outcome and the organizer is
+    retrying on cloud. The UI surfaces the cloud path explicitly because, per
+    ARCHITECTURE §9, the cloud path sends tool arguments/results externally —
+    the user should see when their data crossed that boundary."""
+
+    type: Literal["route_notice"] = "route_notice"
+    session_id: str
+    target: Literal["local", "cloud"]
+    reason: str
+    escalated: bool = False
+
+
 class ToolConfirmRequest(BaseModel):
     """Sent to clients in the originating room when the LLM tries to
     call a tool whose ToolSpec.requires_confirmation is True. Any client
@@ -167,6 +182,7 @@ ServerMessage = Annotated[
     | Done
     | Cancelled
     | TurnOutcome
+    | RouteNotice
     | ToolConfirmRequest
     | ErrorMessage,
     Field(discriminator="type"),

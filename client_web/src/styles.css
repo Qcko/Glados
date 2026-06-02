@@ -6,6 +6,7 @@
   --muted: #7c8390;
   --user: #4aa3ff;
   --assistant: #79e08a;
+  --cloud: #b88cff;
   --tool: #d4a437;
   --error: #ef5b5b;
   --warn: #d4a437;
@@ -58,6 +59,17 @@ header button.disconnect { background: var(--error); color: #fff; }
   text-transform: uppercase; margin-right: .35rem;
 }
 .row.assistant .bubble { background: rgba(121,224,138,.12); border-color: rgba(121,224,138,.35); }
+/* Router on: colour the reply by the brain that produced it. Local stays the
+   familiar green; cloud is violet, reinforcing that the turn left the box
+   (tool args/results crossed the wire — ARCH §9). A small corner tag spells
+   it out so the distinction survives for the colour-blind. */
+.bubble.llm-cloud { background: rgba(184,140,255,.13); border-color: rgba(184,140,255,.45); }
+.bubble.llm-local::before, .bubble.llm-cloud::before {
+  display: block; font-size: .6rem; font-weight: 600; letter-spacing: .06em;
+  text-transform: uppercase; margin-bottom: .25rem; opacity: .8;
+}
+.bubble.llm-local::before { content: "local"; color: var(--assistant); }
+.bubble.llm-cloud::before { content: "cloud"; color: var(--cloud); }
 .row.tool .bubble {
   background: rgba(212,164,55,.10); border-color: rgba(212,164,55,.35);
   font-family: ui-monospace, monospace; font-size: .85rem; color: var(--tool);
@@ -71,6 +83,18 @@ header button.disconnect { background: var(--error); color: #fff; }
   background: rgba(239,91,91,.12); border-color: rgba(239,91,91,.4); color: var(--error);
 }
 .meta { font-size: .65rem; color: var(--muted); margin-top: .25rem; }
+.outcome-badge {
+  display: inline-block; margin-top: .4rem; padding: .1rem .45rem;
+  border-radius: 10px; font-size: .65rem; font-weight: 600;
+  letter-spacing: .04em; text-transform: uppercase;
+}
+.outcome-badge.outcome-failed {
+  background: rgba(239,91,91,.18); border: 1px solid rgba(239,91,91,.45); color: var(--error);
+}
+.outcome-badge.outcome-needs-user {
+  background: rgba(212,164,55,.16); border: 1px solid rgba(212,164,55,.45); color: var(--warn);
+}
+.row.system .outcome-badge { margin-top: 0; }
 .tool-bubble summary { cursor: pointer; list-style: revert; }
 .tool-bubble summary::-webkit-details-marker { color: var(--muted); }
 .tool-payload {

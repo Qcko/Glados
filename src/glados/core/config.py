@@ -35,6 +35,38 @@ class LLMConfig(BaseModel):
     timeout: float = 60.0
 
 
+class RouterConfig(BaseModel):
+    """v2.6 hybrid local/cloud router. Disabled by default — GLaDOS stays a
+    pure local assistant until the operator opts in. `enabled` turns on
+    per-turn routing; `cloud_enabled` is the separate, explicit privacy opt-in
+    that permits tool args/results to cross to the cloud provider (ARCH §9).
+    Both must be true AND an API key present for the cloud path to engage;
+    otherwise every turn runs local."""
+
+    enabled: bool = False
+    cloud_enabled: bool = False
+    # "anthropic": real cloud brain (needs cloud_enabled + an API key).
+    # "local": loopback — the smart path runs on a local Ollama model too, so
+    # the router, escalation, and UI can be exercised end-to-end before a cloud
+    # provider is chosen. Nothing leaves the box, so it needs neither
+    # cloud_enabled nor a key.
+    provider: Literal["anthropic", "local"] = "anthropic"
+    cloud_model: str = "claude-haiku-4-5-20251001"
+    # provider="local" only: the Ollama tag for the smart path. Empty reuses
+    # the same model as the local brain (true loopback — identical behaviour,
+    # useful purely to see routing/escalation fire). Point it at a larger local
+    # model (e.g. the 14b while the fast path runs a 7b) for a realistic split.
+    local_smart_model: str = ""
+    # API key handle: read from this env var at boot. Never stored in TOML
+    # (ARCH §9 — TOML holds handles, not secrets). Absent key => cloud off.
+    api_key_env: str = "ANTHROPIC_API_KEY"
+    # Retry a `failed` local turn on cloud (router escalation input).
+    escalate_on_failed: bool = True
+    # Word count above which a request is treated as long/multi-clause and
+    # routed to cloud by the deterministic rules.
+    max_words_local: int = 30
+
+
 class AudioConfig(BaseModel):
     # Per-connection WAV trace of inbound mic audio. Useful for offline
     # replay against the STT; flip to false in production to stop
@@ -89,6 +121,7 @@ class GladosConfig(BaseModel):
     server: ServerConfig = ServerConfig()
     auth: AuthConfig = AuthConfig()
     llm: LLMConfig = LLMConfig()
+    router: RouterConfig = RouterConfig()
     audio: AudioConfig = AudioConfig()
     vad: VADConfig = VADConfig()
     stt: STTConfig = STTConfig()
@@ -178,7 +211,28 @@ def _apply_env_overrides(cfg: GladosConfig) -> GladosConfig:
 
     if (tts_backend := os.environ.get("GLADOS_TTS_BACKEND")) in ("fake", "piper"):
         cfg = cfg.model_copy(update={"tts": cfg.tts.model_copy(update={"backend": tts_backend})})
+
+    router_updates: dict = {}
+    if (enabled := _env_bool("GLADOS_ROUTER_ENABLED")) is not None:
+        router_updates["enabled"] = enabled
+    if (cloud := _env_bool("GLADOS_ROUTER_CLOUD_ENABLED")) is not None:
+        router_updates["cloud_enabled"] = cloud
+    if (cloud_model := os.environ.get("GLADOS_ROUTER_CLOUD_MODEL")) is not None:
+        router_updates["cloud_model"] = cloud_model
+    if router_updates:
+        cfg = cfg.model_copy(
+            update={"router": cfg.router.model_copy(update=router_updates)}
+        )
     return cfg
+
+
+def _env_bool(name: str) -> bool | None:
+    """Parse a boolean env var. Absent -> None (leave config default). Accepts
+    1/true/yes/on (case-insensitive) as True, the rest as False."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def load_rooms_config(path: Path) -> RoomsConfig:
