@@ -89,6 +89,30 @@ TESTS: list[BakeoffTest] = [
         "re-adds the milk by the productId it just removed, without re-searching.",
         memory_dependent=True,
     ),
+    BakeoffTest(
+        "T10",
+        ["Add two more milks to the cart."],
+        "treats 'more' as ADDITIVE: add_to_cart / add_to_cart_by_name with "
+        "quantity 2 (cart milk count goes UP by 2), not a set-to-2. Assumes "
+        "milk is already in the cart (run T2 first).",
+        memory_dependent=True,
+    ),
+    BakeoffTest(
+        "T11",
+        ["Actually, just make it one milk."],
+        "treats 'make it N' as an ABSOLUTE set: resolves the milk productId "
+        "(view_cart / search) then set_cart_quantity(id, 1) — NOT add_to_cart. "
+        "Ends with milk quantity 1.",
+        memory_dependent=True,
+    ),
+    BakeoffTest(
+        "T12",
+        ["Take one of the milks off."],
+        "RELATIVE reduce: view_cart to read the current milk quantity, then "
+        "set_cart_quantity(id, current-1) (or remove if it was 1). One user "
+        "turn, >=2 tool calls. Hardest — read-then-compute-then-act.",
+        memory_dependent=True,
+    ),
 ]
 
 
