@@ -39,9 +39,9 @@ timeout = 60.0
 #                 NOT required. Use this to see the router, escalation, and the
 #                 violet "cloud" bubble work end-to-end before picking a cloud
 #                 provider. To try it: enabled = true, provider = "local".
-enabled = false
+enabled = true
 cloud_enabled = false
-provider = "anthropic"
+provider = "local"
 cloud_model = "claude-haiku-4-5-20251001"
 # provider="local" only: Ollama tag for the smart path. Empty = reuse the
 # local brain's model (true loopback). Point at a bigger local model (e.g. the
