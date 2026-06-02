@@ -627,15 +627,15 @@ class Organizer:
             # so spuriously escalate to the v2.6 cloud router). Skip recording
             # it entirely; the model still sees `user denied` in the transcript.
             #
-            # requires_confirmation is the existing per-tool "mutates external
-            # state" flag — reuse it as the mutating signal for outcome
-            # classification rather than inventing a second taxonomy.
+            # A tool mutates external state if it's explicitly flagged
+            # `mutating` OR it's confirmation-gated (gated tools always mutate).
+            # Confirmation alone is NOT sufficient — Dunnes cart writes are
+            # un-gated side effects, so they carry `mutating=True` directly;
+            # without this an un-gated add would look like a read and the
+            # goal-check would wrongly fail a turn that actually added.
             if not denied:
-                outcome.record_tool(
-                    f"{tc.server}.{tc.name}",
-                    result.ok,
-                    mutating=spec.requires_confirmation if spec is not None else False,
-                )
+                mutating = bool(spec is not None and (spec.mutating or spec.requires_confirmation))
+                outcome.record_tool(f"{tc.server}.{tc.name}", result.ok, mutating=mutating)
             raw = json.dumps(result.content) if result.ok else (result.error or "error")
             # `spec` already fetched above for the requires_confirmation
             # check — reuse rather than another registry lookup.

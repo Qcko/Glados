@@ -26,8 +26,10 @@
 #                     `tools/list`. GLaDOS-only flags don't ride the wire
 #                     (third-party servers don't know about them), so we
 #                     carry them here. Fields: untrusted, requires_confirmation,
-#                     timeout_s (overrides the 8s dispatch default — needed
-#                     for slow tools like Selenium page loads).
+#                     mutating (side-effecting but un-gated — lets the
+#                     turn-outcome goal-check see an action landed; gated tools
+#                     count as mutating automatically), timeout_s (overrides
+#                     the 8s dispatch default — needed for slow Selenium loads).
 #
 # Crash semantics: a subprocess that dies is auto-restarted with bounded
 # attempts within a rolling window (default 3 / 60s, exponential backoff).
@@ -125,9 +127,20 @@ timeout_s = 35.0
 # pays themselves. Inserting a per-call confirmation modal on top of that
 # would break the conversation flow ("add milk" -> "may I add milk?" ->
 # "yes" makes no sense as voice UX) without adding real money safety.
+# They DO carry mutating = true so the turn-outcome goal-check can tell a
+# real cart change from a read/search (without it, a successful add looks
+# like a no-op and the turn is wrongly classed `failed`).
 
 [server.tool_overlays.add_to_cart]
 untrusted = true
+mutating = true
+timeout_s = 35.0
+
+# The one-shot search+add path the model prefers for "add <name>". Needs the
+# same Selenium timeout as a search, and is a cart write (mutating).
+[server.tool_overlays.add_to_cart_by_name]
+untrusted = true
+mutating = true
 timeout_s = 35.0
 
 [server.tool_overlays.view_favorites]
@@ -146,10 +159,12 @@ timeout_s = 35.0
 
 [server.tool_overlays.set_cart_quantity]
 untrusted = true
+mutating = true
 timeout_s = 35.0
 
 [server.tool_overlays.remove_from_cart]
 untrusted = true
+mutating = true
 timeout_s = 35.0
 
 # --- Checkout (stops at slot selection) --------------------------------
@@ -160,6 +175,7 @@ timeout_s = 35.0
 
 [server.tool_overlays.set_delivery_slot]
 untrusted = true
+mutating = true
 # Last automated step before payment; ungated for the same reason as the
 # cart writes — manual payment is the safety boundary.
 timeout_s = 35.0

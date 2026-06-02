@@ -137,6 +137,11 @@ class ToolOverlay(BaseModel):
 
     untrusted: bool = False
     requires_confirmation: bool = False
+    # Marks a side-effecting tool (cart write, checkout) that is NOT gated by
+    # confirmation, so the turn-outcome goal-check can still see that an action
+    # landed. requires_confirmation already implies mutating; set this for
+    # un-gated writes.
+    mutating: bool = False
     timeout_s: float | None = None
 
 

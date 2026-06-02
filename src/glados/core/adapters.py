@@ -36,6 +36,14 @@ class ToolSpec(BaseModel):
     # gated. Default False so today's read-only tools (echo, time, etc.)
     # are unchanged.
     requires_confirmation: bool = False
+    # True when the tool mutates external state (cart writes, checkout, login).
+    # Distinct from requires_confirmation: a side-effecting tool can be
+    # intentionally un-gated (Dunnes cart writes are), so confirmation is NOT a
+    # reliable "did something change" signal. The turn-outcome goal-check reads
+    # this to tell a real action from a read/search. Until the per-tool risk
+    # manifest (class=write/payment) is wired, it's set via the servers.toml
+    # overlay; requires_confirmation=True implies mutating too (see Organizer).
+    mutating: bool = False
     # Per-tool override for the registry's dispatch timeout. None falls back
     # to the registry default (8s). Selenium-driven scrapers (Dunnes, etc.)
     # need ~30s for a page load — bake the override into the tool's spec

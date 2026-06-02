@@ -381,6 +381,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
                         update={
                             "untrusted": overlay.untrusted,
                             "requires_confirmation": overlay.requires_confirmation,
+                            "mutating": overlay.mutating,
                             "timeout_s": overlay.timeout_s,
                         }
                     )
