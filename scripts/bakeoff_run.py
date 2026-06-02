@@ -177,7 +177,10 @@ async def run(args: argparse.Namespace) -> None:
     print("Model under test is the server's configured [llm] model — confirm it "
           "matches the slot.\n")
 
-    async with websockets.connect(args.url) as ws:
+    # Dunnes search_results frames run >1 MB (30 full product records), past
+    # the websockets client default max_size. The browser client has no such
+    # cap; lift it here so the runner doesn't 1009-close mid-suite.
+    async with websockets.connect(args.url, max_size=16 * 1024 * 1024) as ws:
         await ws.send(json.dumps({
             "type": "hello",
             "client_id": args.client_id,
@@ -185,7 +188,10 @@ async def run(args: argparse.Namespace) -> None:
             "role": "ui",
             "token": token,
         }))
+        only = {t.strip().upper() for t in args.only.split(",")} if args.only else None
         for test in TESTS:
+            if only is not None and test.id not in only:
+                continue
             note = "  (memory-dependent — v0 single-turn may not honour this)" if test.memory_dependent else ""
             print(f"--- {test.id}{note}")
             print(f"    pass if: {test.criterion}")
@@ -197,12 +203,20 @@ async def run(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    # Replies carry € and other non-cp1252 glyphs; the Windows console's
+    # default codec raises UnicodeEncodeError on them. Force UTF-8 with
+    # replacement so a stray glyph never aborts the run.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
     p = argparse.ArgumentParser(description="GLaDOS model bake-off runner")
     p.add_argument("--slot", default="?", help="label for this run (A/B/C) — does not change the model")
     p.add_argument("--url", default="ws://127.0.0.1:8765/ws/v1")
     p.add_argument("--client-id", default="desk-ui")
     p.add_argument("--room", default="desk")
     p.add_argument("--token", default=None, help="override the keyring token (dev fixture)")
+    p.add_argument("--only", default=None, help="comma-separated test ids to run (e.g. T9,T1) — runs one at a time")
     asyncio.run(run(p.parse_args()))
 
 
