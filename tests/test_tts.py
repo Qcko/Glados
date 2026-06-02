@@ -84,7 +84,8 @@ async def test_organizer_emits_tts_chunk_after_assistant_delta(tmp_path: Path) -
 
         types = [m["type"] for _, m in sink]
         assert types == [
-            "welcome", "user_transcript", "assistant_delta", "tts_chunk", "done",
+            "welcome", "user_transcript", "assistant_delta", "tts_chunk",
+            "turn_outcome", "done",
         ]
         tts_msg = next(m for _, m in sink if m["type"] == "tts_chunk")
         assert tts_msg["seq"] == 0
@@ -123,7 +124,9 @@ async def test_organizer_with_no_tts_still_completes(tmp_path: Path) -> None:
         await org.handle_user_text("desk-ui", "hello there")
         await org.flush()
         types = [m["type"] for _, m in sink]
-        assert types == ["welcome", "user_transcript", "assistant_delta", "done"]
+        assert types == [
+            "welcome", "user_transcript", "assistant_delta", "turn_outcome", "done",
+        ]
 
 
 # ---- PiperTTS lazy-load (no real piper / onnx required) ----------------

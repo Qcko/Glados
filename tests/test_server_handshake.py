@@ -45,6 +45,7 @@ def test_handshake_and_echo(client: TestClient) -> None:
         transcript = ws.receive_json()
         delta = ws.receive_json()
         tts = ws.receive_json()
+        outcome = ws.receive_json()
         done = ws.receive_json()
 
     assert welcome["type"] == "welcome"
@@ -54,6 +55,7 @@ def test_handshake_and_echo(client: TestClient) -> None:
     assert delta["type"] == "assistant_delta"
     assert delta["text"] == "echo: ping"
     assert tts["type"] == "tts_chunk"
+    assert outcome["type"] == "turn_outcome"
     assert done["type"] == "done"
     assert (
         welcome["session_id"]
