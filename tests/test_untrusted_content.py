@@ -273,3 +273,15 @@ def test_system_prompt_warns_about_external_tags() -> None:
     test fails loudly."""
     assert "<external>" in SYSTEM_PROMPT
     assert "instructions" in SYSTEM_PROMPT.lower()
+
+
+def test_system_prompt_carries_id_and_quantity_nudges() -> None:
+    """Bake-off T11/T12 regressions. T12: the model hallucinated a
+    placeholder product id instead of reading it from view_cart. T11: it
+    added an item again for 'make it one' instead of setting the quantity.
+    Substring asserts are fragile by design — a reflow that drops the nudge
+    should fail here so the regression is caught."""
+    lower = SYSTEM_PROMPT.lower()
+    assert "example_product_id" in lower  # T12: name the anti-pattern
+    assert "invent an identifier" in lower
+    assert "absolute final quantity" in lower  # T11
