@@ -97,6 +97,58 @@ def _tool_message_content(passes: list[list[LLMMessage]]) -> str:
     return tool_msgs[-1].content or ""
 
 
+def _system_prompt_seen(passes: list[list[LLMMessage]]) -> str:
+    """The system message is always first in the first pass's messages."""
+    assert passes, "LLM was never called"
+    head = passes[0][0]
+    assert head.role == "system"
+    return head.content or ""
+
+
+@pytest.mark.asyncio
+async def test_memory_notes_injected_into_system_prompt(tmp_path: Path) -> None:
+    """ARCH §14: guard-wrapped server memory is appended to the system prompt
+    behind a framing preamble, and the LLM sees it on the turn's system msg."""
+    spec = ToolSpec(server="local", name="now", description="t", parameters={"type": "object"})
+    mcp = MCPRegistry()
+    mcp.register(_StaticTool(spec, {"iso": "2026-05-19T12:00:00Z"}))
+    llm = _RecordingLLM(server="local", name="now")
+    note = '<memory-notes source="dunnes">read volume from each result</memory-notes>'
+    async with _make(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm,
+        mcp,
+    ) as (org, _):
+        org.set_memory_notes([note])
+        await org.handle_user_text("desk-ui", "what time is it")
+        await org.flush()
+
+    prompt = _system_prompt_seen(llm.passes)
+    assert prompt.startswith(SYSTEM_PROMPT)
+    assert note in prompt
+    assert "reference data" in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_no_memory_notes_leaves_prompt_unchanged(tmp_path: Path) -> None:
+    spec = ToolSpec(server="local", name="now", description="t", parameters={"type": "object"})
+    mcp = MCPRegistry()
+    mcp.register(_StaticTool(spec, {"iso": "2026-05-19T12:00:00Z"}))
+    llm = _RecordingLLM(server="local", name="now")
+    async with _make(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm,
+        mcp,
+    ) as (org, _):
+        org.set_memory_notes([])  # explicit empty — still just SYSTEM_PROMPT
+        await org.handle_user_text("desk-ui", "what time is it")
+        await org.flush()
+
+    assert _system_prompt_seen(llm.passes) == SYSTEM_PROMPT
+
+
 @pytest.mark.asyncio
 async def test_untrusted_result_is_wrapped(tmp_path: Path) -> None:
     spec = ToolSpec(

@@ -41,6 +41,12 @@ _log = logging.getLogger(__name__)
 # when we adopt a method that requires a newer protocol.
 _MCP_PROTOCOL_VERSION = "2024-11-05"
 
+# Well-known resource URI for a server's co-located lessons memory (ARCH
+# §14). A uniform constant across servers — namespace by document kind if
+# a server ever ships several (`memory://quirks`), never by server name
+# (that's redundant with the connection and breaks the constant).
+_LESSONS_URI = "memory://lessons"
+
 
 class StdioServerError(RuntimeError):
     pass
@@ -275,6 +281,39 @@ class StdioServer:
             )
         return specs
 
+    async def read_lessons(self) -> str | None:
+        """Fetch the server's co-located lessons memory (ARCH §14 layer 1).
+
+        Reads the well-known resource `memory://lessons` (`text/markdown`)
+        over MCP `resources/read` and returns the concatenated text, or
+        None if the server exposes no such resource / returns no text /
+        errors. The URI is a uniform constant across servers — provenance
+        comes from the connection's `server_id`, stamped by the caller when
+        it wraps the content, not from the URI. Best-effort: any failure
+        means "this server has no lessons to inject", never a hard error,
+        because a missing resource is the common case (most servers ship
+        none) and must not break startup.
+        """
+        try:
+            resp = await self._call_method(
+                "resources/read", {"uri": _LESSONS_URI}
+            )
+        except StdioServerError as e:
+            _log.debug("stdio %s: read_lessons failed: %s", self.server_id, e)
+            return None
+        if "error" in resp:
+            # Servers that don't implement resources reply with a JSON-RPC
+            # error (method not found / resource not found). Expected for
+            # any server that ships no memory; debug, not warn.
+            _log.debug(
+                "stdio %s: no %s resource: %s",
+                self.server_id,
+                _LESSONS_URI,
+                (resp.get("error") or {}).get("message", "rpc error"),
+            )
+            return None
+        return _lessons_text(resp.get("result") or {})
+
     async def call_tool(self, name: str, args: dict) -> MCPCallResult:
         if self._dead and not self._closed:
             ok = await self._try_restart()
@@ -429,6 +468,24 @@ def _translate_tool_result(result: dict) -> MCPCallResult:
             # rather than discarding the parse and re-stringifying.
             return MCPCallResult(ok=True, content={"value": parsed})
     return MCPCallResult(ok=True, content={"text": text})
+
+
+def _lessons_text(result: dict) -> str | None:
+    """Pull markdown out of a `resources/read` result.
+
+    MCP returns `{"contents": [{"uri", "mimeType", "text"|"blob"}, ...]}`.
+    We concatenate the `text` of every text-bearing content block (binary
+    `blob` blocks are skipped — lessons are markdown). Empty/whitespace
+    text collapses to None so the caller treats it as "no lessons".
+    """
+    parts: list[str] = []
+    for item in result.get("contents") or []:
+        if isinstance(item, dict):
+            t = item.get("text")
+            if isinstance(t, str):
+                parts.append(t)
+    text = "\n".join(parts).strip()
+    return text or None
 
 
 def _result_or_raise(resp: dict) -> dict:

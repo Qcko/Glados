@@ -52,6 +52,7 @@ from .config import (
     load_servers_config,
 )
 from .logging_setup import setup_logging
+from . import memory_gate
 from .ollama_lifecycle import OllamaLifecycle
 from .organizer import Organizer
 from .secrets import KeyringSecrets, SecretsStore
@@ -329,6 +330,11 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         # Spawn autostart stdio MCP servers and register their tools.
         # Done inline (not in a background task) so the registry is
         # populated before the first WS connection can call a tool.
+        # Guard-wrapped, hash-approved server memory accumulated across all
+        # trusted servers, installed on the organizer once the loop finishes
+        # (ARCH §14). Empty unless a server is flagged `trusted` AND ships a
+        # `memory://lessons` resource that clears the LocalGuard gate.
+        memory_notes: list[str] = []
         for entry in _app.state.servers_cfg.server:
             if not entry.autostart:
                 continue
@@ -387,6 +393,20 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
                     )
                 _app.state.mcp.register(StdioToolProxy(server, spec))
             _app.state.stdio_servers.append(server)
+            # Server-shipped lessons (ARCH §14). Only trusted servers are
+            # candidates (origin gate); the blob is read over MCP, then must
+            # clear the LocalGuard hash-approval gate (content gate) before it
+            # is injected. memory_gate.vet returns None for any non-approved
+            # outcome, so this fails closed and silently for the common case.
+            if entry.trusted:
+                blob = await server.read_lessons()
+                if blob is not None:
+                    # vet() shells out to LocalGuard; off-thread so the
+                    # subprocess can't stall the warmup task on the loop.
+                    note = await asyncio.to_thread(memory_gate.vet, entry.id, blob)
+                    if note is not None:
+                        memory_notes.append(note)
+        _app.state.organizer.set_memory_notes(memory_notes)
         try:
             yield
         finally:

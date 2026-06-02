@@ -22,6 +22,16 @@
 #   args            — list of command-line args.
 #   env             — env-var dict layered on top of the parent process env.
 #   autostart       — spawn on app startup. False = present but inert.
+#   trusted         — first-party origin gate for server-shipped memory
+#                     (ARCH §14). When true, GLaDOS reads the server's
+#                     `memory://lessons` resource at connect and, IF the blob
+#                     clears the LocalGuard hash-approval gate, injects it
+#                     (guard-wrapped) into the system prompt. Default false:
+#                     the lessons resource is never read. Origin trust is not
+#                     content trust — `trusted = true` only makes the blob
+#                     eligible; it still has to match a human-approved
+#                     baseline (`localguard memory approve`) or nothing is
+#                     injected (fail closed).
 #   [server.tool_overlays.<ToolName>] — per-tool overlay applied after
 #                     `tools/list`. GLaDOS-only flags don't ride the wire
 #                     (third-party servers don't know about them), so we

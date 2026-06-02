@@ -107,6 +107,56 @@ async def test_stdio_server_proxy_routes_envelope() -> None:
         await server.aclose()
 
 
+# Server that serves a `memory://lessons` resource over `resources/read`.
+# Any other resource URI, or any other method, errors.
+_LESSONS_SERVER = """
+import json, sys
+LESSONS = "# Lessons\\nSearch the broad noun, read volume from each result."
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    req = json.loads(line)
+    rid = req.get("id")
+    m = req.get("method")
+    if rid is None:
+        continue
+    if m == "initialize":
+        out = {"jsonrpc":"2.0","id":rid,"result":{
+            "protocolVersion":"2024-11-05","capabilities":{},
+            "serverInfo":{"name":"lessons","version":"0.1"}}}
+    elif m == "resources/read" and req["params"]["uri"] == "memory://lessons":
+        out = {"jsonrpc":"2.0","id":rid,"result":{"contents":[
+            {"uri":"memory://lessons","mimeType":"text/markdown","text":LESSONS}]}}
+    else:
+        out = {"jsonrpc":"2.0","id":rid,"error":{"code":-32601,"message":"not found"}}
+    sys.stdout.write(json.dumps(out)+"\\n"); sys.stdout.flush()
+"""
+
+
+async def test_read_lessons_returns_markdown() -> None:
+    server = _make_inline_server(_LESSONS_SERVER, server_id="lessons")
+    await server.start()
+    try:
+        await server.initialize()
+        text = await server.read_lessons()
+        assert text is not None
+        assert "Search the broad noun" in text
+    finally:
+        await server.aclose()
+
+
+async def test_read_lessons_none_when_unsupported() -> None:
+    # The echo server has no resources support — replies with a JSON-RPC
+    # error, which read_lessons swallows into None (the common case).
+    server = _make_inline_server(_INLINE_SERVER)
+    await server.start()
+    try:
+        await server.initialize()
+        assert await server.read_lessons() is None
+    finally:
+        await server.aclose()
+
+
 async def test_stdio_server_dies_fails_pending_calls() -> None:
     # Subprocess that handles `initialize` then exits, simulating a crash
     # in the middle of a session.

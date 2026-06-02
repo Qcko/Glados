@@ -151,6 +151,14 @@ class ServerEntry(BaseModel):
     args: list[str] = []
     env: dict[str, str] = {}
     autostart: bool = True
+    # Origin gate for server-shipped memory (ARCH §14 layer 1). Only a
+    # first-party server we vouch for is a candidate for trusted-prompt
+    # injection of its `memory://lessons` resource. False (default) means
+    # the lessons resource is never read into the system prompt, even if
+    # the server exposes one. Origin trust ≠ content trust: a true flag
+    # only makes the blob *eligible*; it still passes the LocalGuard
+    # hash-approval gate before anything is injected.
+    trusted: bool = False
     # Per-tool overlays keyed by the tool's `name` (not qualified).
     # Missing tools fall back to wire defaults (all flags False / None).
     tool_overlays: dict[str, ToolOverlay] = {}
