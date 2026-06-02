@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
-from glados.core.turn_outcome import TurnRecord, classify
+from glados.core.turn_outcome import TurnRecord, classify, is_action_request
 
 
-def _turn(*, final_text: str = "", loop_exhausted: bool = False) -> TurnRecord:
-    return TurnRecord(final_text=final_text, loop_exhausted=loop_exhausted)
+def _turn(
+    *,
+    final_text: str = "",
+    loop_exhausted: bool = False,
+    action_intent: bool = False,
+) -> TurnRecord:
+    return TurnRecord(
+        final_text=final_text,
+        loop_exhausted=loop_exhausted,
+        action_intent=action_intent,
+    )
 
 
 def test_no_tools_plain_answer_is_done() -> None:
@@ -78,3 +87,64 @@ def test_trailing_whitespace_question_still_needs_user() -> None:
 def test_loop_exhausted_is_failed() -> None:
     turn = _turn(final_text="I got stuck in a tool loop and stopped.", loop_exhausted=True)
     assert classify(turn) == "failed"
+
+
+# ---- Semantic goal-check (action intent vs. search-and-narrate drift) ----
+
+
+def test_action_request_search_then_narrate_is_failed() -> None:
+    # Bake-off T2: "Add milk" -> search_products 200 OK -> described JSON,
+    # never added. Pure error-derivation calls this `done`; the goal-check
+    # catches it because no mutating call landed.
+    turn = _turn(
+        final_text="I found 30 milk products: whole, skimmed, oat...",
+        action_intent=True,
+    )
+    turn.record_tool("dunnes.search_products", ok=True, mutating=False)
+    assert classify(turn) == "failed"
+
+
+def test_action_request_with_successful_mutation_is_done() -> None:
+    turn = _turn(final_text="Added milk to your cart.", action_intent=True)
+    turn.record_tool("dunnes.search_products", ok=True, mutating=False)
+    turn.record_tool("dunnes.add_to_cart_by_name", ok=True, mutating=True)
+    assert classify(turn) == "done"
+
+
+def test_action_request_punted_with_question_is_needs_user() -> None:
+    # Asked to act, searched, then handed back with a question instead of
+    # acting. A clarification request, not silent drift.
+    turn = _turn(
+        final_text="I found a few milks — which one did you mean?",
+        action_intent=True,
+    )
+    turn.record_tool("dunnes.search_products", ok=True, mutating=False)
+    assert classify(turn) == "needs-user"
+
+
+def test_read_request_search_only_is_done() -> None:
+    # "What's in my cart?" is a read — a successful search satisfies it, so
+    # the goal-check must not demand a mutating call.
+    turn = _turn(final_text="You have milk and bread.", action_intent=False)
+    turn.record_tool("dunnes.view_cart", ok=True, mutating=False)
+    assert classify(turn) == "done"
+
+
+def test_action_request_no_tools_is_left_alone() -> None:
+    # No tool activity: too ambiguous to fail deterministically.
+    turn = _turn(final_text="Sure, adding that now.", action_intent=True)
+    assert classify(turn) == "done"
+
+
+def test_is_action_request_detects_imperatives() -> None:
+    assert is_action_request("Add milk to the cart.")
+    assert is_action_request("Please remove the eggs")
+    assert is_action_request("Can you book a table for two")
+    assert is_action_request("Set the quantity to 3")
+
+
+def test_is_action_request_rejects_reads_and_questions() -> None:
+    assert not is_action_request("What's in my cart?")
+    assert not is_action_request("Which of my favorites are on sale?")
+    assert not is_action_request("Show me the milk options")
+    assert not is_action_request("Tell me what to add")
