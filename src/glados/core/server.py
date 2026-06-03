@@ -61,6 +61,7 @@ from .protocols import (
     ErrorMessage,
     Hello,
     Interrupt,
+    MemoryBlockNotice,
     ToolConfirmResponse,
     UserText,
 )
@@ -335,6 +336,10 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         # (ARCH §14). Empty unless a server is flagged `trusted` AND ships a
         # `memory://lessons` resource that clears the LocalGuard gate.
         memory_notes: list[str] = []
+        # Trusted servers whose lessons failed the hash-approval gate. Metadata
+        # only (source/hash/length/reason); surfaced to operators but never
+        # injected, never spoken (ARCH §14 BLOCK-notice surface).
+        memory_blocks: list[MemoryBlockNotice] = []
         for entry in _app.state.servers_cfg.server:
             if not entry.autostart:
                 continue
@@ -401,12 +406,24 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             if entry.trusted:
                 blob = await server.read_lessons()
                 if blob is not None:
-                    # vet() shells out to LocalGuard; off-thread so the
+                    # check() shells out to LocalGuard; off-thread so the
                     # subprocess can't stall the warmup task on the loop.
-                    note = await asyncio.to_thread(memory_gate.vet, entry.id, blob)
-                    if note is not None:
-                        memory_notes.append(note)
+                    result = await asyncio.to_thread(memory_gate.check, entry.id, blob)
+                    if result.note is not None:
+                        memory_notes.append(result.note)
+                    else:
+                        # Failed the gate — inject nothing, but make the BLOCK
+                        # visible to the operator (metadata only).
+                        memory_blocks.append(
+                            MemoryBlockNotice(
+                                source=result.source,
+                                sha256=result.sha256,
+                                length=result.length,
+                                reason=result.reason or "not approved",
+                            )
+                        )
         _app.state.organizer.set_memory_notes(memory_notes)
+        _app.state.memory_blocks = memory_blocks
         try:
             yield
         finally:
@@ -458,6 +475,11 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     app.state.connections = connections
     app.state.mcp = mcp
     app.state.stdio_servers = stdio_servers
+    # Trusted-server memory that failed the LocalGuard gate at load time
+    # (ARCH §14). Populated by the lifespan; initialised here so the
+    # /admin/memory route and the push-on-connect path are safe before the
+    # lifespan has run (e.g. in tests that don't enter the lifespan).
+    app.state.memory_blocks = []
     app.state.stt = stt
     app.state.tts = tts
     app.state.llm = llm
@@ -501,6 +523,16 @@ def _register_routes(app: FastAPI) -> None:
             "tools": [spec.qualified for spec in s.mcp.specs()],
         }
 
+    @app.get("/admin/memory")
+    async def admin_memory(request: Request) -> dict:
+        """Operator view of trusted-server memory that failed the LocalGuard
+        gate (ARCH §14). Metadata only — no untrusted blob bytes — so it is
+        safe to expose alongside /healthz. The review/approve step that would
+        accept a blocked blob is a separate, high-friction desktop action, not
+        anything this read-only endpoint can grant."""
+        blocks = request.app.state.memory_blocks
+        return {"blocks": [b.model_dump() for b in blocks]}
+
     @app.websocket("/ws/v1")
     async def ws_v1(ws: WebSocket) -> None:
         await ws.accept()
@@ -515,6 +547,12 @@ def _register_routes(app: FastAPI) -> None:
                 return
             client_id = binding.client_id
             await _replace_connection(state.connections, client_id, ws)
+            # Surface any load-time memory BLOCKs to operator UIs the moment
+            # they connect — the notices are emitted at startup, before any
+            # client exists, so a connecting `ui` client would otherwise never
+            # see them. Metadata only; never to mic/speaker roles (ARCH §14).
+            if binding.role == "ui":
+                await _push_memory_blocks(ws, state.memory_blocks)
             pipeline = _build_pipeline(
                 state.glados_cfg,
                 state.stt,
@@ -642,6 +680,19 @@ async def _handle_audio(ws: WebSocket, pipeline: AudioPipeline, data: bytes) -> 
         await pipeline.feed_frame(data)
     except FrameTooShort as e:
         await _send_error(ws, "bad_audio_frame", str(e))
+
+
+async def _push_memory_blocks(
+    ws: WebSocket, blocks: list[MemoryBlockNotice]
+) -> None:
+    """Send pending memory-BLOCK notices to a freshly-connected operator UI.
+    Best-effort: a send failure here must not abort the handshake, so a dead
+    socket just drops the notice (it stays in state for the next connect)."""
+    for notice in blocks:
+        try:
+            await ws.send_json(notice.model_dump())
+        except Exception:
+            return
 
 
 async def _send_error(ws: WebSocket, code: str, message: str) -> None:

@@ -19,11 +19,14 @@ out-of-band (`localguard memory approve`) before they reach a prompt again.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
 import shlex
 import subprocess
+from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
@@ -38,19 +41,54 @@ _DEFAULT_LOCALGUARD_CMD = "localguard"
 _CHECK_TIMEOUT_S = 10.0
 
 
-def vet(source: str, blob: str) -> str | None:
-    """Return guard-wrapped memory ready for prompt injection, or None.
+@dataclass(frozen=True)
+class GateResult:
+    """Outcome of vetting one server's lessons blob.
+
+    `note` is the guard-wrapped, inject-ready string and is present iff
+    `approved`. `reason` is LocalGuard's human-readable block cause and is
+    present iff blocked. `sha256`/`length` are metadata-safe descriptors of
+    the blob (a hex digest and character count) — they carry **none of the
+    untrusted bytes**, so they are safe to surface to an operator on any
+    channel (ARCH §14 BLOCK-notice surface).
+    """
+
+    source: str
+    approved: bool
+    sha256: str
+    length: int
+    note: str | None = None
+    reason: str | None = None
+
+
+def check(source: str, blob: str) -> GateResult:
+    """Vet a server's lessons blob through LocalGuard, fail-closed.
 
     `source` is the stable origin key LocalGuard baselines against — the MCP
-    server id. None means "do not inject" for any reason (not approved, or
-    LocalGuard unreachable); the caller injects nothing.
+    server id. On approval the result carries an inject-ready `note`; on any
+    non-approved outcome (unknown/changed content, LocalGuard unreachable, CLI
+    error) it carries a `reason` and `note is None`, so the caller injects
+    nothing but can still surface the BLOCK as metadata.
     """
-    if not _is_approved(source, blob):
-        return None
-    return _wrap(source, blob)
+    sha256 = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    approved, reason = _check_approval(source, blob)
+    if approved:
+        return GateResult(source, True, sha256, len(blob), note=_wrap(source, blob))
+    return GateResult(source, False, sha256, len(blob), reason=reason)
 
 
-def _is_approved(source: str, blob: str) -> bool:
+def vet(source: str, blob: str) -> str | None:
+    """Guard-wrapped memory ready for prompt injection, or None.
+
+    Thin convenience over `check` for callers that only need the inject path;
+    None means "do not inject" for any reason.
+    """
+    return check(source, blob).note
+
+
+def _check_approval(source: str, blob: str) -> tuple[bool, str | None]:
+    """Return (approved, reason). `reason` is None when approved, else a
+    short, metadata-only block cause (never echoes the blob's bytes)."""
     argv = _localguard_cmd()
     if not argv:
         # A blank or unsplittable GLADOS_LOCALGUARD_CMD. Fail closed rather
@@ -60,7 +98,7 @@ def _is_approved(source: str, blob: str) -> bool:
             _LOCALGUARD_CMD_ENV,
             source,
         )
-        return False
+        return False, f"{_LOCALGUARD_CMD_ENV} is set but split to no command"
     cmd = [*argv, "memory", "check", "-", "--source", source, "--json"]
     try:
         proc = subprocess.run(
@@ -81,27 +119,72 @@ def _is_approved(source: str, blob: str) -> bool:
             source,
             _LOCALGUARD_CMD_ENV,
         )
-        return False
+        return False, "localguard not found — gate unavailable"
     except Exception as e:  # noqa: BLE001
         # TimeoutExpired, OSError, ValueError (bad args), or anything else.
         # The gate's only acceptable failure mode is "inject nothing" — never
         # let a check error crash the caller (the server lifespan) open.
         log.warning("memory gate: localguard check failed for %r: %s", source, e)
-        return False
+        return False, f"localguard check failed ({type(e).__name__})"
     if proc.returncode == 0:
         log.info("memory gate: APPROVED lessons for %r", source)
-        return True
+        return True, None
     # Non-zero is LocalGuard's fail-closed signal (unknown/changed/blocked).
-    # stderr carries the human reason; surface it so an operator knows to run
-    # `localguard memory approve` on the new content.
-    reason = (proc.stdout or proc.stderr or "").strip().splitlines()
+    # Log LocalGuard's own detail line locally — the log is operator-local and
+    # not the metadata channel — but the *returned* reason rides the operator
+    # metadata channel (UI push + /admin/memory), where §14 promises no
+    # untrusted bytes. So we never forward LocalGuard's free-text `reason`; we
+    # forward only its closed-vocabulary `reason_code` (and only after a
+    # syntactic safety check), falling back to the exit code. The operator
+    # reads the actual bytes later, inert, in the review pane — never here.
+    detail = (proc.stdout or proc.stderr or "").strip().splitlines()
     log.info(
         "memory gate: BLOCKED lessons for %r (exit %d): %s",
         source,
         proc.returncode,
-        reason[-1] if reason else "no detail",
+        detail[-1] if detail else "no detail",
     )
-    return False
+    code = _safe_reason_code(proc.stdout)
+    cause = code if code is not None else f"exit {proc.returncode}"
+    return False, (
+        f"not approved ({cause}); run "
+        "`localguard memory approve` on the new content"
+    )
+
+
+# A LocalGuard `reason_code` is a closed-vocabulary categorisation of why a
+# blob was blocked (e.g. "unknown_content", "baseline_not_approved",
+# "scan_rule:role_tag_injection"). We forward it to the operator metadata
+# channel only after a *syntactic* safety check: a lowercase token of bounded
+# length, colon-namespaced at most, no whitespace/quotes/punctuation. A blob
+# fragment cannot satisfy this shape, so even a regressed or hostile LocalGuard
+# cannot smuggle untrusted bytes through this field — GLaDOS upholds the §14
+# no-echo invariant at its own boundary rather than trusting the producer.
+# `\Z` (not `$`) so a trailing newline can't ride through: `$` matches just
+# before a final `\n`, which would let "foo\n" pass and forward the newline.
+_REASON_CODE_RE = re.compile(r"[a-z][a-z0-9_:]{0,63}\Z")
+
+
+def _safe_reason_code(stdout: str | None) -> str | None:
+    """Extract LocalGuard's `reason_code` from a `--json` verdict, or None.
+
+    None when stdout is absent, not JSON, not an object, lacks the field, or
+    the value fails the syntactic safety check — in every such case the caller
+    falls back to the exit-code reason. Forward-compatible: returns None today
+    (LocalGuard does not yet emit the field) without any error.
+    """
+    if not stdout:
+        return None
+    try:
+        verdict = json.loads(stdout)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(verdict, dict):
+        return None
+    code = verdict.get("reason_code")
+    if isinstance(code, str) and _REASON_CODE_RE.fullmatch(code):
+        return code
+    return None
 
 
 def _localguard_cmd() -> list[str]:

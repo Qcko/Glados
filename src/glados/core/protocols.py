@@ -166,6 +166,25 @@ class ToolConfirmRequest(BaseModel):
     ttl_s: float
 
 
+class MemoryBlockNotice(BaseModel):
+    """Operator-facing notice that a *trusted* MCP server shipped lessons that
+    did not clear the LocalGuard hash-approval gate, so **nothing was injected**
+    (ARCH §14, BLOCK-notice surface). Carries metadata only — `source` id,
+    `sha256` of the blob, character `length`, and LocalGuard's `reason`. It
+    holds **none of the untrusted blob bytes** and is never routed through the
+    assistant LLM or TTS, so it is safe on any surface; the UI renders it as an
+    admin banner with an affordance to start a review. It is emitted at load
+    time (before any client connects), so it is also pushed to `ui`-role clients
+    on connect and exposed at `GET /admin/memory`. Granting a review/approve is
+    a separate, high-friction desktop action — never this notice, never voice."""
+
+    type: Literal["memory_block_notice"] = "memory_block_notice"
+    source: str
+    sha256: str
+    length: int
+    reason: str
+
+
 class ErrorMessage(BaseModel):
     type: Literal["error"] = "error"
     code: str
@@ -184,6 +203,7 @@ ServerMessage = Annotated[
     | TurnOutcome
     | RouteNotice
     | ToolConfirmRequest
+    | MemoryBlockNotice
     | ErrorMessage,
     Field(discriminator="type"),
 ]
