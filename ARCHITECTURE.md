@@ -688,3 +688,47 @@ The orchestrator MUST NOT inject any server memory that is not both
 hash-approved and guard-wrapped. Seed lessons for Dunnes:
 litre-wording / search-broad-read-volume, and "remove/quantity changes go
 through a confirmation dialog."
+
+**Surfacing the gate to the human (BLOCK notice + review/approve).** The
+runtime BLOCK is currently invisible — a trusted server ships new/changed
+memory, the deterministic check fails closed, and nothing is injected with
+no signal to the operator. Two surfaces fix that, and they are deliberately
+*different* because they sit on opposite sides of the trust boundary:
+
+1. **BLOCK notification (safe, metadata-only).** When load-time vetting
+   returns not-approved for a trusted server, surface it: source id, blob
+   hash, length, LocalGuard's reason — and an affordance to start a review.
+   This carries **no untrusted bytes** and never touches the assistant LLM
+   or TTS, so it's safe on any surface (UI banner; a brief spoken "server X
+   shipped memory that isn't approved and isn't in use" is fine).
+
+2. **Review/approve (the trust boundary — high friction, isolated).** The
+   accept path renders the **raw blob verbatim and inert**, plus LocalGuard's
+   *static* scan findings and the diff vs the prior approved version. Hard
+   constraints, because the content under review is the exact injection
+   vector the gate exists to stop:
+   - **Never launder the blob through the assistant LLM or speak it via
+     TTS.** No paraphrase, no summary, no model in the loop — the standard's
+     LLM-judge is advisory only *because it is itself injectable*. The human
+     reads the actual bytes, as data.
+   - **Accept/deny is an explicit, deliberate action** (typed confirm /
+     deliberate desktop gesture), **never a room/voice "yes"** — that is a
+     one-tap `--yes` on the one boundary the whole design protects. Voice may
+     *request* a review ("show me the blocked memory"); it MUST NOT grant it.
+     On a screenless voice-only client, approval is **refused**, deferred to
+     the desktop.
+   - **Operator/admin action, not conversational.** It belongs in a
+     settings/admin view, not the per-room turn stream — so it does NOT reuse
+     the per-turn `tool_confirm_request` pattern (that is in-room and
+     voice-grantable by design; both wrong here).
+   - **GLaDOS stays the integrator.** The UI drives `localguard memory
+     approve` with the human's explicit decision and renders LocalGuard's
+     scan/diff; GLaDOS does not reimplement the scan or store baselines (the
+     §14 ownership split holds).
+
+   Build the BLOCK notification first (high value, no risk); the review pane
+   is a later slice, gated by the constraints above. Dormant until the
+   server-memory path is revived (the 2026-06-03 bake-off showed injecting
+   the Dunnes lessons regressed the local model; the fix moved that reasoning
+   into deterministic Dunnes tools instead — but the gate + these surfaces
+   remain the design for any future trusted-memory source).

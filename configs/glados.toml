@@ -14,9 +14,9 @@ clients = ["desk-ui", "desk2-ui"]
 # backend: "fake" (deterministic, used in tests) or "ollama"
 backend = "ollama"
 # Swap by un/commenting. Restart GLaDOS to pick up the change.
-# model = "qwen2.5:7b-instruct"            # baseline (4.7 GB) — known drifty on multi-step
-model = "qwen2.5:14b-instruct"             # Q4_K_M (8.4 GB) — current pick
-# model = "qwen2.5:14b-instruct-q5_K_M"    # Q5_K_M (10.5 GB) — quality bump, tight on 12 GB VRAM
+# model = "qwen2.5:7b-instruct"            # baseline (4.7 GB) — fallback; beats Q4 14b (bake-off 2026-06-03)
+# model = "qwen2.5:14b-instruct"             # Q4_K_M (8.4 GB) — DO NOT SHIP: Thai/JSON pathologies (bake-off 2026-06-03)
+model = "qwen2.5:14b-instruct-q5_K_M"      # Q5_K_M (10.5 GB) — bake-off winner 2026-06-03 (15/22)
 host = "http://localhost:11434"
 temperature = 0.2
 timeout = 60.0
