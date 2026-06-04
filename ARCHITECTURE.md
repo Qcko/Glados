@@ -422,6 +422,22 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   that the old hybrid design needed, and restores BRIEF's stronger
   "no data leaves the machine" framing (modulo remote *device* access, §13).
 
+  Retained code (intentionally not deleted). The router (`brain/router/`) and
+  a gated cloud adapter (`brain/llm/anthropic.py`) already exist. The router's
+  `provider="local"` path **is** this multi-model dispatcher (primary +
+  optional `local_smart_model` on Ollama), so the local direction is largely
+  already built. The `anthropic` provider is kept **dormant** as an optional
+  escape hatch rather than removed, because it is safe at rest:
+  fail-closed behind three independent off-by-default switches
+  (`router.enabled`, `router.cloud_enabled`, and an API key in the configured
+  env var — any missing → all turns local); its endpoint is **hardcoded** to
+  `api.anthropic.com`, not config-controllable; and routing keys only off the
+  *user's request text*, never `<external>` tool output. So its mere presence
+  is not an exfiltration vector. **Caveat for future reuse as a self-hosted
+  endpoint:** making the endpoint configurable (a `base_url`) reintroduces an
+  arbitrary-destination exfil path — that is a separate *guarded* slice
+  (loopback/LAN allowlist + explicit opt-in), never a free config flip.
+
   Demo path: ask GLaDOS something the primary model is known to mangle
   (multi-step reasoning) → router selects the resident specialist →
   it calls `get_time` or similar → reply spoken via Piper.
