@@ -153,6 +153,16 @@ untrusted = true
 mutating = true
 timeout_s = 35.0
 
+# Volume-aware add ("4 litres of milk") — composes the target across pack
+# sizes and writes them to the cart, so it is mutating like the other adds.
+# Without the flag a successful compose looks like a no-op to the goal-check
+# and the turn is wrongly classed `failed`, which then re-fires the add on
+# the escalation loopback (double cart-add).
+[server.tool_overlays.add_by_volume]
+untrusted = true
+mutating = true
+timeout_s = 35.0
+
 [server.tool_overlays.view_favorites]
 untrusted = true
 timeout_s = 35.0
@@ -173,6 +183,27 @@ mutating = true
 timeout_s = 35.0
 
 [server.tool_overlays.remove_from_cart]
+untrusted = true
+mutating = true
+timeout_s = 35.0
+
+# Name-resolving cart mutators (the model's preferred path: "set milk to 2",
+# "take one off", "remove the bread"). Each resolves a free-text name to a
+# cart line and writes it, so all carry mutating = true — same reason as the
+# id-based writers above: a successful change must register as a mutation so
+# the turn is classed `done` (not `failed`) and the escalation loopback does
+# not re-fire it.
+[server.tool_overlays.set_cart_quantity_by_name]
+untrusted = true
+mutating = true
+timeout_s = 35.0
+
+[server.tool_overlays.remove_from_cart_by_name]
+untrusted = true
+mutating = true
+timeout_s = 35.0
+
+[server.tool_overlays.adjust_cart_quantity_by_name]
 untrusted = true
 mutating = true
 timeout_s = 35.0
