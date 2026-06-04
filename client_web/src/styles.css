@@ -6,7 +6,7 @@
   --muted: #7c8390;
   --user: #4aa3ff;
   --assistant: #79e08a;
-  --cloud: #b88cff;
+  --specialist: #b88cff;
   --tool: #d4a437;
   --error: #ef5b5b;
   --warn: #d4a437;
@@ -59,17 +59,17 @@ header button.disconnect { background: var(--error); color: #fff; }
   text-transform: uppercase; margin-right: .35rem;
 }
 .row.assistant .bubble { background: rgba(121,224,138,.12); border-color: rgba(121,224,138,.35); }
-/* Router on: colour the reply by the brain that produced it. Local stays the
-   familiar green; cloud is violet, reinforcing that the turn left the box
-   (tool args/results crossed the wire — ARCH §9). A small corner tag spells
-   it out so the distinction survives for the colour-blind. */
-.bubble.llm-cloud { background: rgba(184,140,255,.13); border-color: rgba(184,140,255,.45); }
-.bubble.llm-local::before, .bubble.llm-cloud::before {
+/* Router on: colour the reply by the brain that produced it. The primary
+   stays the familiar green; the specialist is violet, marking the turn that
+   fell through to the heavier model. A small corner tag spells it out so the
+   distinction survives for the colour-blind. */
+.bubble.llm-specialist { background: rgba(184,140,255,.13); border-color: rgba(184,140,255,.45); }
+.bubble.llm-primary::before, .bubble.llm-specialist::before {
   display: block; font-size: .6rem; font-weight: 600; letter-spacing: .06em;
   text-transform: uppercase; margin-bottom: .25rem; opacity: .8;
 }
-.bubble.llm-local::before { content: "local"; color: var(--assistant); }
-.bubble.llm-cloud::before { content: "cloud"; color: var(--cloud); }
+.bubble.llm-primary::before { content: "primary"; color: var(--assistant); }
+.bubble.llm-specialist::before { content: "specialist"; color: var(--specialist); }
 .row.tool .bubble {
   background: rgba(212,164,55,.10); border-color: rgba(212,164,55,.35);
   font-family: ui-monospace, monospace; font-size: .85rem; color: var(--tool);

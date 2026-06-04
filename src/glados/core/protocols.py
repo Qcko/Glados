@@ -136,16 +136,15 @@ class TurnOutcome(BaseModel):
 
 
 class RouteNotice(BaseModel):
-    """Which brain (local or cloud) handled the turn, broadcast when the v2.6
-    hybrid router is active. `escalated=True` marks the *second* notice of a
-    turn: the local path produced a `failed` outcome and the organizer is
-    retrying on cloud. The UI surfaces the cloud path explicitly because, per
-    ARCHITECTURE §9, the cloud path sends tool arguments/results externally —
-    the user should see when their data crossed that boundary."""
+    """Which brain (primary or specialist) handled the turn, broadcast when the
+    v2.6 local multi-model router is active. `escalated=True` marks the *second*
+    notice of a turn: the primary path produced a `failed` outcome and the
+    organizer is retrying on the specialist. The UI surfaces which model ran so
+    the operator can see when a turn fell through to the heavier path."""
 
     type: Literal["route_notice"] = "route_notice"
     session_id: str
-    target: Literal["local", "cloud"]
+    target: Literal["primary", "specialist"]
     reason: str
     escalated: bool = False
 

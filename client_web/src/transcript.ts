@@ -35,9 +35,9 @@ function summariseValue(v: unknown): string {
 export class Transcript {
   private liveBubbles = new Map<string, HTMLDivElement>();
   // Which brain handled each in-flight turn, so the assistant bubble can be
-  // colour-coded local vs. cloud. Set from route_notice, read when the bubble
-  // is first created on the next assistant_delta.
-  private routeBySession = new Map<string, "local" | "cloud">();
+  // colour-coded primary vs. specialist. Set from route_notice, read when the
+  // bubble is first created on the next assistant_delta.
+  private routeBySession = new Map<string, "primary" | "specialist">();
 
   constructor(private readonly root: HTMLElement) {}
 
@@ -90,16 +90,16 @@ export class Transcript {
         // Remember the brain for this turn so the assistant bubble gets the
         // matching colour when it's created on the next delta.
         this.routeBySession.set(msg.session_id, msg.target);
-        // The cloud path sends data externally (ARCH §9) — always surface it.
-        // The initial local path is the silent default; no note for it.
+        // Surface when a turn ran on (or fell through to) the specialist. The
+        // primary path is the silent default; no note for it.
         if (msg.escalated) {
-          // The local reply already streamed into a bubble and came back
-          // failed. Drop it so the cloud retry starts a clean bubble, and
+          // The primary reply already streamed into a bubble and came back
+          // failed. Drop it so the specialist retry starts a clean bubble, and
           // mark the boundary.
           this.liveBubbles.delete(msg.session_id);
-          this.row("system", `↑ escalated to cloud — ${msg.reason}`);
-        } else if (msg.target === "cloud") {
-          this.row("system", `routed to cloud — ${msg.reason}`);
+          this.row("system", `↑ escalated to specialist — ${msg.reason}`);
+        } else if (msg.target === "specialist") {
+          this.row("system", `routed to specialist — ${msg.reason}`);
         }
         break;
       }

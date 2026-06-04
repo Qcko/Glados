@@ -36,34 +36,37 @@ class LLMConfig(BaseModel):
 
 
 class RouterConfig(BaseModel):
-    """v2.6 hybrid local/cloud router. Disabled by default — GLaDOS stays a
-    pure local assistant until the operator opts in. `enabled` turns on
-    per-turn routing; `cloud_enabled` is the separate, explicit privacy opt-in
-    that permits tool args/results to cross to the cloud provider (ARCH §9).
-    Both must be true AND an API key present for the cloud path to engage;
-    otherwise every turn runs local."""
+    """v2.6 local multi-model router. Disabled by default — GLaDOS runs every
+    turn on the single primary brain until the operator opts in. `enabled` turns
+    on per-turn routing between the primary brain and a specialist. The
+    specialist is local by default (`provider="local"`); the `cloud_*` knobs
+    gate the dormant cloud escape hatch and stay off unless explicitly opted in
+    (ARCH §12)."""
 
     enabled: bool = False
+    # The cloud escape hatch is off by default and gated separately from
+    # `enabled`: it is the explicit opt-in that permits tool args/results to
+    # cross to the external provider (ARCH §9). `provider="anthropic"` engages
+    # only when this is true AND an API key is present.
     cloud_enabled: bool = False
-    # "anthropic": real cloud brain (needs cloud_enabled + an API key).
-    # "local": loopback — the smart path runs on a local Ollama model too, so
-    # the router, escalation, and UI can be exercised end-to-end before a cloud
-    # provider is chosen. Nothing leaves the box, so it needs neither
-    # cloud_enabled nor a key.
-    provider: Literal["anthropic", "local"] = "anthropic"
+    # "local": the default all-local specialist — runs on a local Ollama model,
+    # nothing leaves the box, needs neither cloud_enabled nor a key.
+    # "anthropic": the dormant cloud escape hatch (needs cloud_enabled + an API
+    # key). Endpoint hardcoded to api.anthropic.com; see ARCH §12.
+    provider: Literal["anthropic", "local"] = "local"
     cloud_model: str = "claude-haiku-4-5-20251001"
-    # provider="local" only: the Ollama tag for the smart path. Empty reuses
-    # the same model as the local brain (true loopback — identical behaviour,
-    # useful purely to see routing/escalation fire). Point it at a larger local
-    # model (e.g. the 14b while the fast path runs a 7b) for a realistic split.
+    # provider="local" only: the Ollama tag for the specialist. Empty reuses the
+    # same model as the primary brain (alias — identical behaviour, useful purely
+    # to see routing/escalation fire). Point it at a larger local model (e.g. a
+    # 14b while the primary runs a 7b) for a realistic split.
     local_smart_model: str = ""
     # API key handle: read from this env var at boot. Never stored in TOML
     # (ARCH §9 — TOML holds handles, not secrets). Absent key => cloud off.
     api_key_env: str = "ANTHROPIC_API_KEY"
-    # Retry a `failed` local turn on cloud (router escalation input).
+    # Retry a `failed` primary turn on the specialist (router escalation input).
     escalate_on_failed: bool = True
     # Word count above which a request is treated as long/multi-clause and
-    # routed to cloud by the deterministic rules.
+    # routed to the specialist by the deterministic rules.
     max_words_local: int = 30
 
 

@@ -1,8 +1,10 @@
 """Anthropic Messages API adapter implementing the `LLM` Protocol.
 
-The cloud brain for the v2.6 hybrid router. Drives the *same* MCP tools as the
-local path — the registry doesn't care which model emits the tool call — so on
-the cloud path the local side is a pure dispatcher (no brain/hands split).
+The dormant cloud escape hatch for the v2.6 router. GLaDOS is all-local by
+default (ARCHITECTURE §12); this adapter only runs when the specialist slot is
+explicitly pointed at the cloud (`provider="anthropic"` + cloud opt-in + key).
+It drives the *same* MCP tools as the local path — the registry doesn't care
+which model emits the tool call — so the local side stays a pure dispatcher.
 
 Streams Server-Sent Events from `/v1/messages`. Translates between our
 `LLMMessage` / `LLMToolCall` types and Anthropic's content-block format. Tool
@@ -12,6 +14,9 @@ separator reserved) and restored on the way back, matching the Ollama adapter.
 Privacy: on this path tool *arguments and results* cross to Anthropic alongside
 the transcript (ARCHITECTURE §9). Construction is gated on explicit opt-in +
 an API key in the server wiring; this class assumes that gate already passed.
+The endpoint is hardcoded to api.anthropic.com — there is no `base_url` knob,
+which is what keeps the dormant code from being an arbitrary-destination exfil
+path; adding one for a self-hosted endpoint is a separate guarded slice (§12).
 Zero-retention is an account-level setting on Anthropic's side, not a per-call
 body flag — there is nothing to send here for it.
 """

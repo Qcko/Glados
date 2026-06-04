@@ -101,7 +101,7 @@ class TurnRecord:
         self.tools.append(ToolRecord(tool=tool, ok=ok, mutating=mutating))
 
     def made_successful_mutation(self) -> bool:
-        """True if a side-effecting tool call landed this turn. The cloud
+        """True if a side-effecting tool call landed this turn. The specialist
         escalation path checks this before re-running a `failed` turn: a turn
         that already mutated external state must not be replayed cold, or the
         side effect (cart write, checkout, send) fires twice."""

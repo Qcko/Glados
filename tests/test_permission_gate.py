@@ -132,7 +132,7 @@ async def test_gate_denied_skips_dispatch(tmp_path: Path) -> None:
 async def test_gate_denied_does_not_mark_turn_failed(tmp_path: Path) -> None:
     # A deliberate user denial is a boundary, not a tool failure: the turn
     # outcome must not be `failed` (which would spuriously escalate to the
-    # v2.6 cloud router). The model's final text "done" has no question, so
+    # v2.6 specialist router). The model's final text "done" has no question, so
     # with the denied call skipped the turn classifies as `done`.
     async with _make_org(tmp_path) as (org, sink, tool):
         await org.handle_user_text("desk-ui", "do it")

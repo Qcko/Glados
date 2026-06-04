@@ -133,27 +133,30 @@ def _build_llm(cfg: LLMConfig) -> LLM:
     return FakeLLM()
 
 
-def _build_cloud_llm(
-    cfg: RouterConfig, llm_cfg: LLMConfig, local_llm: LLM
+def _build_specialist_llm(
+    cfg: RouterConfig, llm_cfg: LLMConfig, primary_llm: LLM
 ) -> LLM | None:
-    """Construct the smart ("cloud") brain for the v2.6 router, or None when
-    it isn't wired. Returns None unless the router is enabled.
+    """Construct the specialist brain for the v2.6 router, or None when it
+    isn't wired. Returns None unless the router is enabled.
 
-    provider="local" is a loopback: the smart path runs on a local Ollama
-    model too. Nothing leaves the box, so it needs neither the cloud opt-in nor
-    an API key — it exists so the router, escalation, and UI can be exercised
-    before a real cloud provider is chosen. An empty `local_smart_model`
-    reuses the already-built local brain instance (identical behaviour).
+    provider="local" is the default all-local path: the specialist runs on a
+    local Ollama model. Nothing leaves the box, so it needs neither the cloud
+    opt-in nor an API key. An empty `local_smart_model` reuses the already-built
+    primary brain instance (identical behaviour — useful purely to see routing/
+    escalation fire); point it at a larger tag for a real primary/specialist
+    split.
 
-    provider="anthropic" is the real cloud path and fails closed: the cloud
-    opt-in must be set AND the API key present in the configured env var (TOML
-    never holds the key — ARCH §9). A missing key logs a warning and disables
-    cloud rather than crashing boot."""
+    provider="anthropic" is the dormant cloud escape hatch and fails closed: the
+    cloud opt-in must be set AND the API key present in the configured env var
+    (TOML never holds the key — ARCH §9). A missing key logs a warning and
+    disables the specialist rather than crashing boot. The endpoint is hardcoded
+    to api.anthropic.com — reusing this for a self-hosted endpoint is a separate
+    guarded slice (ARCH §12)."""
     if not cfg.enabled:
         return None
     if cfg.provider == "local":
         if not cfg.local_smart_model or cfg.local_smart_model == llm_cfg.model:
-            return local_llm  # true loopback — same instance, same model
+            return primary_llm  # alias — same instance, same model
         return OllamaLLM(
             host=llm_cfg.host,
             model=cfg.local_smart_model,
@@ -165,8 +168,8 @@ def _build_cloud_llm(
     api_key = os.environ.get(cfg.api_key_env)
     if not api_key:
         log.warning(
-            "router.cloud_enabled is set but %s is empty — cloud path disabled, "
-            "all turns run local",
+            "router.cloud_enabled is set but %s is empty — specialist disabled, "
+            "all turns run on the primary brain",
             cfg.api_key_env,
         )
         return None
@@ -257,7 +260,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     # here for shutdown:
     stdio_servers: list[StdioServer] = []
     llm = _build_llm(glados_cfg.llm)
-    cloud_llm = _build_cloud_llm(glados_cfg.router, glados_cfg.llm, llm)
+    specialist_llm = _build_specialist_llm(glados_cfg.router, glados_cfg.llm, llm)
     router = _build_router(glados_cfg.router)
     # STT and TTS are shared across connections (real backends load model
     # weights on construct). VAD is per-connection — it carries per-stream
@@ -296,7 +299,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         binding_for_client=rooms_cfg.find,
         clients_in_room=clients_in_room,
         router=router,
-        cloud_llm=cloud_llm,
+        specialist_llm=specialist_llm,
         escalate_on_failed=glados_cfg.router.escalate_on_failed,
     )
 
@@ -443,14 +446,14 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             llm_aclose = getattr(_app.state.llm, "aclose", None)
             if llm_aclose is not None:
                 await llm_aclose()
-            # Cloud brain (v2.6 router) holds its own pooled AsyncClient.
-            # In provider="local" loopback the cloud brain IS the local llm
-            # instance — already closed above — so skip it to avoid a
-            # double-aclose.
-            cloud = _app.state.cloud_llm
-            cloud_aclose = getattr(cloud, "aclose", None)
-            if cloud_aclose is not None and cloud is not _app.state.llm:
-                await cloud_aclose()
+            # Specialist brain (v2.6 router) may hold its own pooled
+            # AsyncClient. When it aliases the primary llm instance (provider=
+            # "local" with no distinct model) it was already closed above — skip
+            # it to avoid a double-aclose.
+            specialist = _app.state.specialist_llm
+            specialist_aclose = getattr(specialist, "aclose", None)
+            if specialist_aclose is not None and specialist is not _app.state.llm:
+                await specialist_aclose()
             # Tear down stdio MCP subprocesses last so any in-flight tool
             # call gets cancelled by the organizer.close() above before
             # its subprocess vanishes.
@@ -483,7 +486,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     app.state.stt = stt
     app.state.tts = tts
     app.state.llm = llm
-    app.state.cloud_llm = cloud_llm
+    app.state.specialist_llm = specialist_llm
     app.state.router = router
     # Only manage the daemon when we're actually pointed at one. Fakes don't
     # need it; tests run with backend="fake" and get None here, so the

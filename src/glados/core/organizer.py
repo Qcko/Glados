@@ -116,17 +116,18 @@ class Organizer:
         tts_cooldown_s: float = 0.200,
         confirm_timeout_s: float = 30.0,
         router: Router | None = None,
-        cloud_llm: LLM | None = None,
+        specialist_llm: LLM | None = None,
         escalate_on_failed: bool = True,
     ) -> None:
         self.llm = llm
-        # v2.6 hybrid router. When `router` is None the organizer behaves
-        # exactly as before — every turn runs on `self.llm` (local) with no
-        # RouteNotice emitted. `cloud_llm` is the second brain; it is only
-        # constructed by the server when the privacy opt-in + an API key are
-        # both present, so `cloud_llm is not None` IS the privacy gate here.
+        # v2.6 local multi-model router. When `router` is None the organizer
+        # behaves exactly as before — every turn runs on `self.llm` (the primary
+        # brain) with no RouteNotice emitted. `specialist_llm` is the second
+        # brain (a resident local model, or the dormant cloud escape hatch); the
+        # server only wires it when the router is enabled, so
+        # `specialist_llm is not None` is the gate for any specialist routing.
         self._router = router
-        self._cloud_llm = cloud_llm
+        self._specialist_llm = specialist_llm
         self._escalate_on_failed = escalate_on_failed
         self.tts = tts
         self.mcp = mcp
@@ -272,7 +273,7 @@ class Organizer:
                 llm, session.session_id, session.room_id, envelope, text, trace
             )
             if self._should_escalate(target, outcome):
-                final_text, outcome = await self._escalate_to_cloud(
+                final_text, outcome = await self._escalate_to_specialist(
                     session.session_id, session.room_id, envelope, text, trace
                 )
             await self._speak(session.session_id, session.room_id, final_text, trace)
@@ -406,7 +407,8 @@ class Organizer:
     ) -> tuple[str, TurnRecord]:
         """Run one end-to-end turn (tool loop) on `llm` and return the final
         spoken text plus the classified turn record. Pure of routing — the
-        caller decides which `llm` to hand in and whether to re-run on cloud."""
+        caller decides which `llm` to hand in and whether to re-run on the
+        specialist."""
         messages: list[LLMMessage] = [
             LLMMessage(role="system", content=self._system_prompt),
             LLMMessage(role="user", content=text),
@@ -436,41 +438,43 @@ class Organizer:
         outcome.final_text = final_text
         return final_text, outcome
 
-    def _select_path(self, text: str) -> tuple[LLM, Literal["local", "cloud"], str]:
-        """Pick the brain for this turn. Falls back to local whenever the
-        router is absent, or routes cloud but the cloud brain isn't wired
-        (no opt-in / no key) — the privacy gate fails closed, toward local."""
+    def _select_path(
+        self, text: str
+    ) -> tuple[LLM, Literal["primary", "specialist"], str]:
+        """Pick the brain for this turn. Falls back to the primary whenever the
+        router is absent, or routes to the specialist but no specialist brain is
+        wired (router disabled / no opt-in) — fails closed, toward the primary."""
         if self._router is None:
-            return self.llm, "local", "router disabled"
+            return self.llm, "primary", "router disabled"
         decision = self._router.decide(text)
-        if decision.target == "cloud":
-            if self._cloud_llm is not None:
-                return self._cloud_llm, "cloud", decision.reason
-            return self.llm, "local", f"cloud unavailable ({decision.reason})"
-        return self.llm, "local", decision.reason
+        if decision.target == "specialist":
+            if self._specialist_llm is not None:
+                return self._specialist_llm, "specialist", decision.reason
+            return self.llm, "primary", f"specialist unavailable ({decision.reason})"
+        return self.llm, "primary", decision.reason
 
     def _should_escalate(
-        self, target: Literal["local", "cloud"], outcome: TurnRecord
+        self, target: Literal["primary", "specialist"], outcome: TurnRecord
     ) -> bool:
-        """A local turn that came back `failed` is the escalation trigger —
-        the deterministic outcome says the local brain didn't finish. Cloud
-        turns never escalate (there's nowhere further to go), and escalation
-        needs the cloud brain wired and the feature enabled.
+        """A primary turn that came back `failed` is the escalation trigger —
+        the deterministic outcome says the primary brain didn't finish.
+        Specialist turns never escalate (there's nowhere further to go), and
+        escalation needs the specialist brain wired and the feature enabled.
 
         A turn that already landed a successful mutating call is never
         escalated even when it classifies `failed` (loop exhaustion, or a
-        later unrelated tool error): re-driving the user request cold on cloud
-        would fire that side effect a second time (double cart-add / checkout).
-        Better a visible local `failed` than a duplicated mutation."""
+        later unrelated tool error): re-driving the user request cold on the
+        specialist would fire that side effect a second time (double cart-add /
+        checkout). Better a visible primary `failed` than a duplicated mutation."""
         return (
-            target == "local"
+            target == "primary"
             and self._escalate_on_failed
-            and self._cloud_llm is not None
+            and self._specialist_llm is not None
             and not outcome.made_successful_mutation()
             and classify(outcome) == "failed"
         )
 
-    async def _escalate_to_cloud(
+    async def _escalate_to_specialist(
         self,
         session_id: str,
         room_id: str,
@@ -478,18 +482,18 @@ class Organizer:
         text: str,
         trace,
     ) -> tuple[str, TurnRecord]:
-        trace.event("escalate", reason="local outcome failed")
+        trace.event("escalate", reason="primary outcome failed")
         await self._broadcast(
             room_id,
             RouteNotice(
                 session_id=session_id,
-                target="cloud",
-                reason="local turn failed — retrying on cloud",
+                target="specialist",
+                reason="primary turn failed — retrying on specialist",
                 escalated=True,
             ),
         )
         return await self._drive(
-            self._cloud_llm, session_id, room_id, envelope, text, trace
+            self._specialist_llm, session_id, room_id, envelope, text, trace
         )
 
     async def _run_one_llm_pass(
@@ -655,7 +659,7 @@ class Organizer:
             )
             # A user-denied confirmation is a deliberate boundary, not a tool
             # failure — don't let it poison the turn outcome as `failed` (and
-            # so spuriously escalate to the v2.6 cloud router). Skip recording
+            # so spuriously escalate to the v2.6 specialist router). Skip recording
             # it entirely; the model still sees `user denied` in the transcript.
             #
             # A tool mutates external state if it's explicitly flagged

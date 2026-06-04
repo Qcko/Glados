@@ -1,15 +1,17 @@
-"""Deterministic routing rules: text in, a local/cloud verdict out.
+"""Deterministic routing rules: text in, a primary/specialist verdict out.
 
-Per ARCHITECTURE.md v2.6 the rules are also the **privacy gate** — §9's
-invariant tightens to "no cloud LLM call carries data the user hasn't
-explicitly opted into routing externally", and these rules are what decide a
-turn crosses that boundary. So they err toward *local*: only requests that
-clearly want open-ended reasoning (which the local 14b fumbles) are sent out.
+Per ARCHITECTURE.md §12 (v2.6) the router picks which **local** brain handles a
+turn — the primary model, or a resident specialist kept for the open-ended
+reasoning the primary fumbles. Both run on the home server, so routing crosses
+no privacy boundary; the rules simply err toward the cheap *primary* path and
+only send a turn to the specialist when it clearly wants open-ended reasoning.
+(The specialist slot can be backed by the dormant cloud escape hatch, but that
+is a provider choice in the wiring, not something these rules decide.)
 
-The verdict carries a `confidence`. A `low`-confidence local verdict means the
+The verdict carries a `confidence`. A `low`-confidence primary verdict means the
 rules couldn't classify cleanly; the organizer's escalation path can retry such
-a turn on cloud if its deterministic outcome comes back `failed`. A `high`
-verdict is the rules committing.
+a turn on the specialist if its deterministic outcome comes back `failed`. A
+`high` verdict is the rules committing.
 """
 
 from __future__ import annotations
@@ -20,14 +22,14 @@ from typing import Literal
 
 from ...core.turn_outcome import is_action_request
 
-RouteTarget = Literal["local", "cloud"]
+RouteTarget = Literal["primary", "specialist"]
 RouteConfidence = Literal["high", "low"]
 
-# Markers of open-ended reasoning the local model is known to fumble:
+# Markers of open-ended reasoning the primary model is known to fumble:
 # explanation, comparison, justification, recommendation. Matched as whole
 # words anywhere in the request — unlike action verbs these aren't
 # position-sensitive ("milk or oat, which is better?" should still route out).
-_CLOUD_MARKERS = re.compile(
+_SPECIALIST_MARKERS = re.compile(
     r"\b(?:why|explain|compare|comparison|difference|differences|versus|vs|"
     r"pros and cons|trade-?offs?|analy[sz]e|elaborate|reason|justify|"
     r"recommend|suggest|advise|opinion|think about|how come|"
@@ -46,26 +48,30 @@ class RouteDecision:
 @dataclass(frozen=True)
 class Router:
     """Deterministic per-turn router. `max_words_local` is the length above
-    which a request is treated as multi-clause reasoning and sent to cloud."""
+    which a request is treated as multi-clause reasoning and sent to the
+    specialist."""
 
     max_words_local: int = 30
 
     def decide(self, text: str) -> RouteDecision:
         stripped = (text or "").strip()
         if not stripped:
-            return RouteDecision("local", "empty request", "high")
-        if _CLOUD_MARKERS.search(stripped):
-            return RouteDecision("cloud", "reasoning/comparison markers", "high")
+            return RouteDecision("primary", "empty request", "high")
+        if _SPECIALIST_MARKERS.search(stripped):
+            return RouteDecision(
+                "specialist", "reasoning/comparison markers", "high"
+            )
         words = stripped.split()
         if len(words) > self.max_words_local:
             return RouteDecision(
-                "cloud", f"long request ({len(words)} words)", "high"
+                "specialist", f"long request ({len(words)} words)", "high"
             )
         if is_action_request(stripped):
-            return RouteDecision("local", "tool-trigger imperative", "high")
+            return RouteDecision("primary", "tool-trigger imperative", "high")
         if len(words) <= 6:
-            return RouteDecision("local", "short utterance", "high")
-        # Mid-length, no clear markers — the local brain is the cheap, private
-        # default, but the rules aren't sure. Flagged low so a `failed` outcome
-        # can escalate rather than the user just getting a bad local answer.
-        return RouteDecision("local", "ambiguous — default local", "low")
+            return RouteDecision("primary", "short utterance", "high")
+        # Mid-length, no clear markers — the primary brain is the cheap default,
+        # but the rules aren't sure. Flagged low so a `failed` outcome can
+        # escalate to the specialist rather than the user just getting a bad
+        # primary answer.
+        return RouteDecision("primary", "ambiguous — default primary", "low")

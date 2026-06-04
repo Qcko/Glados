@@ -157,7 +157,7 @@ async def _run_turn(ws, prompt: str) -> TurnReport:
                 "ok" if msg["ok"] else f"ERROR: {msg.get('error')}"
             )
         elif kind == "route_notice":
-            tag = "escalated->cloud" if msg["escalated"] else msg["target"]
+            tag = "escalated->specialist" if msg["escalated"] else msg["target"]
             rep.route = f"{tag} ({msg['reason']})"
         elif kind == "turn_outcome":
             rep.outcome = msg["outcome"]

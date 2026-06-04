@@ -103,7 +103,7 @@ export interface ServerError {
 export interface RouteNotice {
   type: "route_notice";
   session_id: string;
-  target: "local" | "cloud";
+  target: "primary" | "specialist";
   reason: string;
   escalated: boolean;
 }
