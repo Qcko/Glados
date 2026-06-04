@@ -25,6 +25,20 @@ Caveat — turn-to-turn memory: T4 ("actually add eggs instead") and T8 ("now
 add it back") depend on conversational memory the v0 organizer does not yet
 have (single-turn sessions). They are sent anyway so you can observe the
 behaviour, but flagged in the report as memory-dependent.
+
+Stateful-cart pollution & --reset: the cart tests (T6/T8/T10/T11/T12) share one
+server-side cart with no reset between them, so an earlier test pollutes a later
+one — e.g. T3's add_by_volume can leave both a 3 L and a 1 L milk line, after
+which every later "milk" op hits the NameResolver non-unique guard and can't
+score a clean pass. Pass --reset to empty the cart and re-establish a known
+single-milk starting state before the stateful block (anchored to the test
+flagged `reset_before`). The reset is driven through the same ws/v1 user_text
+path the suite already uses (no direct-tool frame exists), so it is itself
+LLM-mediated; it is logged under a distinct CART RESET banner so a run that
+reset state is visibly distinguishable from one that did not. Without --reset
+the suite behaves exactly as before. Note the Dunnes cart is persisted per
+logged-in account and survives GLaDOS restarts, so it must be cleared
+explicitly — restarting the server does not reset it.
 """
 
 from __future__ import annotations
@@ -46,6 +60,23 @@ class BakeoffTest:
     prompts: list[str]
     criterion: str
     memory_dependent: bool = False
+    # Part of the shared-cart stateful block. When --reset is passed, the cart
+    # is emptied and reseeded to a known single-milk state once, before the
+    # first stateful test that actually runs (so it works under --only too).
+    stateful: bool = False
+
+
+# Prompts that drive the cart back to a known starting state through the same
+# ws/v1 user_text path the suite uses. There is no client-side direct-tool
+# frame, so the reset is itself LLM-mediated — phrased to remove *every* line
+# (by product id, unambiguous) rather than a per-name op that would trip the
+# non-unique guard, then seed a single milk line the stateful tests expect.
+RESET_PROMPTS: list[str] = [
+    "Call view_cart to list the lines, then for each line call remove_from_cart "
+    "using that line's real productId value copied verbatim from the view_cart "
+    "result — never a placeholder. Repeat until view_cart shows an empty cart.",
+    "Add one carton of milk to the cart.",
+]
 
 
 # Order follows MODEL_BAKE_OFF.md "Run order note": T9 first (authenticates the
@@ -82,12 +113,14 @@ TESTS: list[BakeoffTest] = [
         "T6",
         ["Show me what's in my cart and then remove the milk."],
         "view_cart then remove/ set_cart_quantity on the milk line; >=2 calls, one turn.",
+        stateful=True,
     ),
     BakeoffTest(
         "T8",
         ["Now add it back."],
         "re-adds the milk by the productId it just removed, without re-searching.",
         memory_dependent=True,
+        stateful=True,
     ),
     BakeoffTest(
         "T10",
@@ -96,6 +129,7 @@ TESTS: list[BakeoffTest] = [
         "quantity 2 (cart milk count goes UP by 2), not a set-to-2. Assumes "
         "milk is already in the cart (run T2 first).",
         memory_dependent=True,
+        stateful=True,
     ),
     BakeoffTest(
         "T11",
@@ -104,6 +138,7 @@ TESTS: list[BakeoffTest] = [
         "(view_cart / search) then set_cart_quantity(id, 1) — NOT add_to_cart. "
         "Ends with milk quantity 1.",
         memory_dependent=True,
+        stateful=True,
     ),
     BakeoffTest(
         "T12",
@@ -112,6 +147,7 @@ TESTS: list[BakeoffTest] = [
         "set_cart_quantity(id, current-1) (or remove if it was 1). One user "
         "turn, >=2 tool calls. Hardest — read-then-compute-then-act.",
         memory_dependent=True,
+        stateful=True,
     ),
 ]
 
@@ -157,7 +193,7 @@ async def _run_turn(ws, prompt: str) -> TurnReport:
                 "ok" if msg["ok"] else f"ERROR: {msg.get('error')}"
             )
         elif kind == "route_notice":
-            tag = "escalated->specialist" if msg["escalated"] else msg["target"]
+            tag = "escalated->cloud" if msg["escalated"] else msg["target"]
             rep.route = f"{tag} ({msg['reason']})"
         elif kind == "turn_outcome":
             rep.outcome = msg["outcome"]
@@ -170,6 +206,17 @@ async def _run_turn(ws, prompt: str) -> TurnReport:
         elif kind in ("done", "cancelled", "error"):
             rep.ended = kind if kind != "error" else f"error: {msg.get('message')}"
             return rep
+
+
+async def _reset_cart(ws) -> None:
+    """Drive the cart back to a known single-milk state via RESET_PROMPTS.
+    LLM-mediated (same user_text path as the suite); logged under a distinct
+    banner so a reset run is visibly distinguishable from one that isn't."""
+    print("=== CART RESET (--reset) — empty + seed single milk ===")
+    for prompt in RESET_PROMPTS:
+        rep = await _run_turn(ws, prompt)
+        _print_turn(rep)
+    print("=== CART RESET done ===")
 
 
 def _print_turn(rep: TurnReport) -> None:
@@ -198,6 +245,7 @@ async def run(args: argparse.Namespace) -> None:
 
     print(f"=== GLaDOS bake-off — slot {args.slot} ===")
     print(f"server: {args.url}   client: {args.client_id}/{args.room}")
+    print(f"cart reset: {'ON (--reset) — single-milk reseed before stateful block' if args.reset else 'OFF — stateful tests share an unreset cart'}")
     print("Model under test is the server's configured [llm] model — confirm it "
           "matches the slot.\n")
 
@@ -213,9 +261,13 @@ async def run(args: argparse.Namespace) -> None:
             "token": token,
         }))
         only = {t.strip().upper() for t in args.only.split(",")} if args.only else None
+        reset_pending = args.reset
         for test in TESTS:
             if only is not None and test.id not in only:
                 continue
+            if reset_pending and test.stateful:
+                await _reset_cart(ws)
+                reset_pending = False
             note = "  (memory-dependent — v0 single-turn may not honour this)" if test.memory_dependent else ""
             print(f"--- {test.id}{note}")
             print(f"    pass if: {test.criterion}")
@@ -241,6 +293,7 @@ def main() -> None:
     p.add_argument("--room", default="desk")
     p.add_argument("--token", default=None, help="override the keyring token (dev fixture)")
     p.add_argument("--only", default=None, help="comma-separated test ids to run (e.g. T9,T1) — runs one at a time")
+    p.add_argument("--reset", action="store_true", help="empty + reseed a single-milk cart before the stateful block (LLM-mediated via user_text; clears the persisted server-side cart)")
     asyncio.run(run(p.parse_args()))
 
 
