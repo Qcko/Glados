@@ -390,36 +390,41 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   same platform. Different stack (Web API + OAuth, no Selenium),
   so the credentials story exercises the keyring differently.
 
-- **v2.6 — hybrid LLM router (local brain + cloud brain).** After the
-  bake-off picks a local model, accept that even the best local 14b will
-  fumble open-ended reasoning. Add a router between STT and the LLM
-  layer that, per turn, picks one of two end-to-end paths:
-  1. **Local path.** Existing flow: local LLM reasons, calls tools via
-     MCP registry, streams reply tokens.
-  2. **Cloud path.** A zero-retention cloud LLM reasons and calls the
-     *same* MCP tools directly (the registry doesn't care which model
-     drives it). Local side is a pure dispatcher on this path — no
-     local LLM in the loop, so no semantic-loss "brain/hands" split.
+- **v2.6 — local multi-model router.** After the bake-off picks a primary
+  local model, accept that one model won't be best at everything. The
+  economic call is settled: a capable home server runs the models, so there
+  is **no cloud brain** — all inference stays local. The router earns its
+  place only as a *local* multi-model dispatcher. Add it between STT and the
+  LLM layer; per turn it picks which **local** model handles the turn:
+  1. **Default path.** The primary local LLM reasons, calls tools via the
+     MCP registry, streams reply tokens. This is the whole story unless a
+     measured gap justifies more.
+  2. **Specialist path (only if it earns the VRAM).** A second local model
+     kept resident for a class of turns the primary fumbles (heavier
+     open-ended reasoning, or a small fast model for trivial dispatch). It
+     drives the *same* MCP tools — the registry doesn't care which model
+     drives it. Worth the extra resident cost only when a logged decision
+     trace shows a distinct workload the primary mis-handles; otherwise one
+     model serves every path.
 
-  Both paths terminate in local Piper TTS. The router lives in
+  Every path terminates in local Piper TTS. The router lives in
   `brain/router/` and ships **deterministic first** (keyword + length
   + clause-shape rules, mirroring the effort-router pattern): tool-trigger
-  verbs and short imperatives → local; "why" / "explain" / "compare" /
-  long multi-clause → cloud; ambiguous → local with a refusal/low-confidence
-  signal that retries on cloud. An LLM-driven router is an optimisation
-  layered on top once a week of logged decisions shows the rules
-  mis-route in ways the retry loop can't absorb.
+  verbs and short imperatives → primary; "why" / "explain" / "compare" /
+  long multi-clause → specialist (when one is resident); ambiguous → primary
+  with a low-confidence signal that can retry on the specialist. An
+  LLM-driven router is an optimisation layered on top once a week of logged
+  decisions shows the rules mis-route in ways the retry loop can't absorb.
 
-  Privacy consequence worth flagging up front: on the cloud path, *tool
-  arguments and tool results* cross the wire alongside the transcript —
-  basket contents, calendar entries, search hits. Not just conversation.
-  §9's invariant tightens to "no cloud LLM call carries data the user
-  hasn't explicitly opted into routing externally"; the router's
-  deterministic rules are the gate.
+  Privacy consequence: there isn't one. Because every model is local, tool
+  arguments and results never leave the user's devices on any path, so §9's
+  invariant holds unchanged — dropping the cloud path removes the tightening
+  that the old hybrid design needed, and restores BRIEF's stronger
+  "no data leaves the machine" framing (modulo remote *device* access, §13).
 
-  Demo path: ask GLaDOS something the local model is known to mangle
-  (multi-step reasoning, niche knowledge) → router selects cloud →
-  cloud calls `get_time` or similar → reply spoken via Piper.
+  Demo path: ask GLaDOS something the primary model is known to mangle
+  (multi-step reasoning) → router selects the resident specialist →
+  it calls `get_time` or similar → reply spoken via Piper.
 
 - **v3 — Pi room client.** Python + PortAudio + WebSocket + AEC. systemd
   unit, auto-update from server. One Pi per room.
@@ -576,22 +581,22 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   framing softens to "no data leaves the user's own devices." This is
   a material change to the project's framing and should land in BRIEF
   when v8 ships, not silently in this doc.
-- **Cloud LLM provider for the v2.6 hybrid router.** Several
-  zero-retention options exist and the choice doesn't need to be made
-  before the local-model bake-off concludes. Realistic shortlist:
-  Anthropic (Haiku 4.5 for cheap/fast, Sonnet/Opus for heavy turns;
-  zero-retention available on request), OpenAI (zero-retention via
-  enterprise / explicit opt-out), Azure OpenAI (no-logging deployments
-  by config), self-hosted on a rented GPU VPS (full control, ops cost).
-  Pick after v2.6 router lands and a week of real cloud-path traffic
-  reveals the actual mix of "smart turn" workloads.
+- **Home-server model lineup for v2.6.** The local-vs-cloud split is
+  dropped: the economic choice is a capable home server that runs the
+  models, so the open question is no longer *which cloud provider* but
+  *which local models* to host and whether to keep more than one resident.
+  The shortlist forms after the bake-off and once the hardware lands; the
+  decision turns on VRAM headroom and whether a logged trace shows a
+  workload mix a single model can't cover. Default position: one primary
+  model for everything, adding a resident specialist only when a measured
+  gap justifies the cost.
 - **Router escalation policy for v2.6.** Open question whether
-  low-confidence local turns should silently retry on cloud (cheap,
-  better UX, privacy-leaks a turn the rules said was local) or surface
-  "I'm not sure — try again, or say 'use cloud'" (preserves the
-  privacy invariant strictly, worse UX). Default-position: silent
-  retry, with a config knob to flip strict. Revisit once traces show
-  how often retries fire.
+  low-confidence primary-model turns should silently retry on the resident
+  specialist model (cheap, better UX) or surface "I'm not sure — try
+  again". With everything local there is **no privacy cost** to a silent
+  retry — the only cost is latency and VRAM — so the default leans
+  silent-retry, with a config knob. Revisit once traces show how often
+  retries fire.
 - **Mobile audio path.** Android Auto's published app categories
   don't admit a general voice assistant; sideloaded media-session PTT
   sidesteps the category problem entirely (no Play Store; personal
@@ -643,8 +648,7 @@ a "first-party" flag says who shipped the *server*, not whether the
 *bytes* in its memory file are safe. A free-text lessons file injected
 into the system prompt is a prompt-injection **supply-chain** vector
 (repo compromise, malicious PR, tampered local file, or the laundering
-path above), and on cloud-routed turns it also crosses to the cloud model
-(§9). The fix reframes the undecidable question "is this text malicious?"
+path above). The fix reframes the undecidable question "is this text malicious?"
 into the decidable "is this exactly what a human approved?" —
 **LocalGuard-for-prompts**, mirroring the package-baseline model. Defence
 in depth:
