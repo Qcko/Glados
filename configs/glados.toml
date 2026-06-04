@@ -18,7 +18,10 @@ backend = "ollama"
 # model = "qwen2.5:14b-instruct"             # Q4_K_M (8.4 GB) — DO NOT SHIP: Thai/JSON pathologies (bake-off 2026-06-03)
 model = "qwen2.5:14b-instruct-q5_K_M"      # Q5_K_M (10.5 GB) — bake-off winner 2026-06-03 (15/22)
 host = "http://localhost:11434"
-temperature = 0.2
+# Greedy decoding (0.0): the 14b/Q5 local model drifts into another language
+# when allowed to sample; greedy + the "reply in English" prompt rule curbs the
+# code-switching without hurting tool-call selection.
+temperature = 0.0
 timeout = 60.0
 
 [router]
@@ -53,6 +56,15 @@ escalate_on_failed = true
 # Requests longer than this many words route to the specialist (long/
 # multi-clause reasoning the primary fumbles).
 max_words_local = 30
+
+[session]
+# Conversation continuity (ARCH §3 idle-window, §8 hot buffer). A follow-up in
+# the same room/speaker reuses the live session — replaying its history so
+# "add it back" / "do that instead" resolve — when it lands within
+# idle_window_s of the last utterance; after that a fresh session opens with no
+# history. history_max_turns bounds how many prior turns are replayed.
+idle_window_s = 180.0
+history_max_turns = 8
 
 [audio]
 # Tee inbound mic frames to traces/audio/<client>/<utc>.wav for offline

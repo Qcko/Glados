@@ -152,7 +152,7 @@ async def test_mcp_dispatch_per_tool_timeout_override() -> None:
 
 
 @asynccontextmanager
-async def _make_organizer(bindings: list[ClientBinding], tmp: Path):
+async def _make_organizer(bindings: list[ClientBinding], tmp: Path, llm=None):
     sink: list[tuple[str, dict]] = []
 
     async def send(client_id: str, msg: BaseModel) -> None:
@@ -169,7 +169,7 @@ async def _make_organizer(bindings: list[ClientBinding], tmp: Path):
     reg = MCPRegistry()
     reg.register(NowTool())
     organizer = Organizer(
-        llm=FakeLLM(),
+        llm=llm if llm is not None else FakeLLM(),
         mcp=reg,
         traces=TraceStore(tmp),
         sessions=SessionRegistry(),
@@ -226,15 +226,94 @@ async def test_organizer_isolates_rooms(tmp_path: Path) -> None:
         assert "tool_call" not in {m["type"] for m in desk2_msgs}
 
 
+@pytest.mark.asyncio
+async def test_organizer_replays_history_in_same_session(tmp_path: Path) -> None:
+    """A follow-up turn in the same session sees the prior turn's user message
+    and GLaDOS's reply — the basis for "do that instead" / "add it back"."""
+    from glados.core.adapters import LLMText
+
+    class RecordingLLM:
+        def __init__(self) -> None:
+            self.seen: list[list[tuple[str, str | None]]] = []
+
+        async def chat(self, messages, tools):
+            self.seen.append([(m.role, m.content) for m in messages])
+            yield LLMText(text="acknowledged")
+
+    llm = RecordingLLM()
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=llm,
+    ) as (org, _sink):
+        await org.handle_user_text("desk-ui", "add bananas")
+        await org.flush()
+        await org.handle_user_text("desk-ui", "actually eggs instead")
+        await org.flush()
+
+    first_seen, second_seen = llm.seen
+    # First turn: just system + the user message, no prior history.
+    assert first_seen == [("system", org._system_prompt), ("user", "add bananas")]
+    # Second turn: the first exchange is replayed before the new user message.
+    assert ("user", "add bananas") in second_seen
+    assert ("assistant", "acknowledged") in second_seen
+    assert second_seen[-1] == ("user", "actually eggs instead")
+
+
+@pytest.mark.asyncio
+async def test_organizer_no_history_bleed_across_rooms(tmp_path: Path) -> None:
+    """Distinct (room, speaker) sessions never see each other's history."""
+    from glados.core.adapters import LLMText
+
+    class RecordingLLM:
+        def __init__(self) -> None:
+            self.seen: list[list[tuple[str, str | None]]] = []
+
+        async def chat(self, messages, tools):
+            self.seen.append([(m.role, m.content) for m in messages])
+            yield LLMText(text="ok")
+
+    llm = RecordingLLM()
+    async with _make_organizer(
+        [
+            ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko"),
+            ClientBinding(client_id="kit-ui", room_id="kitchen", role="ui", default_user="anna"),
+        ],
+        tmp_path,
+        llm=llm,
+    ) as (org, _sink):
+        await org.handle_user_text("desk-ui", "secret desk thing")
+        await org.flush()
+        await org.handle_user_text("kit-ui", "kitchen thing")
+        await org.flush()
+
+    _desk_seen, kitchen_seen = llm.seen
+    assert ("user", "secret desk thing") not in kitchen_seen
+    assert kitchen_seen[0] == ("system", org._system_prompt)
+
+
 # ---- Trace writer -------------------------------------------------------
 
 
-def test_session_registry_opens_distinct_ids() -> None:
-    reg = SessionRegistry()
+def test_session_registry_reuses_within_idle_window() -> None:
+    now = [1000.0]
+    reg = SessionRegistry(idle_window_s=180.0, clock=lambda: now[0])
     a = reg.get_or_open("desk", "qcko")
+    now[0] += 60.0  # follow-up inside the window
     b = reg.get_or_open("desk", "qcko")
-    assert a.session_id != b.session_id
-    assert reg.latest("desk", "qcko").session_id == b.session_id
+    assert a.session_id == b.session_id  # same conversation, history survives
+    now[0] += 1000.0  # long gap — past the idle window
+    c = reg.get_or_open("desk", "qcko")
+    assert c.session_id != a.session_id  # fresh session, empty history
+    assert reg.latest("desk", "qcko").session_id == c.session_id
+
+
+def test_session_registry_isolates_distinct_keys() -> None:
+    reg = SessionRegistry()
+    assert (
+        reg.get_or_open("desk", "qcko").session_id
+        != reg.get_or_open("kitchen", "qcko").session_id
+    )
 
 
 @pytest.mark.asyncio

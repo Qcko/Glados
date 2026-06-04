@@ -1,9 +1,9 @@
 """Organizer: the only place sessions, queueing, and egress routing live.
 
-v0 step 2 scope: ingress tagging via `ClientBinding`, single-turn sessions
-(no continuation yet), per-session tool-calling loop, egress fan-out by
-`room_id`. Dedup, fingerprinting, and per-session FIFO queueing land when
-audio arrives in v1.
+Scope: ingress tagging via `ClientBinding`, idle-window session continuation
+with a per-session hot history buffer (ARCH §3/§8), per-session tool-calling
+loop, egress fan-out by `room_id`. Dedup and fingerprinting land when audio
+arrives in v1.
 """
 
 from __future__ import annotations
@@ -51,6 +51,11 @@ RoomLookup = Callable[[str], list[str]]
 UserTextSource = Literal["voice", "text"]
 
 _MAX_TOOL_LOOP = 8
+
+# Upper bound on how many sessions' conversation buffers are held in RAM at
+# once. Far above any realistic concurrent-session count; exists only so a long
+# uptime accumulating dead sessions can't grow the history dict without limit.
+_MAX_TRACKED_SESSIONS = 64
 
 # Framing for hash-approved server memory injected into the system prompt
 # (ARCH §14 layer 4). The blocks are reference data, not commands — the §7
@@ -118,6 +123,7 @@ class Organizer:
         router: Router | None = None,
         specialist_llm: LLM | None = None,
         escalate_on_failed: bool = True,
+        history_max_turns: int = 8,
     ) -> None:
         self.llm = llm
         # v2.6 local multi-model router. When `router` is None the organizer
@@ -129,6 +135,15 @@ class Organizer:
         self._router = router
         self._specialist_llm = specialist_llm
         self._escalate_on_failed = escalate_on_failed
+        # Hot conversation buffer (ARCH §8), keyed by the stable session_id the
+        # SessionRegistry hands back. Within a session's idle window the same id
+        # recurs, so a follow-up turn replays the prior turns and "add it back"
+        # / "do that instead" resolve. A new session starts empty — no context
+        # bleed across sessions (ARCH §3). Capped per session by
+        # `_history_max_turns`; the dict itself is bounded by
+        # `_MAX_TRACKED_SESSIONS` so dead sessions can't grow it without limit.
+        self._history: dict[str, list[LLMMessage]] = {}
+        self._history_max_turns = history_max_turns
         self.tts = tts
         self.mcp = mcp
         self.traces = traces
@@ -269,13 +284,19 @@ class Organizer:
                         session_id=session.session_id, target=target, reason=reason
                     ),
                 )
-            final_text, outcome = await self._drive(
-                llm, session.session_id, session.room_id, envelope, text, trace
+            history = self._history.get(session.session_id, [])
+            final_text, outcome, new_history = await self._drive(
+                llm, session.session_id, session.room_id, envelope, text, trace,
+                history,
             )
             if self._should_escalate(target, outcome):
-                final_text, outcome = await self._escalate_to_specialist(
-                    session.session_id, session.room_id, envelope, text, trace
+                # Re-drive cold from the SAME prior history, never the failed
+                # primary attempt's messages — the specialist gets a clean view.
+                final_text, outcome, new_history = await self._escalate_to_specialist(
+                    session.session_id, session.room_id, envelope, text, trace,
+                    history,
                 )
+            self._commit_history(session.session_id, new_history, outcome, final_text)
             await self._speak(session.session_id, session.room_id, final_text, trace)
             await self._emit_turn_outcome(
                 session.session_id, session.room_id, outcome, trace
@@ -404,13 +425,16 @@ class Organizer:
         envelope: CallEnvelope,
         text: str,
         trace,
-    ) -> tuple[str, TurnRecord]:
+        history: list[LLMMessage],
+    ) -> tuple[str, TurnRecord, list[LLMMessage]]:
         """Run one end-to-end turn (tool loop) on `llm` and return the final
-        spoken text plus the classified turn record. Pure of routing — the
-        caller decides which `llm` to hand in and whether to re-run on the
-        specialist."""
+        spoken text, the classified turn record, and the conversation history
+        extended with this turn (everything after the system prompt). Pure of
+        routing — the caller decides which `llm` to hand in, whether to re-run
+        on the specialist, and whether to keep the returned history."""
         messages: list[LLMMessage] = [
             LLMMessage(role="system", content=self._system_prompt),
+            *history,
             LLMMessage(role="user", content=text),
         ]
         final_text = ""
@@ -421,6 +445,10 @@ class Organizer:
             )
             if not pending_calls:
                 final_text = assistant_text
+                # Record the final reply so the next turn's history shows what
+                # GLaDOS said (and, via the tool messages above, did) — that is
+                # what lets "add it back" resolve the prior action.
+                messages.append(LLMMessage(role="assistant", content=assistant_text or None))
                 break
             messages.append(
                 LLMMessage(
@@ -435,8 +463,11 @@ class Organizer:
         else:
             outcome.loop_exhausted = True
             final_text = await self._handle_loop_exhausted(session_id, room_id, trace)
+            messages.append(LLMMessage(role="assistant", content=final_text or None))
         outcome.final_text = final_text
-        return final_text, outcome
+        # messages[0] is the system prompt (rebuilt every turn); everything
+        # after it is the replayable history extended with this turn.
+        return final_text, outcome, messages[1:]
 
     def _select_path(
         self, text: str
@@ -481,7 +512,8 @@ class Organizer:
         envelope: CallEnvelope,
         text: str,
         trace,
-    ) -> tuple[str, TurnRecord]:
+        history: list[LLMMessage],
+    ) -> tuple[str, TurnRecord, list[LLMMessage]]:
         trace.event("escalate", reason="primary outcome failed")
         await self._broadcast(
             room_id,
@@ -493,8 +525,37 @@ class Organizer:
             ),
         )
         return await self._drive(
-            self._specialist_llm, session_id, room_id, envelope, text, trace
+            self._specialist_llm, session_id, room_id, envelope, text, trace, history
         )
+
+    def _commit_history(
+        self, session_id: str, new_history: list[LLMMessage], outcome: TurnRecord,
+        final_text: str,
+    ) -> None:
+        """Persist the extended history for this session — but only when the
+        turn actually produced something (a tool ran or a non-empty reply).
+        A no-op turn (empty reply, no tools — e.g. a dropped/garbled utterance)
+        leaves the prior history untouched rather than logging an empty
+        exchange that would just dilute the buffer."""
+        produced = bool(outcome.tools) or bool(final_text.strip())
+        if not produced:
+            return
+        # Re-insert at the most-recently-used end (dict preserves insertion
+        # order) so the bound below evicts a genuinely idle session rather than
+        # an active one that keeps getting follow-ups.
+        self._history.pop(session_id, None)
+        if len(self._history) >= _MAX_TRACKED_SESSIONS:
+            del self._history[next(iter(self._history))]
+        self._history[session_id] = self._cap_history(new_history)
+
+    def _cap_history(self, messages: list[LLMMessage]) -> list[LLMMessage]:
+        """Keep only the last `_history_max_turns` turns. A turn starts at a
+        user message, so slice from the Nth-from-last user message — that keeps
+        each kept turn whole (its assistant + tool messages travel with it)."""
+        user_idxs = [i for i, m in enumerate(messages) if m.role == "user"]
+        if len(user_idxs) <= self._history_max_turns:
+            return messages
+        return messages[user_idxs[-self._history_max_turns]:]
 
     async def _run_one_llm_pass(
         self,

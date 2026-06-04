@@ -70,6 +70,20 @@ class RouterConfig(BaseModel):
     max_words_local: int = 30
 
 
+class SessionConfig(BaseModel):
+    """Conversation continuity (ARCH §3 idle-window, §8 hot ring buffer).
+
+    A follow-up utterance in the same `(room_id, speaker_id)` reuses the live
+    session — and its replayed history — when it arrives within
+    `idle_window_s` of the last activity; after that gap a fresh session opens
+    with empty history. `history_max_turns` bounds how many prior turns (a turn
+    = the user message plus the assistant/tool messages it produced) are
+    replayed into the prompt."""
+
+    idle_window_s: float = 180.0
+    history_max_turns: int = 8
+
+
 class AudioConfig(BaseModel):
     # Per-connection WAV trace of inbound mic audio. Useful for offline
     # replay against the STT; flip to false in production to stop
@@ -125,6 +139,7 @@ class GladosConfig(BaseModel):
     auth: AuthConfig = AuthConfig()
     llm: LLMConfig = LLMConfig()
     router: RouterConfig = RouterConfig()
+    session: SessionConfig = SessionConfig()
     audio: AudioConfig = AudioConfig()
     vad: VADConfig = VADConfig()
     stt: STTConfig = STTConfig()

@@ -288,7 +288,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             if c.room_id == room_id and c.client_id in connections
         ]
 
-    sessions = SessionRegistry()
+    sessions = SessionRegistry(idle_window_s=glados_cfg.session.idle_window_s)
     organizer = Organizer(
         llm=llm,
         tts=tts,
@@ -301,6 +301,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         router=router,
         specialist_llm=specialist_llm,
         escalate_on_failed=glados_cfg.router.escalate_on_failed,
+        history_max_turns=glados_cfg.session.history_max_turns,
     )
 
     @asynccontextmanager
