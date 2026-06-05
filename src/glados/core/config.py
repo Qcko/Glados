@@ -120,6 +120,15 @@ class STTConfig(BaseModel):
     # auto-detect (paired with a multilingual model like `small`);
     # see configs/glados.toml for the full recipe.
     whisper_language: str | None = "en"
+    # Vocabulary biasing — no model retraining. Nudges decoding toward domain
+    # words/names Whisper otherwise mangles. `whisper_hotwords` is a
+    # space-separated boost list; `whisper_initial_prompt` is freeform context
+    # that can also fix spelling. Both empty = no biasing (unchanged behaviour).
+    # Grow them from logged mis-transcriptions — the pragmatic "make STT learn"
+    # path short of fine-tuning (which only pays off once v5 speaker-ID yields
+    # labelled per-speaker audio).
+    whisper_hotwords: str = ""
+    whisper_initial_prompt: str = ""
 
 
 class TTSConfig(BaseModel):
@@ -132,6 +141,11 @@ class TTSConfig(BaseModel):
         os.environ.get("GLADOS_PIPER_VOICES_DIR")
         or (Path.home() / ".cache" / "piper" / "voices")
     )
+    # Pronunciation fixes applied to the TTS text only (the chat surface keeps
+    # the original wording). Piper is phoneme-based and mangles proper
+    # nouns/acronyms; map the written form → a phonetic spelling. Whole-word,
+    # case-insensitive. Add a row per mispronounced name.
+    pronunciations: dict[str, str] = {"GLaDOS": "Gladoss"}
 
 
 class GladosConfig(BaseModel):

@@ -266,6 +266,85 @@ async def test_piper_empty_text_does_not_load(_fake_piper, tmp_path: Path) -> No
     assert _fake_piper.ensure_calls == []
 
 
+# ---- Pronunciation lexicon ---------------------------------------------
+
+
+def test_apply_pronunciations_word_boundary_and_case() -> None:
+    from glados.audio.tts.piper import _compile_pronunciations, apply_pronunciations
+
+    compiled = _compile_pronunciations({"GLaDOS": "Gladoss"})
+    # Case-insensitive, every occurrence.
+    assert apply_pronunciations("hey GLaDOS and glados", compiled) == "hey Gladoss and Gladoss"
+    # Whole-word only — don't rewrite inside a longer token.
+    assert apply_pronunciations("GLaDOSish", compiled) == "GLaDOSish"
+    # Empty lexicon is identity.
+    assert apply_pronunciations("untouched", _compile_pronunciations({})) == "untouched"
+
+
+def test_apply_pronunciations_replacement_is_literal() -> None:
+    from glados.audio.tts.piper import _compile_pronunciations, apply_pronunciations
+
+    # A spoken form containing a regex backref-looking string is inserted raw.
+    compiled = _compile_pronunciations({"X": r"a\1b"})
+    assert apply_pronunciations("X", compiled) == r"a\1b"
+
+
+def test_apply_pronunciations_single_pass_no_cascade() -> None:
+    from glados.audio.tts.piper import _compile_pronunciations, apply_pronunciations
+
+    # Single pass: each input span maps once and the result is NOT re-scanned.
+    # A sequential rewriter would turn "A B" into "C C" (A→B, then both B→C).
+    compiled = _compile_pronunciations({"A": "B", "B": "C"})
+    assert apply_pronunciations("A B", compiled) == "B C"
+
+
+@pytest.mark.asyncio
+async def test_piper_synthesize_applies_pronunciations(tmp_path: Path, monkeypatch) -> None:
+    """The rewritten text — not the original — must reach the voice model."""
+    import sys
+    import types as _types
+
+    from glados.audio.tts import piper as piper_mod
+
+    seen: list[str] = []
+
+    class _RecVoice:
+        def synthesize(self, text):
+            seen.append(text)
+
+            class _C:
+                audio_int16_bytes = b"\x00\x00"
+                sample_rate = 22_050
+
+            yield _C()
+
+    class _Loader:
+        @classmethod
+        def load(cls, _onnx):
+            return _RecVoice()
+
+    mod = _types.ModuleType("piper")
+    mod.PiperVoice = _Loader
+    monkeypatch.setitem(sys.modules, "piper", mod)
+    monkeypatch.setattr(piper_mod, "_ensure_voice", lambda v, d: Path(d) / f"{v}.onnx")
+
+    from glados.audio.tts.piper import PiperTTS
+
+    tts = PiperTTS(voice="en_GB-cori-high", voices_dir=tmp_path, pronunciations={"GLaDOS": "Gladoss"})
+    async for _ in tts.synthesize("Hello, GLaDOS here."):
+        pass
+    assert seen == ["Hello, Gladoss here."]
+
+
+def test_stt_tts_biasing_config_defaults() -> None:
+    from glados.core.config import STTConfig, TTSConfig
+
+    stt = STTConfig()
+    assert stt.whisper_hotwords == "" and stt.whisper_initial_prompt == ""
+    tts = TTSConfig()
+    assert tts.pronunciations.get("GLaDOS") == "Gladoss"
+
+
 # ---- PiperTTS smoke (env-gated) ----------------------------------------
 
 

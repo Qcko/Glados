@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import threading
 import urllib.request
 from pathlib import Path
@@ -45,15 +46,48 @@ _DEFAULT_VOICES_DIR = Path(
 )
 
 
+def _compile_pronunciations(
+    lexicon: dict[str, str],
+) -> Optional[tuple[re.Pattern, dict[str, str]]]:
+    """Compile the whole lexicon into ONE case-insensitive, whole-word
+    alternation plus a lowercased lookup. A single pass means each input span is
+    rewritten at most once, so a spoken form that happens to contain another
+    written key is never re-rewritten (no cascade). Longest keys first so an
+    overlapping written form prefers the longer match. Returns None when empty.
+    Keys whose ends aren't word characters won't match (`\\b` boundary) — fine
+    for the proper nouns / acronyms this is for."""
+    if not lexicon:
+        return None
+    mapping = {written.lower(): spoken for written, spoken in lexicon.items()}
+    alt = "|".join(re.escape(w) for w in sorted(lexicon, key=len, reverse=True))
+    return re.compile(rf"\b({alt})\b", re.IGNORECASE), mapping
+
+
+def apply_pronunciations(
+    text: str, compiled: Optional[tuple[re.Pattern, dict[str, str]]]
+) -> str:
+    """Rewrite mispronounced names to their phonetic spelling before synthesis,
+    in a single pass. Replacements are inserted literally (the `sub` callback
+    returns the mapped string, so no regex backref interpretation) and are not
+    re-scanned, so a spoken form may safely contain backslashes, group-like
+    text, or another key."""
+    if compiled is None:
+        return text
+    pattern, mapping = compiled
+    return pattern.sub(lambda m: mapping[m.group(0).lower()], text)
+
+
 class PiperTTS:
     def __init__(
         self,
         *,
         voice: str = "en_GB-cori-high",
         voices_dir: Path = _DEFAULT_VOICES_DIR,
+        pronunciations: Optional[dict[str, str]] = None,
     ) -> None:
         self._voice_name = voice
         self._voices_dir = voices_dir
+        self._pronunciations = _compile_pronunciations(pronunciations or {})
         # `_voice` is the loaded PiperVoice (Any to avoid importing piper
         # at module load — see _ensure_loaded).
         self._voice: Optional["_PiperVoice"] = None
@@ -72,6 +106,7 @@ class PiperTTS:
     async def synthesize(self, text: str) -> AsyncIterator[TtsChunkOut]:
         if not text.strip():
             return
+        text = apply_pronunciations(text, self._pronunciations)
         await self._ensure_loaded()
         # piper's synthesize() is a synchronous generator. Drain it in one
         # thread hop and queue chunks for async consumption. This keeps

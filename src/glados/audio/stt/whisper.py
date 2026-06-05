@@ -25,11 +25,17 @@ class WhisperSTT:
         device: str = "cpu",
         compute_type: str = "int8",
         language: str | None = None,
+        hotwords: str | None = None,
+        initial_prompt: str | None = None,
     ) -> None:
         from faster_whisper import WhisperModel
 
         self._model = WhisperModel(model, device=device, compute_type=compute_type)
         self._language = language
+        # Vocabulary biasing toward domain words/names (no retraining). Passed
+        # straight to faster-whisper; None = no biasing.
+        self._hotwords = hotwords or None
+        self._initial_prompt = initial_prompt or None
         # ctranslate2 state inside WhisperModel is not safe for concurrent
         # `transcribe` calls — serialise. The pipeline is willing to wait
         # because transcriptions run in background tasks anyway.
@@ -50,5 +56,7 @@ class WhisperSTT:
                 language=self._language,
                 beam_size=1,
                 vad_filter=False,
+                hotwords=self._hotwords,
+                initial_prompt=self._initial_prompt,
             )
             return "".join(seg.text for seg in segments).strip()

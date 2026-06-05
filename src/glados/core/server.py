@@ -230,6 +230,8 @@ def _build_stt(cfg: STTConfig) -> STT:
             device=cfg.whisper_device,
             compute_type=cfg.whisper_compute_type,
             language=cfg.whisper_language,
+            hotwords=cfg.whisper_hotwords,
+            initial_prompt=cfg.whisper_initial_prompt,
         )
     return FakeSTT(text=cfg.fake_text)
 
@@ -238,7 +240,11 @@ def _build_tts(cfg: TTSConfig) -> TTS:
     if cfg.backend == "piper":
         from ..audio.tts.piper import PiperTTS
 
-        return PiperTTS(voice=cfg.piper_voice, voices_dir=cfg.piper_voices_dir)
+        return PiperTTS(
+            voice=cfg.piper_voice,
+            voices_dir=cfg.piper_voices_dir,
+            pronunciations=cfg.pronunciations,
+        )
     return FakeTTS()
 
 

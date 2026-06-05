@@ -96,6 +96,12 @@ whisper_model = "distil-small.en"
 whisper_device = "cpu"
 whisper_compute_type = "int8"
 whisper_language = "en"
+# Vocabulary biasing — no retraining. `whisper_hotwords` (space-separated)
+# nudges decoding toward names/jargon Whisper mishears; grow it from real
+# mis-transcriptions. `whisper_initial_prompt` is freeform context that can
+# also fix spelling. Leave empty to disable.
+whisper_hotwords = "GLaDOS Dunnes"
+whisper_initial_prompt = ""
 
 [tts]
 # "fake": yields a silent chunk (used in tests). "piper": real Piper TTS.
