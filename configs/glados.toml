@@ -106,7 +106,11 @@ whisper_initial_prompt = ""
 [tts]
 # "fake": yields a silent chunk (used in tests). "piper": real Piper TTS.
 # First piper construct downloads the voice files (~110 MB for cori-high)
-# from huggingface.co/rhasspy/piper-voices into piper_voices_dir.
+# from huggingface.co/rhasspy/piper-voices into the voices dir.
 backend = "piper"
 piper_voice = "en_GB-cori-high"
-piper_voices_dir = "E:\\dev\\piper\\voices"
+# Voices dir is intentionally NOT pinned here — this is a shared, tracked
+# config and must stay free of machine-specific paths. It defaults to
+# $GLADOS_PIPER_VOICES_DIR, else ~/.cache/piper/voices. Set the env var to
+# relocate the large voice files off C: (persist it so launches inherit it):
+#   setx GLADOS_PIPER_VOICES_DIR "<path-to>\piper\voices"
