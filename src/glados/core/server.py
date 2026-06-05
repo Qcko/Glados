@@ -18,7 +18,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response
@@ -72,6 +72,33 @@ from .traces import TraceStore
 log = logging.getLogger(__name__)
 
 CONFIG_DIR_ENV = "GLADOS_CONFIG_DIR"
+
+# How often the idle reaper sweeps lazy MCP servers (ARCH §13). Well under any
+# sane `idle_timeout_s` so a server is reaped within ~one tick of going idle.
+_LAZY_REAPER_TICK_S = 30.0
+
+
+def _reap_idle_servers(
+    lazy_servers: list[tuple["StdioServer", float]], now: float
+) -> list[Awaitable[None]]:
+    """Return a sleep() coroutine for every resident lazy server idle past its
+    timeout. Pure of timing — the caller supplies `now` and awaits the results,
+    which keeps it unit-testable with a fake clock."""
+    return [
+        srv.sleep()
+        for srv, idle_timeout_s in lazy_servers
+        if srv.is_resident() and srv.idle_seconds(now) >= idle_timeout_s
+    ]
+
+
+async def _lazy_reaper(lazy_servers: list[tuple["StdioServer", float]]) -> None:
+    """Periodically sleep lazy MCP servers that have gone idle. Runs as a
+    lifespan-owned background task; cancelled on shutdown."""
+    while True:
+        await asyncio.sleep(_LAZY_REAPER_TICK_S)
+        now = asyncio.get_running_loop().time()
+        for coro in _reap_idle_servers(lazy_servers, now):
+            await coro
 
 
 def _resolve_servers_toml(cfg_dir: Path) -> Path:
@@ -344,6 +371,9 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         # only (source/hash/length/reason); surfaced to operators but never
         # injected, never spoken (ARCH §14 BLOCK-notice surface).
         memory_blocks: list[MemoryBlockNotice] = []
+        # (server, idle_timeout_s) for every lazy server, handed to the idle
+        # reaper after the spawn loop (ARCH §13).
+        lazy_servers: list[tuple[StdioServer, float]] = []
         for entry in _app.state.servers_cfg.server:
             if not entry.autostart:
                 continue
@@ -426,11 +456,31 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
                                 reason=result.reason or "not approved",
                             )
                         )
+            # Lazy servers spawn at boot only to list tools (and read lessons
+            # above); put the child dormant now so it isn't held resident until
+            # someone actually calls a tool (ARCH §13). The first dispatch wakes
+            # it; the reaper below sleeps it again after `idle_timeout_s`.
+            if entry.lazy:
+                await server.sleep()
+                lazy_servers.append((server, entry.idle_timeout_s))
         _app.state.organizer.set_memory_notes(memory_notes)
         _app.state.memory_blocks = memory_blocks
+        # One sweeper for all lazy servers — sleeps any that woke for a
+        # dispatch and have since gone idle past their timeout.
+        reaper_task: asyncio.Task | None = (
+            asyncio.create_task(_lazy_reaper(lazy_servers), name="lazy-mcp-reaper")
+            if lazy_servers
+            else None
+        )
         try:
             yield
         finally:
+            if reaper_task is not None and not reaper_task.done():
+                reaper_task.cancel()
+                try:
+                    await reaper_task
+                except asyncio.CancelledError:
+                    pass
             if not task.done():
                 task.cancel()
                 try:

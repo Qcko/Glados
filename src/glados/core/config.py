@@ -169,6 +169,15 @@ class ServerEntry(BaseModel):
     args: list[str] = []
     env: dict[str, str] = {}
     autostart: bool = True
+    # Lazy spawn + idle reap (ARCH §13). When True the server is still
+    # spawned at startup to list its tools (so the LLM sees them), then put
+    # dormant immediately; the first tool dispatch wakes it, and the reaper
+    # sleeps it again after `idle_timeout_s` of no calls. Default False keeps
+    # the eager behaviour — the child stays resident for the whole session.
+    # Flip Dunnes to lazy once stable so Selenium/Chrome isn't held when no
+    # one is shopping. Ignored when `autostart` is False (nothing to spawn).
+    lazy: bool = False
+    idle_timeout_s: float = 300.0
     # Origin gate for server-shipped memory (ARCH §14 layer 1). Only a
     # first-party server we vouch for is a candidate for trusted-prompt
     # injection of its `memory://lessons` resource. False (default) means

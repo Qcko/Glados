@@ -305,6 +305,90 @@ sys.exit(0)
         await server.aclose()
 
 
+# ---- Lazy spawn + idle reap (ARCH §13) ---------------------------------
+
+
+async def test_stdio_server_sleeps_then_wakes_on_call() -> None:
+    """A dormant server has no child but isn't closed; the next call_tool
+    transparently wakes it (start + initialize) and serves the call."""
+    server = _make_inline_server(_INLINE_SERVER)
+    await server.start()
+    try:
+        await server.initialize()
+        await server.list_tools()
+        await server.sleep()
+        assert not server.is_resident()  # child gone, but reanimatable
+        result = await server.call_tool("echo", {"text": "wake"})
+        assert result.ok and result.content == {"text": "wake"}
+        assert server.is_resident()  # woke for the call
+    finally:
+        await server.aclose()
+
+
+async def test_wake_does_not_consume_restart_budget() -> None:
+    """Sleep/wake is an intended transition, so cycling it more times than
+    `max_restarts` must keep working — it never touches the crash circuit."""
+    server = StdioServer(
+        sys.executable, ["-c", _INLINE_SERVER], max_restarts=1, server_id="inline"
+    )
+    await server.start()
+    try:
+        await server.initialize()
+        for i in range(4):  # well past max_restarts=1
+            await server.sleep()
+            result = await server.call_tool("echo", {"text": f"n{i}"})
+            assert result.ok and result.content == {"text": f"n{i}"}
+        assert server._restart_attempts == []  # noqa: SLF001 - budget untouched
+    finally:
+        await server.aclose()
+
+
+async def test_reap_idle_servers_sleeps_only_idle_resident() -> None:
+    """The reaper helper sleeps a resident server past its idle window, but
+    leaves a recently-active one alone and skips an already-dormant one."""
+    from glados.core.server import _reap_idle_servers
+
+    server = _make_inline_server(_INLINE_SERVER)
+    await server.start()
+    try:
+        await server.initialize()
+        # Fresh call stamps activity 'now'; with a tiny window it reads idle.
+        await server.call_tool("echo", {"text": "x"})
+        now = server._last_activity  # noqa: SLF001
+        # Active within window → not reaped.
+        assert _reap_idle_servers([(server, 300.0)], now) == []
+        # Past the window → one sleep() coroutine returned; await it.
+        coros = _reap_idle_servers([(server, 300.0)], now + 301.0)
+        assert len(coros) == 1
+        for c in coros:
+            await c
+        assert not server.is_resident()
+        # Already dormant → skipped (not resident).
+        assert _reap_idle_servers([(server, 300.0)], now + 999.0) == []
+    finally:
+        await server.aclose()
+
+
+async def test_sleep_refuses_while_call_in_flight() -> None:
+    """The reaper must not sleep a server a dispatch just woke. `sleep()`
+    refuses while `_active_calls` is non-zero, even before the RPC reaches
+    `_pending` — closing the wake-then-dispatch race."""
+    server = _make_inline_server(_INLINE_SERVER)
+    await server.start()
+    try:
+        await server.initialize()
+        # Simulate a call in its wake-then-dispatch span (woken, RPC not yet
+        # enqueued, so _pending is still empty).
+        server._active_calls = 1  # noqa: SLF001
+        await server.sleep()
+        assert server.is_resident()  # refused — call still in flight
+        server._active_calls = 0  # noqa: SLF001
+        await server.sleep()
+        assert not server.is_resident()  # now idle — sleeps
+    finally:
+        await server.aclose()
+
+
 # ---- End-to-end via build_app() spawning the real toy_stdio_server -----
 
 

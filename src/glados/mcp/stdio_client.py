@@ -75,6 +75,23 @@ class StdioServer:
         self._stderr_task: asyncio.Task | None = None
         self._pending: dict[int, asyncio.Future[dict]] = {}
         self._next_id = 1
+        # Lazy-spawn state (ARCH §13 "lazy MCP child spawn + idle reap"). A
+        # dormant server has no child process but is NOT closed: the next
+        # `call_tool` wakes it via a clean start()+initialize(), and the
+        # idle reaper sleeps it again after `idle_timeout_s` of no calls.
+        # Distinct from `_dead` (crash) and `_closed` (permanent shutdown):
+        # waking is an intended transition, so it does NOT count against the
+        # crash-restart budget. `_last_activity` stamps the monotonic clock
+        # on every call_tool so the reaper never sleeps an active server.
+        self._dormant = False
+        self._last_activity = 0.0
+        # In-flight call_tool count. The reaper must not sleep a server while a
+        # dispatch is mid-wake-then-RPC: `_pending` is only populated once the
+        # RPC is actually sent (after `_wake` returns), so a check on `_pending`
+        # alone leaves a window where a just-woken server gets reaped out from
+        # under the call. This counter spans the whole call_tool body, closing
+        # that window — `sleep()` refuses while it's non-zero.
+        self._active_calls = 0
         # Serialises writes so two concurrent `call()` invocations cannot
         # interleave bytes on stdin. Reads are owned by the single reader
         # task so no read-side lock is needed.
@@ -315,23 +332,39 @@ class StdioServer:
         return _lessons_text(resp.get("result") or {})
 
     async def call_tool(self, name: str, args: dict) -> MCPCallResult:
-        if self._dead and not self._closed:
-            ok = await self._try_restart()
-            if not ok:
-                return MCPCallResult(
-                    ok=False,
-                    error=self._died_reason or "stdio server unavailable",
-                )
+        # Hold the in-flight guard across the whole call — wake, restart, AND
+        # the RPC — so the reaper can't sleep the server mid-dispatch (the
+        # window between a successful `_wake` and `_call_method` populating
+        # `_pending`). Stamp activity too so a fresh call also reads non-idle.
+        self._active_calls += 1
         try:
-            resp = await self._call_method(
-                "tools/call", {"name": name, "arguments": args}
-            )
-        except StdioServerError as e:
-            return MCPCallResult(ok=False, error=str(e))
-        if "error" in resp:
-            err = resp["error"]
-            return MCPCallResult(ok=False, error=err.get("message", "rpc error"))
-        return _translate_tool_result(resp.get("result") or {})
+            self._last_activity = asyncio.get_running_loop().time()
+            if self._dormant and not self._closed:
+                ok = await self._wake()
+                if not ok:
+                    return MCPCallResult(
+                        ok=False,
+                        error=self._died_reason or "stdio server failed to wake",
+                    )
+            if self._dead and not self._closed:
+                ok = await self._try_restart()
+                if not ok:
+                    return MCPCallResult(
+                        ok=False,
+                        error=self._died_reason or "stdio server unavailable",
+                    )
+            try:
+                resp = await self._call_method(
+                    "tools/call", {"name": name, "arguments": args}
+                )
+            except StdioServerError as e:
+                return MCPCallResult(ok=False, error=str(e))
+            if "error" in resp:
+                err = resp["error"]
+                return MCPCallResult(ok=False, error=err.get("message", "rpc error"))
+            return _translate_tool_result(resp.get("result") or {})
+        finally:
+            self._active_calls -= 1
 
     async def _try_restart(self) -> bool:
         """Bounded auto-restart. Returns True if the server is live after
@@ -381,10 +414,11 @@ class StdioServer:
             )
             return True
 
-    async def aclose(self) -> None:
-        # Mark closed first so a concurrent call_tool doesn't kick off an
-        # auto-restart against the proc we're tearing down.
-        self._closed = True
+    async def _stop_child(self) -> None:
+        """Tear down the child process and its reader/stderr tasks. Cancels
+        the reader BEFORE closing stdin so the resulting EOF can't race
+        `_mark_dead`. Leaves `_proc = None`. Shared by `aclose` (permanent)
+        and `sleep` (dormant) — the caller sets the resulting state flag."""
         if self._reader_task is not None and not self._reader_task.done():
             self._reader_task.cancel()
             try:
@@ -409,7 +443,68 @@ class StdioServer:
                 self._proc.kill()
                 await self._proc.wait()
         self._proc = None
-        self._mark_dead("server closed")
+        self._reader_task = None
+        self._stderr_task = None
+
+    async def sleep(self) -> None:
+        """Put a lazy server dormant: stop the child but stay reanimatable.
+
+        Idempotent and serialised on `_restart_lock` so it can't interleave
+        with a concurrent `_wake` / `_try_restart`. Refuses to sleep while a
+        call is in flight — either an RPC already on the wire (`_pending`) or a
+        `call_tool` anywhere in its wake-then-dispatch span (`_active_calls`).
+        Together these close the window where the reaper would reap a server a
+        dispatch just woke."""
+        async with self._restart_lock:
+            if (
+                self._closed
+                or self._proc is None
+                or self._pending
+                or self._active_calls
+            ):
+                return
+            await self._stop_child()
+            self._dormant = True
+            self._dead = False
+            self._died_reason = None
+            _log.info("stdio server %s sleeping (idle reap)", self.server_id)
+
+    async def _wake(self) -> bool:
+        """Bring a dormant server back. Unlike `_try_restart` this is an
+        intended transition, so it does not consume the crash-restart budget.
+        Returns True if the server is live afterward."""
+        async with self._restart_lock:
+            if self._closed:
+                return False
+            if not self._dormant and self._proc is not None and not self._dead:
+                return True  # another caller already woke it
+            self._dormant = False
+            self._dead = False
+            self._died_reason = None
+            try:
+                await self.start()
+                await self.initialize()
+            except Exception as e:  # noqa: BLE001
+                if not self._dead:
+                    self._mark_dead(f"wake failed: {type(e).__name__}: {e}")
+                return False
+            _log.info("stdio server %s woke from dormant", self.server_id)
+            return True
+
+    def is_resident(self) -> bool:
+        """True if a child process is currently running (not dormant/closed)."""
+        return self._proc is not None and not self._dormant and not self._closed
+
+    def idle_seconds(self, now: float) -> float:
+        return now - self._last_activity
+
+    async def aclose(self) -> None:
+        # Mark closed first so a concurrent call_tool doesn't kick off an
+        # auto-restart (or a wake) against the proc we're tearing down.
+        self._closed = True
+        async with self._restart_lock:
+            await self._stop_child()
+            self._mark_dead("server closed")
 
 
 class StdioToolProxy:

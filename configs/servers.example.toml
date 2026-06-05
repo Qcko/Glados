@@ -22,6 +22,15 @@
 #   args            — list of command-line args.
 #   env             — env-var dict layered on top of the parent process env.
 #   autostart       — spawn on app startup. False = present but inert.
+#   lazy            — spawn at startup only to list tools (so the LLM sees
+#                     them), then put the child dormant. The first tool
+#                     dispatch wakes it; after `idle_timeout_s` of no calls the
+#                     reaper sleeps it again (ARCH §13). Default false keeps the
+#                     child resident for the whole session. Use for heavy
+#                     servers (Dunnes Selenium/Chrome) that idle most sessions.
+#                     Ignored when autostart=false.
+#   idle_timeout_s  — seconds of no dispatch before a lazy server is reaped
+#                     back to dormant. Default 300. Ignored unless lazy=true.
 #   trusted         — first-party origin gate for server-shipped memory
 #                     (ARCH §14). When true, GLaDOS reads the server's
 #                     `memory://lessons` resource at connect and, IF the blob
