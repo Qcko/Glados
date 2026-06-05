@@ -278,11 +278,16 @@ glados/
   brain/          llm/, memory/, prompts/
   mcp/            manager, registry, permission gates, timeouts
   servers/        lifequests/, dunnes/, spotify/, search/, calendar/, cooking/
-  client_web/     browser client (text v0, audio v1)
-  client_pi/      Pi mic / speaker client (v3)
   configs/        glados.toml, servers.toml, rooms.toml, voices/
   traces/         per-turn JSONL
   tests/          fakes for every adapter, organizer scenarios, end-to-end
+
+# Top-level, beside (not under) the glados package — separately-deployed
+# clients that must not import the server:
+client_web/       browser client (text v0, audio v1)
+client_room/      lite mic / speaker client (v3); deploys to a phone on
+                  postmarketOS. Vendors the wire contract (client_room/wire.py),
+                  never imports glados.*
 ```
 
 ---
@@ -442,8 +447,22 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   (multi-step reasoning) → router selects the resident specialist →
   it calls `get_time` or similar → reply spoken via Piper.
 
-- **v3 — Pi room client.** Python + PortAudio + WebSocket + AEC. systemd
-  unit, auto-update from server. One Pi per room.
+- **v3 — room client (lite/headless).** Python + PortAudio + WebSocket + AEC.
+  A *lite* transducer client (§2: mic + speaker, no UI, set-and-forget), the
+  opposite of the v7 *rich* client. **Deploys to an old phone running
+  postmarketOS** (mainline Linux → real ALSA/PipeWire audio), not a Raspberry
+  Pi — same portable Python runs on the dev box and the phone. One device per
+  room; plugged in, left on a shelf for audio coverage.
+  - **Slice 3a — mic client. LANDED.** `client_room/` (top-level, vendors the
+    wire contract, never imports the server). Handshake (Hello-first, no
+    `welcome` ack), PortAudio-callback→asyncio bridge via a bounded drop-oldest
+    queue, browser-matched 48k→16k resample, `<BE u32 seq><PCM16-LE>` framing.
+    Dev-box-tested; design-duck panel (architect/concurrency/protocol) ran
+    pre-build.
+  - **Next:** 3b speaker + jitter buffer + cancel/flush; 3c supervisor +
+    resilience; pmOS deploy (needs the device's mainline WiFi/BT/audio confirmed
+    — Bluetooth speakers ride the host's BlueZ/PipeWire sink, not the GLaDOS
+    protocol); then AEC (revisit a shared-clock duplex stream).
 
 - **v4 — wake word + dedup.** openWakeWord on Pi clients; same-utterance
   arbitration server-side.

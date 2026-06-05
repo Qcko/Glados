@@ -10,3 +10,4 @@ traces/
 configs/servers.toml
 client_web/node_modules/
 client_web/dist/
+client_room/config.toml

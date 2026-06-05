@@ -34,3 +34,6 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Make the top-level `client_room/` package importable in tests (it lives at
+# the repo root, beside `client_web/`, not under `src/`).
+pythonpath = ["."]

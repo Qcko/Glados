@@ -1,0 +1,15 @@
+# Room client config. Copy to `client_room/config.toml` (gitignored) and fill
+# in for the local device. The auth token is NOT stored here — it lives in the
+# OS keyring under service `glados.client-tokens`, username = client_id:
+#   python -m glados.secrets set client-tokens wardrobe-mic <token>
+#
+# The matching client_id must also be listed in the server's
+# `configs/glados.toml` [auth].clients and bound to a room+role in
+# `configs/rooms.toml` (role = "mic" for this client).
+
+server_url = "ws://127.0.0.1:8765"
+client_id = "wardrobe-mic"
+room_id = "bedroom"
+
+# Optional PortAudio input device index (omit for the system default).
+# input_device = 1
