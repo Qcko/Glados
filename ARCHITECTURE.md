@@ -512,13 +512,21 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   1× if the Organizer `asyncio.gather`s independent calls from a single
   model turn. Preserve trace ordering by tagging calls with their issue
   index. Cheap; do it alongside the Skills slice when that lands.
-- **Lazy MCP child spawn + idle reap.** `autostart=true` boots Chrome
-  (Dunnes Selenium) on every GLaDOS start even for sessions that never
-  shop. Add `lazy = true` in `servers.toml` (default false to preserve
-  current behaviour); `MCPRegistry` spawns + initialises + lists tools
-  on first dispatch and caches the proxy. Per-server `idle_timeout_s`
-  (default 300 s) reaps children with no activity in that window. Flip
-  Dunnes to lazy once stable. Independent of everything else here.
+- **Lazy MCP child spawn + idle reap. LANDED.** `autostart=true` boots
+  Chrome (Dunnes Selenium) on every GLaDOS start even for sessions that
+  never shop. `lazy = true` in `servers.toml` (default false to preserve
+  current behaviour) spawns the server at startup only to list its tools
+  (so the LLM still sees them) and read its lessons, then puts the child
+  dormant; the first tool dispatch wakes it via a clean start+initialize
+  that does NOT consume the crash-restart budget. Per-server
+  `idle_timeout_s` (default 300 s) drives a lifespan-owned reaper that
+  sleeps children with no activity in that window. The dormant state is
+  distinct from dead (crash) and closed (shutdown); an in-flight-call
+  guard stops the reaper sleeping a server a dispatch just woke. Flip
+  Dunnes to lazy once stable. Was independent of everything else here.
+  Note vs the original sketch: tools are listed at boot (not "on first
+  dispatch") because the LLM must see a server's tools before it can call
+  one — the child is then slept, not kept resident.
 - **Dynamic tool exposure.** Today ~25 tools ship in every system prompt
   (1 NowTool + toy + 22 Dunnes). Small models start degrading around
   30–50, and one more big MCP doubles us. Add a `ToolRouter` in `brain/`
