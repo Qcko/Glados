@@ -292,6 +292,99 @@ async def test_organizer_no_history_bleed_across_rooms(tmp_path: Path) -> None:
     assert kitchen_seen[0] == ("system", org._system_prompt)
 
 
+def _turn(user: str) -> list[LLMMessage]:
+    """A whole turn's worth of history messages: user → assistant → tool."""
+    return [
+        LLMMessage(role="user", content=user),
+        LLMMessage(role="assistant", content=f"did {user}"),
+        LLMMessage(role="tool", tool_call_id="c", content="{}"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cap_history_keeps_last_n_turns_whole(tmp_path: Path) -> None:
+    """`_cap_history` slices on user-message boundaries so each kept turn keeps
+    its assistant + tool messages — never a turn cut mid-way."""
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+    ) as (org, _sink):
+        org._history_max_turns = 2
+        history = _turn("one") + _turn("two") + _turn("three")
+        capped = org._cap_history(history)
+        users = [m.content for m in capped if m.role == "user"]
+        assert users == ["two", "three"]  # oldest turn dropped
+        # First kept message is the user that opens turn "two" — turn boundary,
+        # not a stray assistant/tool from the dropped turn.
+        assert capped[0].role == "user" and capped[0].content == "two"
+        # Each kept turn still carries its assistant + tool messages.
+        assert [m.role for m in capped] == [
+            "user", "assistant", "tool", "user", "assistant", "tool",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_cap_history_noop_under_limit(tmp_path: Path) -> None:
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+    ) as (org, _sink):
+        org._history_max_turns = 8
+        history = _turn("one") + _turn("two")
+        assert org._cap_history(history) == history
+
+
+@pytest.mark.asyncio
+async def test_commit_history_skips_noop_turn(tmp_path: Path) -> None:
+    """An empty/garbled turn (no tools, blank reply) must leave prior history
+    untouched rather than diluting the buffer with an empty exchange."""
+    from glados.core.turn_outcome import TurnRecord
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+    ) as (org, _sink):
+        org._history["s1"] = _turn("kept")
+        org._commit_history("s1", _turn("kept") + _turn("garbled"), TurnRecord(), "")
+        assert [m.content for m in org._history["s1"] if m.role == "user"] == ["kept"]
+
+
+@pytest.mark.asyncio
+async def test_commit_history_persists_productive_turn(tmp_path: Path) -> None:
+    from glados.core.turn_outcome import TurnRecord
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+    ) as (org, _sink):
+        org._commit_history("s1", _turn("hello"), TurnRecord(), "hi there")
+        assert [m.content for m in org._history["s1"] if m.role == "user"] == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_commit_history_lru_evicts_idle_not_active(tmp_path: Path) -> None:
+    """The history dict is bounded; when full it drops the least-recently
+    committed session, and re-committing an existing session moves it back to
+    the most-recently-used end so an active conversation isn't evicted."""
+    from glados.core.organizer import _MAX_TRACKED_SESSIONS
+    from glados.core.turn_outcome import TurnRecord
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+    ) as (org, _sink):
+        for i in range(_MAX_TRACKED_SESSIONS):
+            org._commit_history(f"s{i}", _turn(f"u{i}"), TurnRecord(), "ok")
+        # s0 is the oldest. Touch it so it becomes most-recently-used.
+        org._commit_history("s0", _turn("u0-again"), TurnRecord(), "ok")
+        # One more new session forces an eviction — the now-idle s1, not s0.
+        org._commit_history("new", _turn("n"), TurnRecord(), "ok")
+        assert len(org._history) == _MAX_TRACKED_SESSIONS
+        assert "s1" not in org._history  # idle one evicted
+        assert "s0" in org._history  # touched one survived
+        assert "new" in org._history
+
+
 # ---- Trace writer -------------------------------------------------------
 
 
