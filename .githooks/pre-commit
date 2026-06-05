@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# pathguard: block machine-local paths from entering tracked files.
+#
+# Enforces the "committed files must not leak local env" rule mechanically,
+# at the real boundary (the commit), instead of relying on author vigilance.
+# Scans only the NEWLY-ADDED lines of staged files, so a pre-existing path in
+# a file you happen to touch won't block you — only paths you just introduced.
+#
+# Default MODE=block: a match aborts the commit and prints what/where/why, so
+# you fix it (env var / <placeholder>) and re-commit. Set MODE=warn (or
+# GLADOS_PATHGUARD_MODE=warn) to print and allow.
+#
+# Escape hatch for a deliberate, reviewed exception: put `allow-local-path`
+# anywhere on the offending line. (Prefer fixing the path; this is for the
+# rare case a literal local path is genuinely required.)
+set -u
+
+MODE="${GLADOS_PATHGUARD_MODE:-block}"   # block | warn
+
+# High-signal machine-local path patterns (extended regex):
+#   - drive-letter paths: a SINGLE letter + ':' + slash, not preceded by a
+#     letter — so `E:\dev` / `D:/x` match but URL schemes (`https://`, `ws://`)
+#     do not.
+#   - /home/<user>/ and /Users/<user>/ where the user segment is a real name,
+#     not a <placeholder> (the segment excludes `< > space`).
+PAT='(^|[^A-Za-z])[A-Za-z]:[\\/]|/home/[^/<> ]+/|/Users/[^/<> ]+/'
+
+offenders=""
+fails=0
+file=""
+newline=0
+
+while IFS= read -r line; do
+  case "$line" in
+    '+++ '*)
+      f="${line#+++ }"; file="${f#b/}"; continue ;;
+    '@@ '*)
+      hunk="${line#*+}"; newline="${hunk%%,*}"; newline="${newline%% *}"; continue ;;
+    '+'*)
+      content="${line:1}"
+      case "$file" in
+        .githooks/*|*.example.*|*.template.*) newline=$((newline + 1)); continue ;;
+      esac
+      case "$content" in *allow-local-path*) newline=$((newline + 1)); continue ;; esac
+      if printf '%s' "$content" | grep -Eq "$PAT"; then
+        offenders="${offenders}  ${file}:${newline}: ${content}"$'\n'
+        fails=$((fails + 1))
+      fi
+      newline=$((newline + 1)) ;;
+  esac
+done < <(git diff --cached --diff-filter=ACM -U0)
+
+if [ "$fails" -gt 0 ]; then
+  echo "pathguard: ${fails} newly-added line(s) contain a machine-local path:" >&2
+  printf '%s' "$offenders" >&2
+  echo "Tracked files must stay portable — read the value from an env var, or use a" >&2
+  echo "<placeholder> in docs (see ~/.claude 'Committed files must not leak local env')." >&2
+  echo "Deliberate exception: add 'allow-local-path' on the line." >&2
+  if [ "$MODE" = "warn" ]; then
+    echo "pathguard: MODE=warn — allowing commit." >&2
+    exit 0
+  fi
+  exit 1
+fi
+exit 0

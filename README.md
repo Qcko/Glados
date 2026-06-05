@@ -69,6 +69,19 @@ uv run glados
 > If Ollama was already pulled to its default path, stop the service, move
 > `~/.ollama/models` to your new `OLLAMA_MODELS` location, then start it again.
 
+> **Git hooks (one-time).** The repo ships a `pre-commit` guard in
+> [.githooks/](.githooks/) that blocks committing machine-local paths (drive
+> letters, `/home/<user>/`, …) into tracked files. Point git at it once per
+> clone:
+>
+> ```powershell
+> git config core.hooksPath .githooks
+> ```
+>
+> It scans only newly-added lines, skips `*.example.*`/`*.template.*`, and a
+> line tagged `allow-local-path` is exempt. Set `GLADOS_PATHGUARD_MODE=warn`
+> to print instead of block.
+
 Build the web client once before opening the UI:
 
 ```powershell
