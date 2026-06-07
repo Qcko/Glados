@@ -1,9 +1,13 @@
 # Room client config. Copy to `client_room/config.toml` (gitignored) and fill
-# in for the local device.
+# in for the local device. The SAME file serves both room clients — run
+# `python -m client_room.mic` (uploads audio) or `python -m client_room.speaker`
+# (plays TTS). The role is decided by the rooms.toml binding, not this file.
 #
 # The matching client_id must also be listed in the server's
 # `configs/glados.toml` [auth].clients and bound to a room+role in
-# `configs/rooms.toml` (role = "mic" for this client).
+# `configs/rooms.toml` — role = "mic" to run the mic client, role = "speaker"
+# to run the speaker client. A role/binding mismatch is a terminal handshake
+# error (the client stops instead of reconnecting).
 
 server_url = "ws://127.0.0.1:8765"
 client_id = "wardrobe-mic"
@@ -43,3 +47,17 @@ room_id = "bedroom"
 # parec_rate = 48000
 # parec_source = "sles_source.monitor"
 # parec_args = []
+
+# --- Playback backend (speaker client only) -------------------------------
+# "sounddevice" (default): PortAudio. The output stream's sample rate follows
+# the server's TTS chunks (pinned to the first chunk, rebuilt on change), so it
+# is not configured here. A PulseAudio (pacat) backend is deferred to the
+# on-device deploy slice.
+# playback_backend = "sounddevice"
+
+# sounddevice only: optional PortAudio output device index (omit for default).
+# output_device = 2
+
+# Speaker jitter buffer: prebuffer this many ms before draining, to ride out
+# network jitter without underrun clicks (trade-off: more = laggier barge-in).
+# prebuffer_ms = 120

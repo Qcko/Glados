@@ -13,6 +13,16 @@ Three pieces, each independently testable without hardware:
   `sounddevice` implementation, a `SubprocessInput` (external `parec`/PulseAudio
   capture for boxes without PortAudio, e.g. Termux/Android), and a
   `NullInputDevice` for tests.
+
+Output side (the speaker client), mirror-imaged:
+
+- `JitterBuffer` — thread-safe PCM byte ring feeding a real-time playback
+  callback. Opposite contract to `BoundedAudioQueue`: it never drops mid-stream;
+  on underrun it returns silence so playback degrades to a gap, never a stall.
+- `OutputDevice` — a tiny Protocol over a playback device that *pulls* PCM from
+  a `JitterBuffer`, with a `sounddevice` implementation and a `NullOutputDevice`
+  for tests. (A `parec`-analog `SubprocessOutput`/pacat is deferred to the
+  on-device deploy slice; the buffer-shaped seam fits it without redesign.)
 """
 
 from __future__ import annotations
@@ -363,3 +373,194 @@ class SubprocessInput:
             # Abandon (it's a daemon) rather than block teardown if a read is
             # still wedged after kill — never hang the caller.
             reader.join(timeout=self._stop_timeout_s)
+
+
+# ===========================================================================
+# Output side (speaker client)
+# ===========================================================================
+
+
+class JitterBuffer:
+    """Thread-safe PCM byte ring feeding a real-time playback callback.
+
+    The recv loop (producer) `write`s decoded PCM bytes; the playback callback
+    (consumer) `read`s exactly the bytes it needs. The contract is the *opposite*
+    of `BoundedAudioQueue`: continuity wins, so this never drops mid-stream — on
+    underrun `read` returns silence (zeros), degrading to a gap rather than a
+    stall or a click. Playback does not begin draining until `prebuffer_bytes`
+    have accumulated, smoothing network jitter at the start of a reply; `flush`
+    (barge-in) clears the ring AND re-arms that gate so the next reply starts
+    clean. `max_bytes` is a safety cap that drops the oldest audio if a dead/slow
+    consumer lets the ring grow without bound.
+
+    The lock is held only for memmoves and index math — never across base64
+    decode, allocation of the incoming chunk, or I/O (callers decode before
+    `write`). So the real-time callback can never stall waiting on it."""
+
+    def __init__(self, *, prebuffer_bytes: int = 0, max_bytes: int = 1 << 20) -> None:
+        self._buf = bytearray()
+        self._lock = threading.Lock()
+        self._prebuffer_bytes = prebuffer_bytes
+        self._max_bytes = max_bytes
+        self._armed = prebuffer_bytes <= 0  # no prebuffer → drain immediately
+        # GIL-reliant counters: bumped under the lock, read once after the
+        # stream has stopped. Log lines, not live cross-thread readouts.
+        self.underrun_bytes = 0
+        self.dropped_bytes = 0
+
+    def write(self, pcm: bytes) -> None:
+        with self._lock:
+            self._buf += pcm
+            if len(self._buf) >= self._prebuffer_bytes:
+                self._armed = True
+            if len(self._buf) > self._max_bytes:
+                overflow = len(self._buf) - self._max_bytes
+                del self._buf[:overflow]
+                self.dropped_bytes += overflow
+
+    def read(self, n: int) -> bytes:
+        """Return exactly `n` bytes for the playback callback, zero-padding on
+        underrun. Never blocks. Before the prebuffer threshold is met, returns
+        all-silence so the ring can fill first."""
+        with self._lock:
+            if not self._armed:
+                self.underrun_bytes += n
+                return b"\x00" * n
+            take = n if n <= len(self._buf) else len(self._buf)
+            out = bytes(self._buf[:take])
+            # O(remaining) memmove. Fine while the backlog stays near one chunk
+            # (~50 ms); a head-index ring or chunk deque would bound it if a
+            # sustained backlog up to max_bytes ever proves costly on-device.
+            del self._buf[:take]
+            if take < n:
+                self.underrun_bytes += n - take
+                out += b"\x00" * (n - take)
+            return out
+
+    def flush(self) -> None:
+        """Drop all buffered audio and re-arm prebuffering (barge-in / rate
+        switch). The next reply then refills before draining, avoiding an
+        immediate underrun on its first chunk."""
+        with self._lock:
+            self._buf.clear()
+            self._armed = self._prebuffer_bytes <= 0
+
+
+class OutputDevice(Protocol):
+    samplerate: int
+
+    def start(
+        self,
+        buffer: JitterBuffer,
+        on_close: Optional[CloseCallback] = None,
+    ) -> None:
+        """Begin playback, pulling PCM16-LE mono samples from `buffer` at this
+        device's `samplerate`. `on_close`, if given, is invoked when the device
+        stops unexpectedly (stream error/abort) so the caller can end the session
+        and reconnect rather than play silence forever — the playback analog of
+        `InputDevice.on_close`."""
+        ...
+
+    def stop(self) -> None: ...
+
+
+class NullOutputDevice:
+    """Test double: no hardware. A test drives playback by calling `pull` (the
+    bytes the real callback would have requested) and simulates an unexpected
+    stream death with `fail`."""
+
+    def __init__(self, samplerate: int = 22_050) -> None:
+        self.samplerate = samplerate
+        self._buffer: JitterBuffer | None = None
+        self._on_close: Optional[CloseCallback] = None
+        self.started = False
+        self.stopped = False
+
+    def start(
+        self,
+        buffer: JitterBuffer,
+        on_close: Optional[CloseCallback] = None,
+    ) -> None:
+        self._buffer = buffer
+        self._on_close = on_close
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def pull(self, frames: int) -> bytes:
+        if self._buffer is None:
+            raise RuntimeError("pull before start")
+        return self._buffer.read(frames * _PCM_DTYPE.itemsize)
+
+    def fail(self) -> None:
+        if self._on_close is not None:
+            self._on_close()
+
+
+class SoundDeviceOutput:
+    """Real playback via PortAudio (`sounddevice`). Imported lazily so the unit
+    tests run without PortAudio. The PortAudio pull-callback drains the
+    `JitterBuffer` directly: it asks for N frames and we hand back exactly N
+    (zero-padded on underrun). `finished_callback` is wired to `on_close` so an
+    xrun/abort that stops the stream surfaces as a session end + reconnect,
+    rather than leaving the recv loop alive feeding a dead device forever."""
+
+    def __init__(
+        self,
+        samplerate: int,
+        *,
+        device: int | None = None,
+        blocksize: int = 0,
+        latency: str | float = "low",
+    ) -> None:
+        import sounddevice as sd  # lazy: optional dependency
+
+        self._sd = sd
+        self.samplerate = samplerate
+        self._device = device
+        # Small blocksize + low latency bound the post-flush hardware tail (the
+        # samples already inside PortAudio's own buffer still play after a
+        # barge-in flush). Keep it short so barge-in feels immediate.
+        self._blocksize = blocksize
+        self._latency = latency
+        self._stream: object | None = None
+
+    def start(
+        self,
+        buffer: JitterBuffer,
+        on_close: Optional[CloseCallback] = None,
+    ) -> None:
+        bytes_per_frame = _PCM_DTYPE.itemsize  # mono int16
+
+        def _cb(outdata, frames, _time, status) -> None:
+            if status:
+                log.debug("output stream status: %s", status)
+            data = buffer.read(frames * bytes_per_frame)
+            outdata[:, 0] = np.frombuffer(data, dtype=_PCM_DTYPE)
+
+        def _finished() -> None:
+            # Fires on any stop, ours or PortAudio's. `on_close` must be
+            # idempotent/harmless during our own teardown.
+            if on_close is not None:
+                on_close()
+
+        self._stream = self._sd.OutputStream(
+            samplerate=self.samplerate,
+            channels=1,
+            dtype="int16",
+            blocksize=self._blocksize,
+            device=self._device,
+            latency=self._latency,
+            callback=_cb,
+            finished_callback=_finished,
+        )
+        self._stream.start()
+
+    def stop(self) -> None:
+        if self._stream is not None:
+            # stop() blocks until the callback returns, so the buffer is provably
+            # idle before the caller flushes/closes it (no read-after-free race).
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None

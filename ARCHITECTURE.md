@@ -474,10 +474,31 @@ Each version is its own session-sized chunk. Heavy work is deferred.
     file (first present wins), preferring a mode-600 file over an env var on a
     shared device (env leaks via `/proc`). Design-duck panel
     (architect/concurrency/security) ran pre-build.
-  - **Next:** 3b speaker + jitter buffer + cancel/flush; 3c supervisor +
-    resilience; pmOS deploy (needs the device's mainline WiFi/BT/audio confirmed
-    — Bluetooth speakers ride the host's BlueZ/PipeWire sink, not the GLaDOS
-    protocol); then AEC (revisit a shared-clock duplex stream).
+  - **Slice 3b — speaker client + jitter buffer + cancel/flush. LANDED.**
+    `client_room/speaker.py` (role="speaker", recv-only). Consumes the per-turn
+    broadcast and plays `tts_chunk` (base64 PCM16-LE) through a `JitterBuffer`:
+    the recv loop decodes + writes; a pull-callback output device drains it,
+    zero-padding on underrun (a gap, never a stall/click) and prebuffering to
+    ride network jitter. State machine mirrors the browser (`tts.ts`):
+    `welcome` allows playback, `cancelled` flushes + suppresses the cancelled
+    turn's late chunks until the next `welcome`, `done` drains. Safe without a
+    wire turn-id because the ordered socket + sequential per-room turns mean a
+    turn's chunks always precede its `Cancelled`, which precedes the next
+    `Welcome`. Output backend is pluggable behind an `OutputDevice` Protocol
+    that *pulls from the buffer* (so push/pull never leaks into the seam):
+    `SoundDeviceOutput` (PortAudio) ships, with `finished_callback` wired to the
+    same `on_close` death channel so a stream abort reconnects instead of
+    playing silence forever; the device is (re)built when the first chunk's
+    sample-rate is known and rebuilt on change. The connect/reconnect loop,
+    hello, terminal-error set, and token loading were extracted to `_client.py`
+    and shared with the mic so the security-relevant bits can't drift.
+    Dev-box-tested; design-duck panel (architect/concurrency/protocol) ran
+    pre-build. A `pacat` output backend (PulseAudio-only boxes) is deferred to
+    the pmOS deploy; the buffer-shaped seam fits it without redesign.
+  - **Next:** 3c supervisor + resilience; pmOS deploy (needs the device's
+    mainline WiFi/BT/audio confirmed — Bluetooth speakers ride the host's
+    BlueZ/PipeWire sink, not the GLaDOS protocol); then AEC (revisit a
+    shared-clock duplex stream).
 
 - **v4 — wake word + dedup.** openWakeWord on Pi clients; same-utterance
   arbitration server-side.

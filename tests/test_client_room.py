@@ -1,8 +1,9 @@
-"""Tests for the lite room client (`client_room`), slice 3a (mic)."""
+"""Tests for the lite room client (`client_room`): slice 3a (mic) + 3b (speaker)."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import os
@@ -17,11 +18,14 @@ import pytest
 from client_room import wire
 from client_room.audio import (
     BoundedAudioQueue,
+    JitterBuffer,
     NullInputDevice,
+    NullOutputDevice,
     Resampler,
     SubprocessInput,
 )
 from client_room.mic import MicClient, load_token
+from client_room.speaker import SpeakerClient
 
 
 # ---- wire ---------------------------------------------------------------
@@ -398,3 +402,232 @@ def test_load_token_rejects_group_readable_file(monkeypatch, tmp_path) -> None:
     os.chmod(f, 0o644)  # group/other readable
     with pytest.raises(SystemExit):
         load_token("c", token_file=str(f))
+
+
+# ---- shared client spine ------------------------------------------------
+
+
+def test_terminal_error_codes_match_server() -> None:
+    """Drift guard: the client's terminal-error set must be a subset of the
+    error codes the server actually emits (so a server rename can't leave the
+    client retrying a fatal handshake forever)."""
+    import inspect
+    import re
+
+    from client_room._client import TERMINAL_ERROR_CODES
+    import glados.core.server as srv
+
+    emitted = set(re.findall(r'_send_error\(\s*ws,\s*"([^"]+)"', inspect.getsource(srv)))
+    missing = TERMINAL_ERROR_CODES - emitted
+    assert not missing, f"client terminal codes not emitted by server: {missing}"
+
+
+def test_mic_reexports_load_token() -> None:
+    from client_room._client import load_token as canonical
+    from client_room.mic import load_token as reexported
+
+    assert canonical is reexported
+
+
+# ---- JitterBuffer -------------------------------------------------------
+
+
+def test_jitter_buffer_prebuffer_gates_then_drains() -> None:
+    jb = JitterBuffer(prebuffer_bytes=8)
+    assert jb.read(4) == b"\x00\x00\x00\x00", "not armed → silence"
+    jb.write(b"abcd")  # 4 < 8, still not armed
+    assert jb.read(2) == b"\x00\x00"
+    jb.write(b"efgh")  # now 8 bytes buffered → armed
+    assert jb.read(4) == b"abcd"
+    assert jb.read(6) == b"efgh\x00\x00", "underrun zero-pads to exactly n"
+    assert jb.underrun_bytes > 0
+
+
+def test_jitter_buffer_flush_rearms_prebuffer() -> None:
+    jb = JitterBuffer(prebuffer_bytes=4)
+    jb.write(b"wxyz")
+    assert jb.read(2) == b"wx"
+    jb.flush()
+    assert jb.read(2) == b"\x00\x00", "flush re-arms: silence until prebuffer met again"
+    jb.write(b"ABCD")
+    assert jb.read(2) == b"AB"
+
+
+def test_jitter_buffer_caps_memory_dropping_oldest() -> None:
+    jb = JitterBuffer(prebuffer_bytes=0, max_bytes=4)
+    jb.write(b"1234")
+    jb.write(b"5678")  # over cap → drop oldest 4 bytes
+    assert jb.dropped_bytes == 4
+    assert jb.read(4) == b"5678"
+
+
+def test_null_output_device_pulls_from_buffer() -> None:
+    jb = JitterBuffer(prebuffer_bytes=0)
+    jb.write(np.array([1, 2, 3], dtype="<i2").tobytes())
+    dev = NullOutputDevice(22_050)
+    dev.start(jb)
+    samples = np.frombuffer(dev.pull(3), dtype="<i2")
+    assert list(samples) == [1, 2, 3]
+
+
+# ---- SpeakerClient state machine ---------------------------------------
+
+
+def _tts_chunk(seq: int, rate: int, samples: list[int]) -> str:
+    pcm = np.array(samples, dtype="<i2").tobytes()
+    return json.dumps({
+        "type": "tts_chunk", "session_id": "sess", "seq": seq,
+        "sample_rate": rate, "pcm_b64": base64.b64encode(pcm).decode("ascii"),
+    })
+
+
+def _msg(kind: str) -> str:
+    return json.dumps({"type": kind, "session_id": "sess"})
+
+
+async def _run_speaker(inbound, device_factory):
+    """Start a SpeakerClient against a SpyConn replaying `inbound` and return
+    (client, conns, task) for mid-session inspection BEFORE teardown flushes the
+    buffer. Deterministic settle: the recv loop only yields control once it has
+    drained every inbound frame (SpyConn.__anext__ never awaits between frames),
+    so when `_inbound` is empty the last frame is already dispatched — no
+    time-based sleep needed."""
+    conns: list[_SpyConn] = []
+
+    def connect(_url):
+        c = _SpyConn(inbound=list(inbound))
+        conns.append(c)
+        return c
+
+    client = SpeakerClient(
+        server_url="ws://x", client_id="s", room_id="r", token="t",
+        device_factory=device_factory, connect=connect,
+        prebuffer_ms=0.0, backoff_min_s=0.0, backoff_max_s=0.0,
+    )
+    task = asyncio.create_task(client.run())
+    for _ in range(1000):
+        if conns and not conns[0]._inbound:
+            break
+        await asyncio.sleep(0)
+    return client, conns, task
+
+
+async def _stop_speaker(client, conns, task) -> None:
+    client.stop()
+    for c in conns:
+        c._closed.set()
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2.0)
+
+
+async def test_speaker_plays_tts_chunk() -> None:
+    dev = NullOutputDevice(22_050)
+    inbound = [_msg("welcome"), _tts_chunk(0, 22_050, [100, 200, 300])]
+    client, conns, task = await _run_speaker(inbound, lambda _r: dev)
+    assert dev.started
+    samples = np.frombuffer(dev.pull(3), dtype="<i2")
+    assert list(samples) == [100, 200, 300]
+    await _stop_speaker(client, conns, task)
+
+
+async def test_speaker_enqueues_without_welcome() -> None:
+    """A speaker that connects mid-turn gets tts_chunk with no preceding welcome;
+    it must still play (the browser never welcome-gates enqueue)."""
+    dev = NullOutputDevice(22_050)
+    client, conns, task = await _run_speaker([_tts_chunk(0, 22_050, [5, 5, 5])], lambda _r: dev)
+    samples = np.frombuffer(dev.pull(3), dtype="<i2")
+    assert list(samples) == [5, 5, 5]
+    await _stop_speaker(client, conns, task)
+
+
+async def test_speaker_cancelled_flushes_and_suppresses() -> None:
+    dev = NullOutputDevice(22_050)
+    inbound = [
+        _msg("welcome"), _tts_chunk(0, 22_050, [1, 2, 3]),
+        _msg("cancelled"), _tts_chunk(1, 22_050, [4, 5, 6]),
+    ]
+    client, conns, task = await _run_speaker(inbound, lambda _r: dev)
+    # First turn flushed by cancelled; the post-cancel chunk dropped → silence.
+    assert np.frombuffer(dev.pull(3), dtype="<i2").tolist() == [0, 0, 0]
+    await _stop_speaker(client, conns, task)
+
+
+async def test_speaker_done_does_not_flush() -> None:
+    dev = NullOutputDevice(22_050)
+    inbound = [_msg("welcome"), _tts_chunk(0, 22_050, [7, 8, 9]), _msg("done")]
+    client, conns, task = await _run_speaker(inbound, lambda _r: dev)
+    assert np.frombuffer(dev.pull(3), dtype="<i2").tolist() == [7, 8, 9]
+    await _stop_speaker(client, conns, task)
+
+
+async def test_speaker_welcome_reallows_after_cancel() -> None:
+    dev = NullOutputDevice(22_050)
+    inbound = [
+        _msg("welcome"), _tts_chunk(0, 22_050, [1, 2, 3]),
+        _msg("cancelled"), _msg("welcome"), _tts_chunk(1, 22_050, [4, 5, 6]),
+    ]
+    client, conns, task = await _run_speaker(inbound, lambda _r: dev)
+    # First turn flushed; second welcome cleared suppression → second turn plays.
+    assert np.frombuffer(dev.pull(3), dtype="<i2").tolist() == [4, 5, 6]
+    await _stop_speaker(client, conns, task)
+
+
+async def test_speaker_rebuilds_on_sample_rate_change() -> None:
+    devs: list[NullOutputDevice] = []
+
+    def factory(rate):
+        d = NullOutputDevice(rate)
+        devs.append(d)
+        return d
+
+    inbound = [_msg("welcome"), _tts_chunk(0, 22_050, [1, 2, 3]), _tts_chunk(1, 16_000, [4, 5, 6])]
+    client, conns, task = await _run_speaker(inbound, factory)
+    assert len(devs) == 2, "a sample-rate change must rebuild the device"
+    assert devs[0].stopped, "old device stopped before rebuild"
+    assert devs[1].samplerate == 16_000
+    assert np.frombuffer(devs[1].pull(3), dtype="<i2").tolist() == [4, 5, 6]
+    await _stop_speaker(client, conns, task)
+
+
+async def test_speaker_reconnects_on_device_death() -> None:
+    dev = NullOutputDevice(22_050)
+    conns: list[_SpyConn] = []
+
+    def connect(_url):
+        c = _SpyConn(inbound=[_tts_chunk(0, 22_050, [1, 2, 3])])
+        conns.append(c)
+        return c
+
+    client = SpeakerClient(
+        server_url="ws://x", client_id="s", room_id="r", token="t",
+        device_factory=lambda _r: dev, connect=connect,
+        prebuffer_ms=0.0, backoff_min_s=0.0, backoff_max_s=0.0,
+    )
+    task = asyncio.create_task(client.run())
+    for _ in range(200):
+        if dev.started:
+            break
+        await asyncio.sleep(0.01)
+    dev.fail()  # simulate the output stream dying
+    for _ in range(200):
+        if len(conns) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    await _stop_speaker(client, conns, task)
+    assert len(conns) >= 2, "output-device death must end the session and reconnect"
+
+
+async def test_speaker_terminal_error_does_not_reconnect() -> None:
+    conns: list[_SpyConn] = []
+
+    def connect(_url):
+        c = _SpyConn(inbound=[json.dumps({"type": "error", "code": "binding_mismatch", "message": "x"})])
+        conns.append(c)
+        return c
+
+    client = SpeakerClient(
+        server_url="ws://x", client_id="s", room_id="r", token="bad",
+        device_factory=lambda _r: NullOutputDevice(), connect=connect,
+    )
+    await asyncio.wait_for(client.run(), timeout=2.0)
+    assert len(conns) == 1
