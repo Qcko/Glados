@@ -1,7 +1,5 @@
 # Room client config. Copy to `client_room/config.toml` (gitignored) and fill
-# in for the local device. The auth token is NOT stored here — it lives in the
-# OS keyring under service `glados.client-tokens`, username = client_id:
-#   python -m glados.secrets set client-tokens wardrobe-mic <token>
+# in for the local device.
 #
 # The matching client_id must also be listed in the server's
 # `configs/glados.toml` [auth].clients and bound to a room+role in
@@ -11,5 +9,37 @@ server_url = "ws://127.0.0.1:8765"
 client_id = "wardrobe-mic"
 room_id = "bedroom"
 
-# Optional PortAudio input device index (omit for the system default).
+# --- Auth token -----------------------------------------------------------
+# The token is NOT stored in this file. It is resolved at startup with the
+# precedence: keyring → env → file (first present wins).
+#
+#   1. Keyring (preferred on a desktop): OS keyring, service
+#      `glados.client-tokens`, username = client_id:
+#        python -m glados.secrets set client-tokens wardrobe-mic <token>
+#   2. Env var (set `token_env` to its name). NOTE: env tokens leak to any
+#      local user via `ps -e` / `/proc/<pid>/environ`. On a shared device
+#      prefer a mode-600 file over an env var.
+#   3. File (set `token_file` to a path). Must be mode 600 — the client
+#      refuses a group/other-readable file (POSIX).
+#
+# token_env = "GLADOS_MIC_TOKEN"
+# token_file = "<your-secrets-dir>/wardrobe-mic.token"
+
+# --- Capture backend ------------------------------------------------------
+# "sounddevice" (default): PortAudio. "parec": external PulseAudio capture for
+# boxes without PortAudio (e.g. Termux/Android).
+# capture_backend = "sounddevice"
+
+# sounddevice only: optional PortAudio input device index (omit for default).
 # input_device = 1
+
+# parec only. `parec_rate` should match the source's NATIVE rate so PulseAudio
+# does no resampling (the client resamples native → 16 kHz itself). `parec_source`
+# is the PulseAudio source name (omit for the default source). `parec_args` is an
+# argv ARRAY of extra parec flags — never a split string (keeps it injection-free).
+# On Termux/Android, boot PulseAudio first:
+#   pulseaudio --start --exit-idle-time=-1
+#   pactl load-module module-sles-source
+# parec_rate = 48000
+# parec_source = "sles_source.monitor"
+# parec_args = []

@@ -19,7 +19,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
+from pathlib import Path
 
 from . import wire
 from .audio import BoundedAudioQueue, InputDevice, Resampler
@@ -99,7 +101,7 @@ class MicClient:
                 self._client_id, self._room_id, "mic", self._token,
             )))
             log.info("mic %s connected to %s (room %s)", self._client_id, self._url, self._room_id)
-            self._device.start(self._on_audio)
+            self._device.start(self._on_audio, self._on_device_closed)
             send_task = asyncio.create_task(self._send_loop(ws), name="mic-send")
             recv_task = asyncio.create_task(self._recv_loop(ws), name="mic-recv")
             try:
@@ -109,7 +111,7 @@ class MicClient:
             finally:
                 self._device.stop()
                 # Unblock the send loop's executor `get` so its thread can exit.
-                self._audio_q.put(None)
+                self._audio_q.put_sentinel()
                 for t in (send_task, recv_task):
                     t.cancel()
                 await asyncio.gather(send_task, recv_task, return_exceptions=True)
@@ -123,6 +125,15 @@ class MicClient:
         Only ever a real audio block — `None` is reserved as the send-loop
         shutdown sentinel that `_session` puts after the device is stopped."""
         self._audio_q.put(block)
+
+    def _on_device_closed(self) -> None:
+        """Capture-thread error channel. The device calls this when its source
+        ends unexpectedly (e.g. `parec` dies). Push the shutdown sentinel so the
+        blocked send loop returns, the `asyncio.wait` in `_session` completes,
+        and `run` reconnects — instead of the send loop waiting forever on a
+        queue that will never fill again. Thread-safe via the bounded queue;
+        `put_sentinel` guarantees the signal is delivered, never drop-oldest'd."""
+        self._audio_q.put_sentinel()
 
     async def _send_loop(self, ws) -> None:
         loop = asyncio.get_running_loop()
@@ -165,25 +176,102 @@ def _load_config(path: str) -> dict:
         return tomllib.load(f)
 
 
+def _check_token_file_perms(path: Path) -> None:
+    """Refuse a token file readable by group/other (SSH-style). POSIX only —
+    the mode bits are meaningless on Windows, so skip the check there."""
+    if os.name != "posix":
+        return
+    mode = path.stat().st_mode
+    if mode & 0o077:
+        raise SystemExit(
+            f"token file {path} is group/other-accessible "
+            f"(mode {oct(mode & 0o777)}); tighten it: chmod 600 {path}"
+        )
+
+
+def load_token(
+    client_id: str,
+    *,
+    env_var: str | None = None,
+    token_file: str | None = None,
+) -> str:
+    """Resolve the client auth token. Precedence: keyring → env → file; the
+    first present source wins and short-circuits. Logs WHICH source won (name
+    only, never the value). Raises listing every source tried if none yields a
+    token.
+
+    On a shared device a mode-600 file is preferred over an env var: env tokens
+    leak via `ps -e` / `/proc/<pid>/environ` to any local user."""
+    tried: list[str] = []
+
+    try:
+        import keyring
+
+        tok = keyring.get_password("glados.client-tokens", client_id)
+        if tok:
+            log.info("token for %s loaded from keyring", client_id)
+            return tok
+        tried.append("keyring (empty)")
+    except Exception as e:  # noqa: BLE001 - keyring backend may be absent
+        tried.append(f"keyring (unavailable: {type(e).__name__})")
+
+    if env_var:
+        tok = os.environ.get(env_var)
+        if tok:
+            log.info("token for %s loaded from env var %s", client_id, env_var)
+            return tok
+        tried.append(f"env {env_var} (unset)")
+
+    if token_file:
+        path = Path(token_file).expanduser()
+        if path.exists():
+            _check_token_file_perms(path)
+            tok = path.read_text(encoding="utf-8").strip()
+            if tok:
+                log.info("token for %s loaded from file %s", client_id, path)
+                return tok
+            tried.append(f"file {path} (empty)")
+        else:
+            tried.append(f"file {path} (missing)")
+
+    raise SystemExit(
+        f"no token for {client_id}; tried: {', '.join(tried) or 'no sources configured'}. "
+        f"Set one in the keyring (python -m glados.secrets set client-tokens "
+        f"{client_id} <token>), or configure token_env / token_file."
+    )
+
+
+def _make_device(cfg: dict):
+    """Build the capture device from config. `capture_backend` selects between
+    PortAudio (`sounddevice`, the default) and external `parec` (`parec`)."""
+    backend = cfg.get("capture_backend", "sounddevice")
+    if backend == "parec":
+        from .audio import SubprocessInput
+
+        return SubprocessInput(
+            samplerate=cfg.get("parec_rate", 48_000),
+            source=cfg.get("parec_source"),
+            extra_args=cfg.get("parec_args"),
+        )
+    if backend == "sounddevice":
+        from .audio import SoundDeviceInput
+
+        return SoundDeviceInput(device=cfg.get("input_device"))
+    raise SystemExit(f"unknown capture_backend {backend!r} (want 'sounddevice' or 'parec')")
+
+
 def main(config_path: str = "client_room/config.toml") -> None:
-    """CLI entry: `python -m client_room.mic`. Reads config + keyring token,
-    opens the real capture device, and runs until Ctrl-C."""
+    """CLI entry: `python -m client_room.mic`. Reads config + token, opens the
+    configured capture device, and runs until Ctrl-C."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     cfg = _load_config(config_path)
     client_id = cfg["client_id"]
-
-    import keyring
-
-    token = keyring.get_password("glados.client-tokens", client_id)
-    if not token:
-        raise SystemExit(
-            f"no token for {client_id} in keyring; run: "
-            f"python -m glados.secrets set client-tokens {client_id} <token>"
-        )
-
-    from .audio import SoundDeviceInput
-
-    device = SoundDeviceInput(device=cfg.get("input_device"))
+    token = load_token(
+        client_id,
+        env_var=cfg.get("token_env"),
+        token_file=cfg.get("token_file"),
+    )
+    device = _make_device(cfg)
     client = MicClient(
         server_url=cfg["server_url"],
         client_id=client_id,

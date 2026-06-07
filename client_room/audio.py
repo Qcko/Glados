@@ -10,14 +10,19 @@ Three pieces, each independently testable without hardware:
   callback thread to the asyncio send loop. Drops the OLDEST block when full
   (the newest mic audio is what matters) and counts drops.
 - `InputDevice` — a tiny Protocol over a capture device, with a real
-  `sounddevice` implementation and a `NullInputDevice` for tests.
+  `sounddevice` implementation, a `SubprocessInput` (external `parec`/PulseAudio
+  capture for boxes without PortAudio, e.g. Termux/Android), and a
+  `NullInputDevice` for tests.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import queue
-from typing import Callable, Protocol
+import subprocess
+import threading
+from typing import Callable, Optional, Protocol
 
 import numpy as np
 
@@ -100,17 +105,47 @@ class BoundedAudioQueue:
                 # dropping the newest block here is acceptable and still bounded.
                 self.drops += 1
 
+    def put_sentinel(self) -> None:
+        """Deliver the `None` shutdown sentinel, evicting a block if the queue
+        is full so the signal can never be the item that gets dropped (unlike
+        `put`, which drops-oldest for audio). At shutdown the sole consumer is
+        blocked on `get`, so evict-then-retry always completes — this is the
+        guaranteed unblock for the send loop."""
+        while True:
+            try:
+                self._q.put_nowait(None)
+                return
+            except queue.Full:
+                try:
+                    self._q.get_nowait()
+                except queue.Empty:
+                    pass
+
     def get(self):
         """Blocking get (run in an executor by the async caller)."""
         return self._q.get()
 
 
+CloseCallback = Callable[[], None]
+
+
 class InputDevice(Protocol):
     samplerate: int
 
-    def start(self, callback: Callable[[AudioBlock], None]) -> None:
+    def start(
+        self,
+        callback: Callable[[AudioBlock], None],
+        on_close: Optional[CloseCallback] = None,
+    ) -> None:
         """Begin capture, delivering native-rate mono float32 blocks to
-        `callback` (on the device's own thread for real hardware)."""
+        `callback` (on the device's own thread for real hardware).
+
+        `on_close`, if given, is invoked once from the capture thread when the
+        capture source ends unexpectedly (e.g. an external process dies). It is
+        the device's only error channel: the caller uses it to end the session
+        and reconnect rather than block forever on a source that will never
+        deliver another block. Devices that can't end unexpectedly may ignore
+        it."""
         ...
 
     def stop(self) -> None: ...
@@ -123,14 +158,25 @@ class NullInputDevice:
     def __init__(self, samplerate: int = 48_000) -> None:
         self.samplerate = samplerate
         self._callback: Callable[[AudioBlock], None] | None = None
+        self._on_close: Optional[CloseCallback] = None
         self.started = False
 
-    def start(self, callback: Callable[[AudioBlock], None]) -> None:
+    def start(
+        self,
+        callback: Callable[[AudioBlock], None],
+        on_close: Optional[CloseCallback] = None,
+    ) -> None:
         self._callback = callback
+        self._on_close = on_close
         self.started = True
 
     def stop(self) -> None:
         self.started = False
+
+    def close(self) -> None:
+        """Test hook: simulate the capture source ending unexpectedly."""
+        if self._on_close is not None:
+            self._on_close()
 
     def feed(self, block: AudioBlock) -> None:
         if self._callback is None:
@@ -154,7 +200,17 @@ class SoundDeviceInput:
         self.samplerate = int(info["default_samplerate"])
         self._stream: object | None = None
 
-    def start(self, callback: Callable[[AudioBlock], None]) -> None:
+    def start(
+        self,
+        callback: Callable[[AudioBlock], None],
+        on_close: Optional[CloseCallback] = None,
+    ) -> None:
+        # PortAudio keeps the stream alive across transient glitches, so there
+        # is no routine unexpected-EOF to surface; `on_close` is accepted for
+        # Protocol conformance and left unwired. (Hardware-loss surfacing via
+        # the stream's finished_callback is future work.)
+        del on_close
+
         def _cb(indata, _frames, _time, status) -> None:
             if status:
                 # Overflow/underflow flags — surface at debug to field-diagnose
@@ -179,3 +235,131 @@ class SoundDeviceInput:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+
+
+# float32 little-endian: parec is told `--format=float32le`, so each sample is
+# four bytes regardless of host endianness, matching the wire's LE assumption.
+_FLOAT32_LE = np.dtype("<f4")
+_BYTES_PER_SAMPLE = _FLOAT32_LE.itemsize
+
+
+class SubprocessInput:
+    """Capture via an external `parec` (PulseAudio) process, for boxes that have
+    PulseAudio but no PortAudio (Termux/Android). `parec` writes raw native-rate
+    mono float32 to stdout; a daemon reader thread frames whole samples and hands
+    native-rate blocks to the callback — byte-for-byte the same downstream path
+    as `SoundDeviceInput`, so the existing `Resampler` runs unchanged (the server
+    VAD/STT see exactly what the browser produces). PulseAudio is NOT asked to
+    resample to 16 kHz; that would feed the VAD a differently anti-aliased signal.
+
+    Reliability: if `parec` dies its stdout EOFs, the reader thread invokes
+    `on_close`, which lets the session end and reconnect instead of the send loop
+    blocking forever on a queue that will never fill again."""
+
+    def __init__(
+        self,
+        *,
+        samplerate: int = 48_000,
+        source: str | None = None,
+        extra_args: list[str] | None = None,
+        read_size: int = 4096,
+        stop_timeout_s: float = 2.0,
+        popen: Callable[..., subprocess.Popen] = subprocess.Popen,
+    ) -> None:
+        # `samplerate` should match the source's native rate so PulseAudio does
+        # no resampling on its side; the Resampler handles native → 16 kHz.
+        self.samplerate = samplerate
+        self._source = source
+        # An argv LIST passed to Popen with shell=False — no shell, no string
+        # splitting, so a source name or extra arg can't inject a command.
+        self._extra_args = list(extra_args or [])
+        self._read_size = read_size
+        self._stop_timeout_s = stop_timeout_s
+        self._popen = popen
+        self._proc: subprocess.Popen | None = None
+        self._reader: threading.Thread | None = None
+
+    def _argv(self) -> list[str]:
+        argv = [
+            "parec",
+            "--format=float32le",
+            "--channels=1",
+            f"--rate={self.samplerate}",
+            "--raw",
+        ]
+        if self._source:
+            argv += ["-d", self._source]
+        argv += self._extra_args
+        return argv
+
+    def start(
+        self,
+        callback: Callable[[AudioBlock], None],
+        on_close: Optional[CloseCallback] = None,
+    ) -> None:
+        # stderr → DEVNULL so a chatty parec can't fill an unread pipe and block
+        # on write, silently stalling stdout (the audio path).
+        self._proc = self._popen(
+            self._argv(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self._reader = threading.Thread(
+            target=self._read_loop,
+            args=(self._proc, callback, on_close),
+            name="parec-reader",
+            daemon=True,
+        )
+        self._reader.start()
+
+    def _read_loop(
+        self,
+        proc: subprocess.Popen,
+        callback: Callable[[AudioBlock], None],
+        on_close: Optional[CloseCallback],
+    ) -> None:
+        stdout = proc.stdout
+        assert stdout is not None  # opened with stdout=PIPE
+        buf = bytearray()
+        try:
+            while True:
+                chunk = stdout.read(self._read_size)
+                if not chunk:  # EOF — parec exited (cleanly or died)
+                    break
+                buf += chunk
+                # Emit only whole float32 samples; carry an odd-byte remainder
+                # across read() boundaries so a sample is never split.
+                whole = len(buf) - (len(buf) % _BYTES_PER_SAMPLE)
+                if whole:
+                    block = np.frombuffer(bytes(buf[:whole]), dtype=_FLOAT32_LE).copy()
+                    del buf[:whole]
+                    callback(block)
+        finally:
+            # Sole error channel: tell the caller capture ended so it can end
+            # the session and reconnect rather than block forever.
+            if on_close is not None:
+                on_close()
+
+    def stop(self) -> None:
+        # Idempotent: a second stop (or stop after the proc already died) is a
+        # no-op rather than an error.
+        proc = self._proc
+        if proc is None:
+            return
+        self._proc = None
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()
+        try:
+            # SIGTERM closes stdout, which unblocks the reader's blocking read.
+            proc.wait(timeout=self._stop_timeout_s)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=self._stop_timeout_s)
+        reader = self._reader
+        self._reader = None
+        if reader is not None:
+            # Abandon (it's a daemon) rather than block teardown if a read is
+            # still wedged after kill — never hang the caller.
+            reader.join(timeout=self._stop_timeout_s)
