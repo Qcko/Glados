@@ -447,7 +447,8 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   (multi-step reasoning) → router selects the resident specialist →
   it calls `get_time` or similar → reply spoken via Piper.
 
-- **v3 — room client (lite/headless).** Python + PortAudio + WebSocket + AEC.
+- **v3 — room client (lite/headless).** Python + (PortAudio or PulseAudio) +
+  WebSocket + AEC.
   A *lite* transducer client (§2: mic + speaker, no UI, set-and-forget), the
   opposite of the v7 *rich* client. **Deploys to an old phone running
   postmarketOS** (mainline Linux → real ALSA/PipeWire audio), not a Raspberry
@@ -459,6 +460,20 @@ Each version is its own session-sized chunk. Heavy work is deferred.
     queue, browser-matched 48k→16k resample, `<BE u32 seq><PCM16-LE>` framing.
     Dev-box-tested; design-duck panel (architect/concurrency/protocol) ran
     pre-build.
+  - **Capture backends (pluggable behind the `InputDevice` Protocol).**
+    `SoundDeviceInput` (PortAudio, default) for the dev box; `SubprocessInput`
+    runs external `parec` for boxes that have PulseAudio but no PortAudio
+    (Termux/Android). Both capture native-rate mono float32 so the *same*
+    browser-matched resampler runs downstream — PulseAudio is **not** asked to
+    resample to 16 kHz (that would feed the VAD a differently anti-aliased
+    signal than the browser produces). `parec` death is the one new failure
+    mode: the Protocol gained an `on_close` error channel so a dead capture
+    process ends the session and reconnects instead of the send loop blocking
+    forever on a queue that will never fill again. `capture_backend` in the
+    client config selects between them; the auth token resolves keyring → env →
+    file (first present wins), preferring a mode-600 file over an env var on a
+    shared device (env leaks via `/proc`). Design-duck panel
+    (architect/concurrency/security) ran pre-build.
   - **Next:** 3b speaker + jitter buffer + cancel/flush; 3c supervisor +
     resilience; pmOS deploy (needs the device's mainline WiFi/BT/audio confirmed
     — Bluetooth speakers ride the host's BlueZ/PipeWire sink, not the GLaDOS
@@ -659,7 +674,9 @@ quirks (the 2026-06-02 bake-off: Dunnes lists volume inconsistently as
 misses stock; the lesson is "search the broad noun, read volume from each
 result's name") and orchestrator-level lessons (the local 14b narrates
 tool JSON instead of acting on it). There is **no learned memory today**:
-behaviour lives only in the static `SYSTEM_PROMPT` and in per-tool
+behaviour lives only in the static `SYSTEM_PROMPT` (or a `system_prompt`
+config override — persona/verbosity tuning, with the §7 untrusted-content
+rule force-appended so an override can't silently drop it) and in per-tool
 descriptions, and sessions are single-turn. Two layers fix this; both are
 **gated** because injected memory enters the *trusted* prompt.
 

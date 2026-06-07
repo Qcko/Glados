@@ -109,6 +109,11 @@ $env:GLADOS_LLM_BACKEND = "fake"; uv run glados
 
 `GLADOS_LLM_MODEL` and `GLADOS_LLM_HOST` also work as overrides.
 
+To retune persona/verbosity without editing code, set `[llm].system_prompt`
+in `configs/glados.toml` (empty uses the built-in default). The
+untrusted-content rule is force-appended to any override, so it can't be
+dropped by accident.
+
 > uv stores its Python and cache on the same drive as the repo (cross-drive
 > renames fail on Windows). If the repo lives off the system drive, point
 > `UV_PYTHON_INSTALL_DIR` and `UV_CACHE_DIR` at the same drive first.
