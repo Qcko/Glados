@@ -521,10 +521,14 @@ Each version is its own session-sized chunk. Heavy work is deferred.
     is already **confirmed on stock Android** via PulseAudio `module-sles-source`
     + `parec` (the main Termux app lacks `RECORD_AUDIO`, but the OpenSL ES source
     reaches the mic); boot setup is `pulseaudio --start --exit-idle-time=-1` then
-    `pactl load-module module-sles-source`. Remaining: implement `SubprocessInput`
-    (parec) per the design duck, wrap the room supervisor for Termux:Boot, and
-    confirm BT-speaker output (rides the host's BlueZ/PulseAudio sink, not the
-    GLaDOS protocol). Then AEC (revisit a shared-clock duplex stream).
+    `pactl load-module module-sles-source`. `SubprocessInput` (parec capture) is
+    already implemented and tested. Remaining: implement `SubprocessOutput`
+    (pacat) for speaker output — Termux has no PortAudio, so `SoundDeviceOutput`
+    can't drive the phone speaker, the same reason capture uses parec (the
+    `OutputDevice` seam is buffer-shaped to fit it without redesign); wrap the
+    room supervisor for Termux:Boot; and confirm BT-speaker output (rides the
+    host's BlueZ/PulseAudio sink, not the GLaDOS protocol). Then AEC (revisit a
+    shared-clock duplex stream).
 
 - **v4 — wake word + dedup.** openWakeWord on Pi clients; same-utterance
   arbitration server-side.
