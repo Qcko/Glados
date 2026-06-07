@@ -89,6 +89,14 @@ class ReconnectingClient(abc.ABC):
     def stop(self) -> None:
         self._stop = True
 
+    @property
+    def terminated(self) -> bool:
+        """True once `run` has exited because of a terminal handshake error (bad
+        token / wrong room-role binding) rather than a graceful `stop`. A
+        supervisor reads this to tell a misconfigured client apart from one it
+        shut down deliberately — the two otherwise both just return from `run`."""
+        return self._terminal
+
     async def _send_hello(self, ws) -> None:
         """Send the role Hello as the FIRST message, before any other frame.
         A good handshake is answered with silence (no `welcome` ack)."""

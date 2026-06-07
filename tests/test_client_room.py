@@ -25,6 +25,7 @@ from client_room.audio import (
     SubprocessInput,
 )
 from client_room.mic import MicClient, load_token
+from client_room.room import RoomSupervisor
 from client_room.speaker import SpeakerClient
 
 
@@ -631,3 +632,136 @@ async def test_speaker_terminal_error_does_not_reconnect() -> None:
     )
     await asyncio.wait_for(client.run(), timeout=2.0)
     assert len(conns) == 1
+
+
+# ---- RoomSupervisor -----------------------------------------------------
+
+
+class _FakeRoleClient:
+    """Stand-in for a Mic/Speaker run(): hangs until cancelled, or exits
+    immediately to simulate a graceful/terminal return."""
+
+    def __init__(self, *, exit_immediately: bool = False, terminal: bool = False) -> None:
+        self._exit = exit_immediately
+        self._terminal = terminal
+        self.run_count = 0
+        self.cancelled = False
+
+    @property
+    def terminated(self) -> bool:
+        return self._terminal
+
+    async def run(self) -> None:
+        self.run_count += 1
+        if self._exit:
+            return
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+async def _await_started(*clients) -> None:
+    for _ in range(1000):
+        if all(c.run_count for c in clients):
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("clients did not start within the poll budget")
+
+
+async def test_room_supervisor_shutdown_cancels_both() -> None:
+    mic, spk = _FakeRoleClient(), _FakeRoleClient()
+    sup = RoomSupervisor(mic, spk)
+    task = asyncio.create_task(sup.run())
+    await _await_started(mic, spk)
+    sup.request_shutdown()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert mic.cancelled and spk.cancelled
+
+
+async def test_room_supervisor_keeps_other_role_on_terminal_exit() -> None:
+    mic = _FakeRoleClient(exit_immediately=True, terminal=True)
+    spk = _FakeRoleClient()  # hangs (stays alive)
+    sup = RoomSupervisor(mic, spk)
+    task = asyncio.create_task(sup.run())
+    await _await_started(spk)
+    await asyncio.sleep(0.02)  # let the supervisor observe mic's terminal exit
+    assert not task.done(), "a one-role terminal exit must NOT take the device down"
+    assert not spk.cancelled
+    sup.request_shutdown()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert spk.cancelled
+
+
+async def test_room_supervisor_exits_when_both_roles_exit() -> None:
+    mic = _FakeRoleClient(exit_immediately=True, terminal=True)
+    spk = _FakeRoleClient(exit_immediately=True)
+    sup = RoomSupervisor(mic, spk)
+    await asyncio.wait_for(sup.run(), timeout=2.0)  # returns on its own
+
+
+async def test_room_supervisor_signal_wins_over_terminal_exit() -> None:
+    mic = _FakeRoleClient(exit_immediately=True, terminal=True)
+    spk = _FakeRoleClient()
+    sup = RoomSupervisor(mic, spk)
+    sup.request_shutdown()  # signal already pending before run
+    # Signal wins: run() returns cleanly (no SystemExit) even though mic also
+    # exited terminally in the same step. Reaching this line is the assertion;
+    # wait_for would propagate a SystemExit if the terminal branch had fired.
+    await asyncio.wait_for(sup.run(), timeout=2.0)
+    assert sup._shutdown.is_set()
+
+
+async def test_room_supervisor_cancel_tears_down_children() -> None:
+    mic, spk = _FakeRoleClient(), _FakeRoleClient()
+    sup = RoomSupervisor(mic, spk)
+    task = asyncio.create_task(sup.run())
+    await _await_started(mic, spk)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2.0)
+    assert mic.cancelled and spk.cancelled
+
+
+def test_room_from_config_resolves_per_role_tokens(monkeypatch) -> None:
+    tokens = {"bedroom-mic": "mtok", "bedroom-speaker": "stok"}
+    import keyring
+
+    monkeypatch.setattr(keyring, "get_password", lambda _service, cid: tokens.get(cid))
+    cfg = {
+        "server_url": "ws://x", "room_id": "bedroom",
+        # parec capture builds without touching hardware; speaker factory is a
+        # lambda not invoked at construction — so from_config stays hardware-free.
+        "mic": {"client_id": "bedroom-mic", "capture_backend": "parec"},
+        "speaker": {"client_id": "bedroom-speaker"},
+    }
+    sup = RoomSupervisor.from_config(cfg)
+    assert sup._mic._client_id == "bedroom-mic" and sup._mic._token == "mtok"
+    assert sup._speaker._client_id == "bedroom-speaker" and sup._speaker._token == "stok"
+    assert sup._mic._room_id == "bedroom" and sup._speaker._room_id == "bedroom"
+
+
+def test_room_from_config_fails_before_start_on_missing_token(monkeypatch) -> None:
+    import keyring
+
+    # mic token present, speaker token absent → must raise before constructing
+    # either client (no half-started device).
+    monkeypatch.setattr(
+        keyring, "get_password",
+        lambda _service, cid: "mtok" if cid == "bedroom-mic" else None,
+    )
+    cfg = {
+        "server_url": "ws://x", "room_id": "bedroom",
+        "mic": {"client_id": "bedroom-mic", "capture_backend": "parec"},
+        "speaker": {"client_id": "bedroom-speaker"},
+    }
+    with pytest.raises(SystemExit):
+        RoomSupervisor.from_config(cfg)
+
+
+def test_room_from_config_missing_key_is_friendly_exit() -> None:
+    # Missing [speaker] subtable → SystemExit (not a bare KeyError traceback).
+    with pytest.raises(SystemExit):
+        RoomSupervisor.from_config({"server_url": "ws://x", "room_id": "r",
+                                    "mic": {"client_id": "m"}})
