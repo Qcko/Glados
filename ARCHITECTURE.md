@@ -285,9 +285,9 @@ glados/
 # Top-level, beside (not under) the glados package — separately-deployed
 # clients that must not import the server:
 client_web/       browser client (text v0, audio v1)
-client_room/      lite mic / speaker client (v3); deploys to a phone on
-                  postmarketOS. Vendors the wire contract (client_room/wire.py),
-                  never imports glados.*
+client_room/      lite mic / speaker client (v3); deploys to a phone running
+                  Android + Termux (not postmarketOS — see §v3). Vendors the
+                  wire contract (client_room/wire.py), never imports glados.*
 ```
 
 ---
@@ -450,10 +450,13 @@ Each version is its own session-sized chunk. Heavy work is deferred.
 - **v3 — room client (lite/headless).** Python + (PortAudio or PulseAudio) +
   WebSocket + AEC.
   A *lite* transducer client (§2: mic + speaker, no UI, set-and-forget), the
-  opposite of the v7 *rich* client. **Deploys to an old phone running
-  postmarketOS** (mainline Linux → real ALSA/PipeWire audio), not a Raspberry
-  Pi — same portable Python runs on the dev box and the phone. One device per
-  room; plugged in, left on a shelf for audio coverage.
+  opposite of the v7 *rich* client. **Deploys to an old phone running Android
+  (stock or LineageOS) + Termux**, not postmarketOS: the available appliance
+  phones (Galaxy S20 FE `r8s`, S9, A3 2017) are all Samsung **Exynos**, which
+  has no usable mainline kernel, so pmOS can't drive their WiFi/audio. The
+  Android vendor kernel does — mic/speaker/WiFi/BT work for free — and the same
+  portable Python runs on the dev box and the phone. **Device #1 = Galaxy S20
+  FE.** One device per room; plugged in, left on a shelf for audio coverage.
   - **Slice 3a — mic client. LANDED.** `client_room/` (top-level, vendors the
     wire contract, never imports the server). Handshake (Hello-first, no
     `welcome` ack), PortAudio-callback→asyncio bridge via a bounded drop-oldest
@@ -493,8 +496,9 @@ Each version is its own session-sized chunk. Heavy work is deferred.
     hello, terminal-error set, and token loading were extracted to `_client.py`
     and shared with the mic so the security-relevant bits can't drift.
     Dev-box-tested; design-duck panel (architect/concurrency/protocol) ran
-    pre-build. A `pacat` output backend (PulseAudio-only boxes) is deferred to
-    the pmOS deploy; the buffer-shaped seam fits it without redesign.
+    pre-build. A `pacat` output backend (PulseAudio-only boxes like
+    Termux/Android) is deferred to the phone deploy; the buffer-shaped seam fits
+    it without redesign.
   - **Slice 3c — room supervisor + resilience. LANDED.** `client_room/room.py`
     (`python -m client_room.room`) runs a mic AND a speaker client in one
     process — the set-and-forget room device. A device running both roles needs
@@ -509,13 +513,18 @@ Each version is its own session-sized chunk. Heavy work is deferred.
     keep-the-other-alive policy — a one-role terminal handshake error (bad
     token / wrong binding) is logged loudly but the working role keeps running
     (degraded, not dark). Exits only on a signal or once both roles have exited.
-    Reboot / both-dead survival is delegated to an OS supervisor (systemd
-    `Restart=on-failure`), a pmOS-deploy concern. Design-duck panel
+    Reboot / both-dead survival is delegated to an OS supervisor — on the
+    Android/Termux target that's Termux:Boot + termux-services (Android has no
+    systemd/init to run a unit), a phone-deploy concern. Design-duck panel
     (architect/concurrency) ran pre-build.
-  - **Next:** pmOS deploy (needs the device's mainline WiFi/BT/audio confirmed
-    — Bluetooth speakers ride the host's BlueZ/PipeWire sink, not the GLaDOS
-    protocol; wrap the room supervisor in a systemd unit); then AEC (revisit a
-    shared-clock duplex stream).
+  - **Next:** phone deploy on the Galaxy S20 FE (Android + Termux). Mic capture
+    is already **confirmed on stock Android** via PulseAudio `module-sles-source`
+    + `parec` (the main Termux app lacks `RECORD_AUDIO`, but the OpenSL ES source
+    reaches the mic); boot setup is `pulseaudio --start --exit-idle-time=-1` then
+    `pactl load-module module-sles-source`. Remaining: implement `SubprocessInput`
+    (parec) per the design duck, wrap the room supervisor for Termux:Boot, and
+    confirm BT-speaker output (rides the host's BlueZ/PulseAudio sink, not the
+    GLaDOS protocol). Then AEC (revisit a shared-clock duplex stream).
 
 - **v4 — wake word + dedup.** openWakeWord on Pi clients; same-utterance
   arbitration server-side.
