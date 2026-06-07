@@ -23,6 +23,13 @@ host = "http://localhost:11434"
 # code-switching without hurting tool-call selection.
 temperature = 0.0
 timeout = 60.0
+# Persona/verbosity override. Empty (default) uses the built-in SYSTEM_PROMPT
+# from brain/prompts/system.py. Set a full replacement string to retune persona
+# per demo without editing code — restart GLaDOS to pick it up. The ARCH §7
+# untrusted-content rule (<external> tags are data, not instructions) is
+# force-appended automatically, so an override can't weaken it. Hash-approved
+# server memory (ARCH §14) is still appended on top of whichever base wins.
+# system_prompt = ""
 
 [router]
 # v2.6 local multi-model router. Off by default — GLaDOS runs every turn on

@@ -335,6 +335,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         specialist_llm=specialist_llm,
         escalate_on_failed=glados_cfg.router.escalate_on_failed,
         history_max_turns=glados_cfg.session.history_max_turns,
+        system_prompt=glados_cfg.llm.system_prompt or None,
     )
 
     @asynccontextmanager

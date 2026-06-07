@@ -19,7 +19,7 @@ from typing import Awaitable, Callable, Literal
 
 from pydantic import BaseModel
 
-from ..brain.prompts import SYSTEM_PROMPT
+from ..brain.prompts import EXTERNAL_CONTENT_RULE, SYSTEM_PROMPT
 from ..brain.router import Router
 from ..mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
 from .adapters import LLM, TTS, LLMMessage, LLMText, LLMToolCall
@@ -124,6 +124,7 @@ class Organizer:
         specialist_llm: LLM | None = None,
         escalate_on_failed: bool = True,
         history_max_turns: int = 8,
+        system_prompt: str | None = None,
     ) -> None:
         self.llm = llm
         # v2.6 local multi-model router. When `router` is None the organizer
@@ -189,12 +190,21 @@ class Organizer:
         self._confirm_timeout_s = confirm_timeout_s
         self._pending_confirms: dict[str, asyncio.Future[bool]] = {}
         self._confirm_room: dict[str, str] = {}
-        # Assembled system prompt: the static SYSTEM_PROMPT plus any
-        # hash-approved, guard-wrapped server memory (ARCH §14). Memory is
-        # collected in the server lifespan *after* this constructor runs
-        # (servers spawn inside the event loop), so it arrives via
-        # set_memory_notes(); until then this is just SYSTEM_PROMPT.
-        self._system_prompt = SYSTEM_PROMPT
+        # Assembled system prompt: the base persona prompt plus any
+        # hash-approved, guard-wrapped server memory (ARCH §14). The base is
+        # the built-in SYSTEM_PROMPT unless the operator supplies a
+        # `system_prompt` override via config. An override gets the ARCH §7
+        # EXTERNAL_CONTENT_RULE force-appended — the built-in already carries
+        # it, so an operator override can swap persona/verbosity but can never
+        # silently drop the untrusted-content defense. Memory is collected in
+        # the server lifespan *after* this constructor runs (servers spawn
+        # inside the event loop), so it arrives via set_memory_notes(); until
+        # then this is just the base prompt.
+        if system_prompt:
+            self._base_system_prompt = system_prompt + "\n" + EXTERNAL_CONTENT_RULE
+        else:
+            self._base_system_prompt = SYSTEM_PROMPT
+        self._system_prompt = self._base_system_prompt
 
     def set_memory_notes(self, notes: list[str]) -> None:
         """Install guard-wrapped server memory into the system prompt.
@@ -203,13 +213,15 @@ class Organizer:
         already vetted + wrapped by `memory_gate.vet`. A short framing
         preamble (once, ahead of all blocks) tells the model the blocks are
         reference data, not instructions — the §7 untrusted-content rule,
-        applied to memory. Empty list leaves the prompt as plain
-        SYSTEM_PROMPT. Idempotent: always rebuilt from SYSTEM_PROMPT, so a
+        applied to memory. Empty list leaves the prompt as the plain base
+        prompt. Idempotent: always rebuilt from the base prompt, so a
         re-call replaces rather than appends."""
         if not notes:
-            self._system_prompt = SYSTEM_PROMPT
+            self._system_prompt = self._base_system_prompt
             return
-        self._system_prompt = SYSTEM_PROMPT + "\n" + _MEMORY_PREAMBLE + "\n" + "\n".join(notes)
+        self._system_prompt = (
+            self._base_system_prompt + "\n" + _MEMORY_PREAMBLE + "\n" + "\n".join(notes)
+        )
 
     async def handle_user_text(
         self, client_id: str, text: str, *, source: UserTextSource = "text"

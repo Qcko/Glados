@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from glados.core.adapters import LLMEvent, LLMMessage, LLMToolCall, ToolSpec
 from glados.core.config import ClientBinding
-from glados.brain.prompts import SYSTEM_PROMPT
+from glados.brain.prompts import EXTERNAL_CONTENT_RULE, SYSTEM_PROMPT
 from glados.core.organizer import Organizer
 from glados.core.sessions import SessionRegistry
 from glados.core.traces import TraceStore
@@ -66,7 +66,7 @@ class _ErrorTool:
 
 
 @asynccontextmanager
-async def _make(bindings, tmp: Path, llm, mcp: MCPRegistry):
+async def _make(bindings, tmp: Path, llm, mcp: MCPRegistry, system_prompt=None):
     sink: list[tuple[str, dict]] = []
 
     async def send(client_id: str, msg: BaseModel) -> None:
@@ -81,6 +81,7 @@ async def _make(bindings, tmp: Path, llm, mcp: MCPRegistry):
         send=send,
         binding_for_client=by_id.get,
         clients_in_room=lambda r: [b.client_id for b in bindings if b.room_id == r],
+        system_prompt=system_prompt,
     )
     try:
         yield org, sink
@@ -147,6 +148,59 @@ async def test_no_memory_notes_leaves_prompt_unchanged(tmp_path: Path) -> None:
         await org.flush()
 
     assert _system_prompt_seen(llm.passes) == SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_override_replaces_base(tmp_path: Path) -> None:
+    """A config-supplied system_prompt replaces the built-in SYSTEM_PROMPT as
+    the base the LLM sees, but the ARCH §7 untrusted-content rule is
+    force-appended so an override can't silently drop it."""
+    spec = ToolSpec(server="local", name="now", description="t", parameters={"type": "object"})
+    mcp = MCPRegistry()
+    mcp.register(_StaticTool(spec, {"iso": "2026-05-19T12:00:00Z"}))
+    llm = _RecordingLLM(server="local", name="now")
+    custom = "You are TestBot. Be terse."
+    async with _make(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm,
+        mcp,
+        system_prompt=custom,
+    ) as (org, _):
+        await org.handle_user_text("desk-ui", "what time is it")
+        await org.flush()
+
+    prompt = _system_prompt_seen(llm.passes)
+    assert prompt.startswith(custom)
+    assert EXTERNAL_CONTENT_RULE in prompt
+    assert SYSTEM_PROMPT not in prompt
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_override_keeps_memory_appending(tmp_path: Path) -> None:
+    """Memory notes append on top of the override base, not the built-in."""
+    spec = ToolSpec(server="local", name="now", description="t", parameters={"type": "object"})
+    mcp = MCPRegistry()
+    mcp.register(_StaticTool(spec, {"iso": "2026-05-19T12:00:00Z"}))
+    llm = _RecordingLLM(server="local", name="now")
+    custom = "You are TestBot. Be terse."
+    note = '<memory-notes source="dunnes">read volume from each result</memory-notes>'
+    async with _make(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm,
+        mcp,
+        system_prompt=custom,
+    ) as (org, _):
+        org.set_memory_notes([note])
+        await org.handle_user_text("desk-ui", "what time is it")
+        await org.flush()
+
+    prompt = _system_prompt_seen(llm.passes)
+    assert prompt.startswith(custom)
+    assert EXTERNAL_CONTENT_RULE in prompt
+    assert note in prompt
+    assert SYSTEM_PROMPT not in prompt
 
 
 @pytest.mark.asyncio

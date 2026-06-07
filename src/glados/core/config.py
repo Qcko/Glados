@@ -33,6 +33,12 @@ class LLMConfig(BaseModel):
     host: str = "http://localhost:11434"
     temperature: float = 0.2
     timeout: float = 60.0
+    # Persona/verbosity override for the static system prompt. Empty (default)
+    # uses the built-in SYSTEM_PROMPT shipped in brain/prompts/system.py; set a
+    # full replacement here to retune persona per demo without editing code.
+    # Hash-approved server memory (ARCH §14) is still appended on top of
+    # whichever base wins.
+    system_prompt: str = ""
 
 
 class RouterConfig(BaseModel):
