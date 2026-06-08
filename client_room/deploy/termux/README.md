@@ -23,6 +23,7 @@ deploy/termux/
     glados-room/run                supervise the room client; gate on pulse, load mic source
     glados-room/log/run            svlogd logger for the client
   glados-room.env.example          operator paths template → ~/.config/glados-room/env
+  selftest.sh                      on-hardware diagnostic → report.md (see below)
 ```
 
 PulseAudio is its **own** runit service (not started from inside the client's
@@ -131,6 +132,28 @@ tail -f ~/.local/var/log/glados-room/current # client logs (svlogd)
 
 A clean room-client handshake is silent; you should see it connect and, when you
 speak, audio flow up and TTS play back.
+
+## Self-test — collect a diagnostic report
+
+`selftest.sh` runs every on-hardware check in one pass and writes a single
+`report.md` you can hand to whoever is helping with the bring-up. It probes the
+risky assumptions directly: PulseAudio starting on its stock config, the OpenSL
+ES mic source loading, real mic capture levels, an output sink + a `pacat` test
+tone, the Python client importing, and the runit service status. It is
+read-mostly — it starts pulse / loads the mic source only if they aren't already
+up (and reports what it changed), and never touches your config or services.
+
+```sh
+sh client_room/deploy/termux/selftest.sh            # interactive (mic + tone checks)
+sh client_room/deploy/termux/selftest.sh --client   # also run the client ~12s
+sh client_room/deploy/termux/selftest.sh --non-interactive   # no prompts (headless)
+```
+
+It prints a `N PASS · N FAIL · N WARN · N SKIP` tally and the path to
+`~/glados-selftest-<timestamp>/report.md` (plus a `.tar.gz` bundle with the raw
+captures, including the recorded mic audio). Run it interactively the first time
+so the mic ("make noise") and tone ("did you hear it?") checks can be confirmed.
+Upload `report.md`.
 
 ## Control
 
