@@ -365,7 +365,7 @@ Each version is its own session-sized chunk. Heavy work is deferred.
 
 - **v2.5 — Dunnes Stores MCP.** First real consumer of the v2
   platform. Server lives at
-  `D:\dev\repos\DunnesStoresMCP\DunnesStoresMCP\McpServer\` (C# /
+  `<path-to>\DunnesStoresMCP\DunnesStoresMCP\McpServer\` (C# /
   .NET 8, Selenium-driven, stdio transport via the
   `ModelContextProtocol` C# SDK). 5 tool groups (`BrowserTools`,
   `ShopTools`, `CartTools`, `CheckoutTools`, `CatalogTools`); a
@@ -610,6 +610,24 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   1× if the Organizer `asyncio.gather`s independent calls from a single
   model turn. Preserve trace ordering by tagging calls with their issue
   index. Cheap; do it alongside the Skills slice when that lands.
+- **Device onboarding & medic tool.** The phone self-test
+  (`client_room/deploy/termux/selftest.sh`) is the prototype seed of a
+  cross-device admission + health tool: any device joining the GLaDOS ecosystem
+  runs it to prove it meets the bar, and a live device re-runs it as a medic when
+  something's wrong. Staged, and **gated** — do NOT build ahead of the gate:
+    1. *Now (prototype, banner-marked "not ready"):* local-only diagnostic,
+       read-mostly, one uploadable report. Termux/room-client-specific.
+    2. *Generalize* into a platform-agnostic check-runner + per-device-type
+       profiles (`termux-room`, `pi-wakeword`, …) — only once a SECOND device
+       type justifies the abstraction (avoid speculative generality).
+    3. *Network reporting + env setup* (device → server diagnostics, auto-onboard)
+       — crosses a trust boundary (§7 untrusted content, §9 privacy): a new
+       authenticated protocol surface where the server accepts device-reported
+       data. **Requires the design-duck panel (security + architect) before any
+       code** — never a casual `curl` bolt-on. Develop on a branch; merge to
+       `main` only after the panel + code duck pass. This branch+review gate is
+       the "not shipped until designed and checked" mechanism (not gitignore,
+       which would also drop the tool from the `git archive` phone bundle).
 - **Lazy MCP child spawn + idle reap. LANDED.** `autostart=true` boots
   Chrome (Dunnes Selenium) on every GLaDOS start even for sessions that
   never shop. `lazy = true` in `servers.toml` (default false to preserve

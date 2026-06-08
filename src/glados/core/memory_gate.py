@@ -31,7 +31,7 @@ from dataclasses import dataclass
 log = logging.getLogger(__name__)
 
 # Override to point at a non-PATH binary or a wrapper, e.g.
-# `GLADOS_LOCALGUARD_CMD="uv run --project E:/dev/localguard localguard"`.
+# `GLADOS_LOCALGUARD_CMD="uv run --project <path-to-localguard> localguard"`.
 # Shell-split, so multi-word wrappers work; never run through a shell.
 _LOCALGUARD_CMD_ENV = "GLADOS_LOCALGUARD_CMD"
 _DEFAULT_LOCALGUARD_CMD = "localguard"
@@ -194,7 +194,7 @@ def _localguard_cmd() -> list[str]:
     if os.name != "nt":
         return shlex.split(raw)
     # On Windows, POSIX-mode shlex would eat the backslashes in a path like
-    # `E:\dev\localguard\...`. posix=False keeps them but leaves surrounding
+    # `<path>\localguard\...`. posix=False keeps them but leaves surrounding
     # quotes in each token, so strip a matching pair back off afterward.
     return [_strip_quotes(tok) for tok in shlex.split(raw, posix=False)]
 

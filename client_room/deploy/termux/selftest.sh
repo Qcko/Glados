@@ -1,4 +1,10 @@
 #!/data/data/com.termux/files/usr/bin/sh
+# ============================================================================
+#  PROTOTYPE — NOT READY FOR USE. Early, unverified-on-hardware diagnostic; the
+#  seed of a future GLaDOS device onboarding/medic tool that has NOT yet been
+#  designed or security-reviewed. For local development only — do not treat its
+#  results as an authoritative device-admission check, and don't rely on it.
+# ============================================================================
 # GLaDOS room-client phone self-test (Termux/Android).
 #
 # Runs the on-hardware checks that can't be done on the dev box and collects the
@@ -90,6 +96,9 @@ section() { printf '\n=== %s ===\n' "$1"; r ""; r "## $1"; }
 # ---- report header ---------------------------------------------------------
 r "# GLaDOS room-client phone self-test"
 r ""
+r "> **PROTOTYPE** — early, unverified diagnostic; not the blessed device-admission"
+r "> tool (that's not designed/reviewed yet). Results are for development only."
+r ""
 r "- generated: \`$STAMP\`"
 r "- host HOME: \`$HOME\`  PREFIX: \`$PREFIX\`"
 r "- GLADOS_ROOM_DIR: \`$GLADOS_ROOM_DIR\`  python: \`$GLADOS_ROOM_PYTHON\`"
@@ -101,6 +110,7 @@ r "> ⚠ Before sharing: this report embeds your \`\$HOME\` path and device mode
 r "> and the \`--client\` log could contain a token if the client logs one."
 r "> Skim \`client-run.log\` and redact anything sensitive first."
 
+printf '\n*** PROTOTYPE — development diagnostic, not a blessed device-admission tool ***\n'
 printf 'GLaDOS phone self-test → %s\n' "$OUTDIR"
 
 # ---- 1. environment --------------------------------------------------------
