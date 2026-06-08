@@ -628,6 +628,11 @@ Each version is its own session-sized chunk. Heavy work is deferred.
        `main` only after the panel + code duck pass. This branch+review gate is
        the "not shipped until designed and checked" mechanism (not gitignore,
        which would also drop the tool from the `git archive` phone bundle).
+  Whatever stage it reaches, the tool must honor the on-device-script design
+  constraints: ONE self-contained artifact, self-bootstrapping deps (probe +
+  install what's missing), sandbox-aware I/O (e.g. Termux shared storage so the
+  user can get files in and the report out), and a pre-flight prompt before any
+  human-in-the-loop step (don't act-then-ask).
 - **Lazy MCP child spawn + idle reap. LANDED.** `autostart=true` boots
   Chrome (Dunnes Selenium) on every GLaDOS start even for sessions that
   never shop. `lazy = true` in `servers.toml` (default false to preserve
