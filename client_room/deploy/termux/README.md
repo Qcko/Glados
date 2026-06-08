@@ -25,7 +25,7 @@ deploy/termux/
   glados-room.env.example          operator paths template → ~/.config/glados-room/env
   install.sh                       idempotent dependency installer (Termux)
   requirements-phone.txt           Python deps (numpy, websockets)
-  make-phone-bundle.sh             build the one-file .tar.gz (run on the dev box)
+  make-phone-bundle.sh / .ps1      build the one-file .tar.gz (dev box; sh or PowerShell)
   selftest.sh                      on-hardware diagnostic → report.md (see below)
 ```
 
@@ -58,10 +58,15 @@ duplicate source modules and exhaust the mic.
 Two ways to get `client_room/` onto the phone — pick one.
 
 **A. One-file bundle (no git on the phone).** On the dev box, build a tarball of
-the tracked client files (this never includes your gitignored config/tokens):
+the tracked client files (this never includes your gitignored config/tokens).
+It just wraps `git archive`, so no `sh` is needed:
 
 ```sh
-sh client_room/deploy/termux/make-phone-bundle.sh    # → dist/glados-phone-bundle.tar.gz
+sh client_room/deploy/termux/make-phone-bundle.sh        # Linux/macOS/git-bash
+pwsh client_room\deploy\termux\make-phone-bundle.ps1     # Windows PowerShell
+# …or the raw git command, anywhere git runs:
+git archive --format=tar.gz --prefix=glados/ HEAD client_room -o dist/glados-phone-bundle.tar.gz
+# → dist/glados-phone-bundle.tar.gz
 ```
 
 Copy that one file to the phone, then in Termux:

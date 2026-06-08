@@ -3,7 +3,8 @@
 # deploy scripts + self-test, to copy to the phone for all the local checks
 # (1-7), provisioning, and a real run.
 #
-# Run on the DEV BOX (needs git). Uses `git archive`, so the bundle contains only
+# Run on the DEV BOX (needs git). On Windows use make-phone-bundle.ps1 instead
+# (no `sh` required). Uses `git archive`, so the bundle contains only
 # TRACKED files — never your gitignored config.room.toml, tokens, or env file —
 # with the committed LF line endings and exec bits intact. It bundles COMMITTED
 # state: commit local changes first if you want them included.
