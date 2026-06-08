@@ -37,6 +37,11 @@ client_id = "bedroom-mic"
 client_id = "bedroom-speaker"
 # token_env = "GLADOS_BEDROOM_SPEAKER_TOKEN"
 # token_file = "<your-secrets-dir>/bedroom-speaker.token"
-# playback_backend = "sounddevice"  (PortAudio; pacat deferred to pmOS deploy)
+# Playback backend: "sounddevice" (PortAudio, default) or "pacat" (+ pacat_*,
+# PulseAudio playback for Termux/Android — the mirror of "parec" capture).
+# playback_backend = "sounddevice"
 # output_device = 2
 # prebuffer_ms = 120
+# pacat_sink = "bluez_output.XX_XX_XX_XX_XX_XX.1"
+# pacat_latency_msec = 80
+# pacat_args = []

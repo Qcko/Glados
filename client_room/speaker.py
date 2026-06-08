@@ -232,15 +232,27 @@ class SpeakerClient(ReconnectingClient):
 
 def _make_device_factory(cfg: dict) -> DeviceFactory:
     """Build the playback-device factory from config. `playback_backend` selects
-    the backend; only `sounddevice` (PortAudio) ships today (a `pacat` analog is
-    deferred to the on-device deploy slice)."""
+    between PortAudio (`sounddevice`, the dev-box default) and external `pacat`
+    (`pacat`, for Termux/Android phones with no PortAudio) — the mirror of the
+    mic's `capture_backend`."""
     backend = cfg.get("playback_backend", "sounddevice")
     if backend == "sounddevice":
         from .audio import SoundDeviceOutput
 
         device = cfg.get("output_device")
         return lambda rate: SoundDeviceOutput(rate, device=device)
-    raise SystemExit(f"unknown playback_backend {backend!r} (want 'sounddevice')")
+    if backend == "pacat":
+        from .audio import SubprocessOutput
+
+        sink = cfg.get("pacat_sink")
+        latency_msec = cfg.get("pacat_latency_msec", 80)
+        extra_args = cfg.get("pacat_args")
+        return lambda rate: SubprocessOutput(
+            rate, sink=sink, latency_msec=latency_msec, extra_args=extra_args
+        )
+    raise SystemExit(
+        f"unknown playback_backend {backend!r} (want 'sounddevice' or 'pacat')"
+    )
 
 
 def main(config_path: str = "client_room/config.toml") -> None:

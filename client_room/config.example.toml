@@ -49,14 +49,22 @@ room_id = "bedroom"
 # parec_args = []
 
 # --- Playback backend (speaker client only) -------------------------------
-# "sounddevice" (default): PortAudio. The output stream's sample rate follows
-# the server's TTS chunks (pinned to the first chunk, rebuilt on change), so it
-# is not configured here. A PulseAudio (pacat) backend is deferred to the
-# on-device deploy slice.
+# "sounddevice" (default): PortAudio. "pacat": external PulseAudio playback for
+# boxes without PortAudio (e.g. Termux/Android) — the mirror of "parec" capture.
+# The output stream's sample rate follows the server's TTS chunks (pinned to the
+# first chunk, rebuilt on change), so it is not configured here.
 # playback_backend = "sounddevice"
 
 # sounddevice only: optional PortAudio output device index (omit for default).
 # output_device = 2
+
+# pacat only. `pacat_sink` is the PulseAudio sink name (omit for the default
+# sink). `pacat_latency_msec` bounds pacat's own buffering — keep it small so a
+# barge-in flush leaves only a short already-pushed tail. `pacat_args` is an argv
+# ARRAY of extra pacat flags — never a split string (keeps it injection-free).
+# pacat_sink = "bluez_output.XX_XX_XX_XX_XX_XX.1"
+# pacat_latency_msec = 80
+# pacat_args = []
 
 # Speaker jitter buffer: prebuffer this many ms before draining, to ride out
 # network jitter without underrun clicks (trade-off: more = laggier barge-in).

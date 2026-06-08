@@ -11,6 +11,7 @@ import queue
 import struct
 import subprocess
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -23,6 +24,7 @@ from client_room.audio import (
     NullOutputDevice,
     Resampler,
     SubprocessInput,
+    SubprocessOutput,
 )
 from client_room.mic import MicClient, load_token
 from client_room.room import RoomSupervisor
@@ -355,6 +357,206 @@ def test_subprocess_input_double_stop_is_noop() -> None:
     dev.start(lambda _b: None)
     dev.stop()
     dev.stop()  # proc already cleared → no error
+
+
+# ---- SubprocessOutput (pacat) ------------------------------------------
+
+
+class _FakeStdin:
+    """pacat stdin stand-in: records writes. `die=True` makes `write` raise
+    BrokenPipeError, as a real pipe would once pacat has exited."""
+
+    def __init__(self, *, die: bool = False) -> None:
+        self._die = die
+        self.writes: queue.Queue = queue.Queue()
+
+    def write(self, data: bytes) -> None:
+        if self._die:
+            raise BrokenPipeError("pacat gone")
+        self.writes.put(bytes(data))
+
+    def flush(self) -> None:
+        pass
+
+
+class _FakeOutProc:
+    """subprocess.Popen stand-in for pacat. `hang=True` makes the first `wait`
+    time out so stop() must escalate to kill()."""
+
+    def __init__(self, stdin: _FakeStdin, *, hang: bool = False) -> None:
+        self.stdin = stdin
+        self._hang = hang
+        self.terminated = False
+        self.killed = False
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, timeout=None) -> int:
+        if self._hang and not self.killed:
+            raise subprocess.TimeoutExpired(cmd="pacat", timeout=timeout)
+        return 0
+
+
+def test_subprocess_output_argv_is_list_no_shell() -> None:
+    dev = SubprocessOutput(
+        22_050, sink="mysink", latency_msec=40, extra_args=["--client-name=glados"]
+    )
+    argv = dev._argv()
+    assert argv[0] == "pacat"
+    assert "--format=s16le" in argv and "--channels=1" in argv
+    assert "--rate=22050" in argv and "--raw" in argv
+    assert "--latency-msec=40" in argv
+    assert argv[argv.index("-d") + 1] == "mysink"
+    assert "--client-name=glados" in argv
+    assert all(isinstance(a, str) for a in argv), "argv must be a list of strings"
+
+
+def test_subprocess_output_writes_buffer_pcm_to_stdin() -> None:
+    """The writer thread must drain the JitterBuffer to pacat's stdin; with no
+    prebuffer the first read returns the real audio, so the first write is it."""
+    stdin = _FakeStdin()
+    buffer = JitterBuffer(prebuffer_bytes=0)
+    pcm = struct.pack("<4h", 1000, -2000, 3000, -4000)  # 4 frames, distinctive
+    buffer.write(pcm)
+    dev = SubprocessOutput(
+        2,  # 2 Hz → chunk_ms=20 rounds to a 1-frame chunk; pcm spans 4 chunks
+        chunk_ms=20.0,
+        popen=lambda *a, **k: _FakeOutProc(stdin),
+        sleep=lambda _d: None,
+    )
+    closed = threading.Event()
+    dev.start(buffer, on_close=closed.set)
+    first = stdin.writes.get(timeout=2.0)
+    assert first == pcm[:2], "first write must be the buffer's real audio, not silence"
+    dev.stop()
+    assert closed.wait(2.0), "stop must surface on_close (gen-filtered upstream)"
+
+
+def test_subprocess_output_self_paces_one_chunk_per_chunk_duration() -> None:
+    """Locks the must-fix: the writer is self-clocked (one chunk per chunk_s of
+    wall time), so it can't flood pacat's stdin pipe with silence ahead of real
+    audio. A fake clock advanced only by sleeping proves each iteration waits
+    exactly one chunk_s."""
+    clock = [0.0]
+    sleeps: queue.Queue = queue.Queue()
+
+    def fake_monotonic() -> float:
+        return clock[0]
+
+    def fake_sleep(d: float) -> None:
+        clock[0] += d  # sleeping is the only thing that advances the clock
+        sleeps.put(d)
+
+    stdin = _FakeStdin()
+    dev = SubprocessOutput(
+        100,
+        chunk_ms=20.0,  # 2-frame chunk → chunk_s = 0.02
+        popen=lambda *a, **k: _FakeOutProc(stdin),
+        sleep=fake_sleep,
+        monotonic=fake_monotonic,
+    )
+    dev.start(JitterBuffer(prebuffer_bytes=0), on_close=None)
+    observed = [sleeps.get(timeout=2.0) for _ in range(5)]
+    dev.stop()
+    assert all(abs(d - 0.02) < 1e-9 for d in observed), observed
+
+
+def test_subprocess_output_resync_prevents_burst_when_write_blocks() -> None:
+    """When pacat's stdin write blocks longer than chunk_s (the steady state once
+    its sink is draining), `delay` goes negative and the loop resyncs `next_write`
+    to now instead of accumulating a schedule it would later burst to catch up.
+    A write that advances the clock by > chunk_s must therefore drive the loop
+    (no sleeps), and never produce a negative/skipped-ahead sleep."""
+    clock = [0.0]
+    sleeps: queue.Queue = queue.Queue()
+    writes: queue.Queue = queue.Queue()
+
+    class _SlowStdin:
+        def write(self, data: bytes) -> None:
+            clock[0] += 0.05  # blocking write costs 0.05 s > chunk_s (0.02)
+            writes.put(bytes(data))
+
+        def flush(self) -> None:
+            pass
+
+    dev = SubprocessOutput(
+        100,
+        chunk_ms=20.0,  # chunk_s = 0.02
+        popen=lambda *a, **k: _FakeOutProc(_SlowStdin()),
+        sleep=lambda d: sleeps.put(d),
+        monotonic=lambda: clock[0],
+    )
+    dev.start(JitterBuffer(prebuffer_bytes=0), on_close=None)
+    for _ in range(5):  # let several iterations run
+        writes.get(timeout=2.0)
+    dev.stop()
+    assert sleeps.empty(), "a write slower than chunk_s must resync, never sleep"
+
+
+def test_subprocess_output_broken_pipe_surfaces_on_close() -> None:
+    """pacat death (write raises BrokenPipeError) must invoke on_close — the
+    session's only signal that playback ended."""
+    closed = threading.Event()
+    stdin = _FakeStdin(die=True)
+    dev = SubprocessOutput(
+        22_050,
+        popen=lambda *a, **k: _FakeOutProc(stdin),
+        sleep=lambda _d: None,
+    )
+    dev.start(JitterBuffer(prebuffer_bytes=0), on_close=closed.set)
+    assert closed.wait(2.0), "a broken pipe must invoke on_close"
+
+
+def test_subprocess_output_stop_escalates_to_kill() -> None:
+    stdin = _FakeStdin()
+    proc = _FakeOutProc(stdin, hang=True)
+    dev = SubprocessOutput(
+        22_050,
+        popen=lambda *a, **k: proc,
+        stop_timeout_s=0.2,
+        sleep=lambda _d: None,
+    )
+    dev.start(JitterBuffer(prebuffer_bytes=0))
+    dev.stop()
+    assert proc.terminated and proc.killed, "a hung terminate must escalate to kill"
+
+
+def test_subprocess_output_double_stop_is_noop() -> None:
+    stdin = _FakeStdin()
+    proc = _FakeOutProc(stdin)
+    dev = SubprocessOutput(
+        22_050,
+        popen=lambda *a, **k: proc,
+        stop_timeout_s=0.5,
+        sleep=lambda _d: None,
+    )
+    dev.start(JitterBuffer(prebuffer_bytes=0))
+    dev.stop()
+    dev.stop()  # proc already cleared → no error
+
+
+def test_subprocess_output_stop_halts_writer() -> None:
+    """stop() must actually end the writer loop (via `_stop_evt`), not just tear
+    down the process. With a stdin that never raises, the loop's stop-event guard
+    is the only thing that ends it; a regression that dropped it would keep
+    writing after stop() returns."""
+    stdin = _FakeStdin()
+    dev = SubprocessOutput(
+        22_050,
+        popen=lambda *a, **k: _FakeOutProc(stdin),
+        sleep=lambda _d: None,
+        stop_timeout_s=0.5,
+    )
+    dev.start(JitterBuffer(prebuffer_bytes=0))
+    stdin.writes.get(timeout=2.0)  # ensure the loop is running
+    dev.stop()  # joins the writer; once it returns the thread must be gone
+    drained = stdin.writes.qsize()
+    time.sleep(0.05)
+    assert stdin.writes.qsize() == drained, "writer kept running after stop()"
 
 
 # ---- load_token precedence ---------------------------------------------

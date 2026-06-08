@@ -496,9 +496,14 @@ Each version is its own session-sized chunk. Heavy work is deferred.
     hello, terminal-error set, and token loading were extracted to `_client.py`
     and shared with the mic so the security-relevant bits can't drift.
     Dev-box-tested; design-duck panel (architect/concurrency/protocol) ran
-    pre-build. A `pacat` output backend (PulseAudio-only boxes like
-    Termux/Android) is deferred to the phone deploy; the buffer-shaped seam fits
-    it without redesign.
+    pre-build. A second backend `SubprocessOutput` (external `pacat`/PulseAudio,
+    for PulseAudio-only boxes like Termux/Android) now also ships behind the same
+    seam — the mirror of `SubprocessInput`. Because `pacat` is *push* (reads PCM
+    from stdin) where PortAudio is *pull*, its writer thread is **self-clocked**
+    (one chunk per chunk-duration of wall time) rather than leaning on stdin
+    backpressure alone: an unpaced writer would flood pacat's ~64 KB stdin pipe
+    with underrun-silence that then plays *ahead* of the first real audio. Select
+    with `playback_backend = "pacat"` (`pacat_sink`, `pacat_latency_msec`).
   - **Slice 3c — room supervisor + resilience. LANDED.** `client_room/room.py`
     (`python -m client_room.room`) runs a mic AND a speaker client in one
     process — the set-and-forget room device. A device running both roles needs
@@ -521,12 +526,13 @@ Each version is its own session-sized chunk. Heavy work is deferred.
     is already **confirmed on stock Android** via PulseAudio `module-sles-source`
     + `parec` (the main Termux app lacks `RECORD_AUDIO`, but the OpenSL ES source
     reaches the mic); boot setup is `pulseaudio --start --exit-idle-time=-1` then
-    `pactl load-module module-sles-source`. `SubprocessInput` (parec capture) is
-    already implemented and tested. Remaining: implement `SubprocessOutput`
-    (pacat) for speaker output — Termux has no PortAudio, so `SoundDeviceOutput`
-    can't drive the phone speaker, the same reason capture uses parec (the
-    `OutputDevice` seam is buffer-shaped to fit it without redesign); wrap the
-    room supervisor for Termux:Boot; and confirm BT-speaker output (rides the
+    `pactl load-module module-sles-source`. Both subprocess backends —
+    `SubprocessInput` (parec capture) and `SubprocessOutput` (pacat playback) —
+    are now implemented and tested; Termux has no PortAudio, so neither
+    `SoundDeviceInput` nor `SoundDeviceOutput` can drive the phone, which is why
+    capture uses parec and playback uses pacat. Remaining is on-hardware work:
+    wrap the room supervisor for Termux:Boot; confirm capture *and* pacat
+    playback on the Galaxy S20 FE; and confirm BT-speaker output (rides the
     host's BlueZ/PulseAudio sink, not the GLaDOS protocol). Then AEC (revisit a
     shared-clock duplex stream).
 

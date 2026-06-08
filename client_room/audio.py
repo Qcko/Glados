@@ -20,9 +20,10 @@ Output side (the speaker client), mirror-imaged:
   callback. Opposite contract to `BoundedAudioQueue`: it never drops mid-stream;
   on underrun it returns silence so playback degrades to a gap, never a stall.
 - `OutputDevice` — a tiny Protocol over a playback device that *pulls* PCM from
-  a `JitterBuffer`, with a `sounddevice` implementation and a `NullOutputDevice`
-  for tests. (A `parec`-analog `SubprocessOutput`/pacat is deferred to the
-  on-device deploy slice; the buffer-shaped seam fits it without redesign.)
+  a `JitterBuffer`, with a `sounddevice` implementation, a `SubprocessOutput`
+  (external `pacat`/PulseAudio playback for boxes without PortAudio, e.g.
+  Termux/Android — the mirror of `SubprocessInput`), and a `NullOutputDevice`
+  for tests.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ import logging
 import queue
 import subprocess
 import threading
+import time
 from typing import Callable, Optional, Protocol
 
 import numpy as np
@@ -564,3 +566,161 @@ class SoundDeviceOutput:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+
+
+class SubprocessOutput:
+    """Playback via an external `pacat` (PulseAudio) process, for boxes that have
+    PulseAudio but no PortAudio (Termux/Android) — the mirror of `SubprocessInput`.
+
+    Where PortAudio is *pull*-clocked (its callback asks for exactly the frames
+    the hardware just consumed), `pacat` is *push*: it reads raw PCM16-LE mono
+    from stdin and plays it. So a daemon writer thread pulls fixed chunks from the
+    `JitterBuffer` and writes them to stdin.
+
+    Pacing: the writer is **self-clocked** to one chunk per chunk-duration of wall
+    time. We do NOT lean on pacat's stdin backpressure as the sole clock: before
+    pacat's sink starts draining, its stdin pipe (a ~64 KB OS buffer) accepts data
+    without blocking, and because `JitterBuffer.read` zero-pads instantly on
+    underrun, an unpaced writer would flood that pipe with silence that then plays
+    *ahead* of the first real audio — inflating latency by the pipe size, not by
+    `--latency-msec`. A monotonic-clock pace caps how far ahead we can run to one
+    chunk plus pacat's own (small) buffer, independent of the pipe size. pacat
+    backpressure then only matters as a secondary bound if our clock drifts fast.
+
+    On underrun the buffer returns silence, which we write at real-time rate
+    (correct: a gap, never a stall — same contract as `SoundDeviceOutput`).
+
+    Reliability: on writer-thread exit (pacat died → `BrokenPipeError`/EOF, or an
+    intentional `stop`) `on_close` fires from the `finally`, exactly like
+    `SubprocessInput`. Intentional-stop vs. real death is disambiguated upstream by
+    `SpeakerClient`'s device-generation token (same as `SoundDeviceOutput`'s
+    `finished_callback`), so the device always fires `on_close` on exit.
+
+    Barge-in tail: a `flush()` clears the `JitterBuffer`, but pacat + its sink
+    still hold ~`--latency-msec` of already-pushed audio that cannot be recalled —
+    the push analog of `SoundDeviceOutput`'s PortAudio hardware tail. Keep
+    `--latency-msec` small so barge-in stays snappy."""
+
+    def __init__(
+        self,
+        samplerate: int,
+        *,
+        sink: str | None = None,
+        latency_msec: int = 80,
+        chunk_ms: float = 20.0,
+        extra_args: list[str] | None = None,
+        stop_timeout_s: float = 2.0,
+        popen: Callable[..., subprocess.Popen] = subprocess.Popen,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.samplerate = samplerate
+        self._sink = sink
+        self._latency_msec = latency_msec
+        # One chunk of stereo-less PCM16-LE; rounded to a whole frame so a write
+        # never splits a sample.
+        chunk_frames = max(1, int(samplerate * chunk_ms / 1000.0))
+        self._chunk_bytes = chunk_frames * _PCM_DTYPE.itemsize
+        self._chunk_s = chunk_frames / samplerate
+        # An argv LIST passed to Popen with shell=False — no shell, no string
+        # splitting, so a sink name or extra arg can't inject a command.
+        self._extra_args = list(extra_args or [])
+        self._stop_timeout_s = stop_timeout_s
+        self._popen = popen
+        self._sleep = sleep
+        self._monotonic = monotonic
+        self._proc: subprocess.Popen | None = None
+        self._writer: threading.Thread | None = None
+        self._stop_evt = threading.Event()
+
+    def _argv(self) -> list[str]:
+        argv = [
+            "pacat",
+            "--format=s16le",
+            "--channels=1",
+            f"--rate={self.samplerate}",
+            "--raw",
+            f"--latency-msec={self._latency_msec}",
+        ]
+        if self._sink:
+            argv += ["-d", self._sink]
+        argv += self._extra_args
+        return argv
+
+    def start(
+        self,
+        buffer: JitterBuffer,
+        on_close: Optional[CloseCallback] = None,
+    ) -> None:
+        self._stop_evt.clear()
+        # stderr → DEVNULL so a chatty pacat can't fill an unread pipe and block.
+        self._proc = self._popen(
+            self._argv(),
+            stdin=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self._writer = threading.Thread(
+            target=self._write_loop,
+            args=(self._proc.stdin, buffer, on_close),
+            name="pacat-writer",
+            daemon=True,
+        )
+        self._writer.start()
+
+    def _write_loop(
+        self,
+        stdin,
+        buffer: JitterBuffer,
+        on_close: Optional[CloseCallback],
+    ) -> None:
+        # Self-clocked: write one chunk, then sleep so the next write lands one
+        # chunk-duration later. `next_write` accumulates the schedule; if we ever
+        # fall behind (sleep would be negative), resync to now rather than burst.
+        next_write = self._monotonic()
+        try:
+            while not self._stop_evt.is_set():
+                data = buffer.read(self._chunk_bytes)
+                # BrokenPipe/ValueError (write on a closed handle) means pacat is
+                # gone or stop() closed us — a normal exit, not a crash.
+                stdin.write(data)
+                stdin.flush()
+                next_write += self._chunk_s
+                delay = next_write - self._monotonic()
+                if delay > 0:
+                    self._sleep(delay)
+                else:
+                    next_write = self._monotonic()
+        except (BrokenPipeError, ValueError, OSError):
+            pass
+        finally:
+            # Sole error channel: tell the caller playback ended so it can end the
+            # session and reconnect rather than feed a dead sink forever.
+            if on_close is not None:
+                on_close()
+
+    def stop(self) -> None:
+        # Idempotent: a second stop (or stop after pacat already died) is a no-op.
+        proc = self._proc
+        if proc is None:
+            return
+        self._proc = None
+        # Signal the writer to leave its loop, then terminate pacat. We do NOT
+        # close stdin ourselves — a concurrent close + the writer's in-flight
+        # write on the same handle is the one real race; terminate() makes pacat
+        # exit, which breaks the pipe and unblocks any write instead.
+        self._stop_evt.set()
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()
+        try:
+            proc.wait(timeout=self._stop_timeout_s)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=self._stop_timeout_s)
+        writer = self._writer
+        self._writer = None
+        if writer is not None:
+            # Abandon (it's a daemon) rather than block teardown if a write is
+            # still wedged after kill — never hang the caller.
+            writer.join(timeout=self._stop_timeout_s)
