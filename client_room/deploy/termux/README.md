@@ -23,6 +23,9 @@ deploy/termux/
     glados-room/run                supervise the room client; gate on pulse, load mic source
     glados-room/log/run            svlogd logger for the client
   glados-room.env.example          operator paths template → ~/.config/glados-room/env
+  install.sh                       idempotent dependency installer (Termux)
+  requirements-phone.txt           Python deps (numpy, websockets)
+  make-phone-bundle.sh             build the one-file .tar.gz (run on the dev box)
   selftest.sh                      on-hardware diagnostic → report.md (see below)
 ```
 
@@ -52,14 +55,36 @@ duplicate source modules and exhaust the mic.
 
 ## Install the client
 
+Two ways to get `client_room/` onto the phone — pick one.
+
+**A. One-file bundle (no git on the phone).** On the dev box, build a tarball of
+the tracked client files (this never includes your gitignored config/tokens):
+
 ```sh
-# Clone (or copy) the repo so $GLADOS_ROOM_DIR/client_room/ exists.
-git clone <your-glados-remote> ~/glados
-cd ~/glados
-# Install the client's deps however you prefer (system python + pip, or a venv).
-# The client is pure portable Python and never imports the server package.
-pip install numpy websockets keyring   # plus whatever client_room imports
+sh client_room/deploy/termux/make-phone-bundle.sh    # → dist/glados-phone-bundle.tar.gz
 ```
+
+Copy that one file to the phone, then in Termux:
+
+```sh
+tar xzf glados-phone-bundle.tar.gz -C $HOME          # → ~/glados/
+sh ~/glados/client_room/deploy/termux/install.sh     # installs all deps (idempotent)
+```
+
+**B. Clone the repo** (if the phone has git/network to your remote):
+
+```sh
+git clone <your-glados-remote> ~/glados
+sh ~/glados/client_room/deploy/termux/install.sh
+```
+
+`install.sh` probes each dependency and installs only what's missing
+(`python pulseaudio termux-services termux-api`, plus `numpy` from the prebuilt
+**`python-numpy`** package — never pip-compiled — and `websockets` via pip). It's
+idempotent, so re-running it is safe. The client is pure portable Python and
+never imports the server package; `keyring` is optional (token loading falls back
+to an env var / mode-600 file). If you'd rather install by hand, the deps are in
+`requirements-phone.txt`.
 
 Provide the room config and tokens:
 

@@ -1,0 +1,12 @@
+# Python deps for the GLaDOS room client on the phone (Termux):
+#   pip install -r client_room/deploy/termux/requirements-phone.txt
+#
+# numpy is needed even for the self-test's import check — client_room.audio uses
+# it at module load. websockets is needed to actually connect to the server.
+numpy
+websockets
+
+# keyring is OPTIONAL: token loading falls back to an env var or a mode-600 file
+# without it (and keyring needs a backend, which is awkward on headless Termux).
+# Uncomment only if you store tokens in the system keyring.
+# keyring

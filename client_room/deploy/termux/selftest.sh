@@ -39,7 +39,18 @@ done
 : "${PREFIX:=/data/data/com.termux/files/usr}"
 ENV_FILE="$HOME/.config/glados-room/env"
 [ -r "$ENV_FILE" ] && . "$ENV_FILE"
-: "${GLADOS_ROOM_DIR:=$HOME/glados}"
+# Infer the client dir from this script's own location (…/client_room/deploy/
+# termux/selftest.sh → three levels up = the dir CONTAINING client_room), so an
+# extracted phone bundle runs wherever it lands; fall back to ~/glados.
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+INFERRED_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." 2>/dev/null && pwd || echo "")
+if [ -z "${GLADOS_ROOM_DIR:-}" ]; then
+  if [ -n "$INFERRED_DIR" ] && [ -d "$INFERRED_DIR/client_room" ]; then
+    GLADOS_ROOM_DIR="$INFERRED_DIR"
+  else
+    GLADOS_ROOM_DIR="$HOME/glados"
+  fi
+fi
 : "${GLADOS_ROOM_PYTHON:=python}"
 
 # ---- output bundle ---------------------------------------------------------
@@ -120,7 +131,7 @@ done
 rfile "tools" "$OUTDIR/tools.txt"
 
 if [ -n "$MISSING" ]; then
-  fail "required tools present (missing:$MISSING — pkg install python pulseaudio termux-services termux-api)"
+  fail "required tools present (missing:$MISSING — run install.sh to fix)"
 else
   pass "required tools present (python/pulseaudio/pactl/parec/pacat)"
 fi

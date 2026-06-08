@@ -11,3 +11,5 @@ client_room/deploy/termux/service/glados-pulse/log/run text eol=lf
 client_room/deploy/termux/service/glados-room/run      text eol=lf
 client_room/deploy/termux/service/glados-room/log/run  text eol=lf
 client_room/deploy/termux/selftest.sh                  text eol=lf
+client_room/deploy/termux/make-phone-bundle.sh         text eol=lf
+client_room/deploy/termux/install.sh                   text eol=lf

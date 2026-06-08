@@ -13,3 +13,4 @@ client_web/dist/
 client_room/config.toml
 client_room/config.room.toml
 client_room/deploy/termux/glados-room.env
+dist/
