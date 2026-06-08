@@ -395,12 +395,31 @@ class JitterBuffer:
     clean. `max_bytes` is a safety cap that drops the oldest audio if a dead/slow
     consumer lets the ring grow without bound.
 
-    The lock is held only for memmoves and index math — never across base64
-    decode, allocation of the incoming chunk, or I/O (callers decode before
-    `write`). So the real-time callback can never stall waiting on it."""
+    Storage is a single growing `bytearray` with a `_head` cursor: `read`
+    advances `_head` instead of `del self._buf[:take]`, so a read costs only the
+    O(take) copy of the bytes it returns — never an O(backlog) memmove of the
+    samples left behind (which the previous `del`-slice paid on every callback).
+    The consumed prefix is reclaimed lazily by `_compact` once it has grown past
+    both a small floor and the live backlog, which keeps the backing array within
+    ~2x the live data while reads keep flowing and makes the reclaim amortized
+    O(1) per consumed byte. Under a fully stalled consumer (no reads at all) the
+    backing array instead ceilings at ~`max_bytes + one write` — `max_bytes` caps
+    the *live* backlog, and the drop path's own compaction trips once the consumed
+    prefix overtakes it — so `len(_buf)` is bounded either way.
+
+    The lock is held only for index math and the (rare, bounded) compaction
+    memmove — never across base64 decode, allocation of the incoming chunk, or
+    I/O (callers decode before `write`). So the real-time callback can never
+    stall waiting on it."""
+
+    # Don't bother reclaiming a consumed prefix smaller than this — for a steady
+    # ~50 ms backlog the prefix rarely reaches it, so compaction stays off the
+    # hot path; below it the memmove would cost more than the wasted bytes.
+    _COMPACT_FLOOR_BYTES = 4096
 
     def __init__(self, *, prebuffer_bytes: int = 0, max_bytes: int = 1 << 20) -> None:
         self._buf = bytearray()
+        self._head = 0  # bytes already consumed at the front of `_buf`
         self._lock = threading.Lock()
         self._prebuffer_bytes = prebuffer_bytes
         self._max_bytes = max_bytes
@@ -410,15 +429,32 @@ class JitterBuffer:
         self.underrun_bytes = 0
         self.dropped_bytes = 0
 
+    def _available(self) -> int:
+        """Live (unconsumed) bytes. Caller must hold the lock."""
+        return len(self._buf) - self._head
+
+    def _compact(self) -> None:
+        """Reclaim the consumed prefix once it has outgrown both the floor and
+        the live backlog. The `_head >= available` gate bounds the backing array
+        to ~2x the live data and makes the reclaim amortized O(1) per consumed
+        byte (we move at most `available` bytes only after consuming `_head >=
+        available`). Caller must hold the lock."""
+        if self._head >= self._COMPACT_FLOOR_BYTES and self._head >= self._available():
+            del self._buf[: self._head]
+            self._head = 0
+
     def write(self, pcm: bytes) -> None:
         with self._lock:
             self._buf += pcm
-            if len(self._buf) >= self._prebuffer_bytes:
+            if self._available() >= self._prebuffer_bytes:
                 self._armed = True
-            if len(self._buf) > self._max_bytes:
-                overflow = len(self._buf) - self._max_bytes
-                del self._buf[:overflow]
+            if self._available() > self._max_bytes:
+                # Drop oldest by advancing the head, not by slicing — the same
+                # cursor move a read makes. Reclaimed later by `_compact`.
+                overflow = self._available() - self._max_bytes
+                self._head += overflow
                 self.dropped_bytes += overflow
+                self._compact()
 
     def read(self, n: int) -> bytes:
         """Return exactly `n` bytes for the playback callback, zero-padding on
@@ -428,12 +464,11 @@ class JitterBuffer:
             if not self._armed:
                 self.underrun_bytes += n
                 return b"\x00" * n
-            take = n if n <= len(self._buf) else len(self._buf)
-            out = bytes(self._buf[:take])
-            # O(remaining) memmove. Fine while the backlog stays near one chunk
-            # (~50 ms); a head-index ring or chunk deque would bound it if a
-            # sustained backlog up to max_bytes ever proves costly on-device.
-            del self._buf[:take]
+            available = self._available()
+            take = n if n <= available else available
+            out = bytes(self._buf[self._head : self._head + take])
+            self._head += take
+            self._compact()
             if take < n:
                 self.underrun_bytes += n - take
                 out += b"\x00" * (n - take)
@@ -445,6 +480,7 @@ class JitterBuffer:
         immediate underrun on its first chunk."""
         with self._lock:
             self._buf.clear()
+            self._head = 0
             self._armed = self._prebuffer_bytes <= 0
 
 

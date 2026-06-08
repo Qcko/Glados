@@ -664,6 +664,57 @@ def test_jitter_buffer_caps_memory_dropping_oldest() -> None:
     assert jb.read(4) == b"5678"
 
 
+def test_jitter_buffer_head_cursor_preserves_stream_and_compacts() -> None:
+    """The head-cursor read must hand back the exact byte stream in order across
+    many interleaved writes/reads, and lazy compaction must keep the backing
+    array far below total throughput (proving the consumed prefix is reclaimed,
+    not retained — the whole point of the refactor)."""
+    jb = JitterBuffer(prebuffer_bytes=0, max_bytes=1 << 30)  # huge cap → no drops
+    src = bytes((i * 7) % 256 for i in range(20_000))  # >> the 4096 compact floor
+    out = bytearray()
+    pos = 0
+    max_backing = 0
+    while pos < len(src) or jb._available() > 0:
+        if pos < len(src):
+            jb.write(src[pos : pos + 100])
+            pos += 100
+        avail = jb._available()
+        if avail:
+            out += jb.read(min(73, avail))  # read size ≠ write size → crosses chunks
+        max_backing = max(max_backing, len(jb._buf))
+    assert bytes(out) == src, "head-cursor reads must preserve the byte stream in order"
+    assert max_backing < 10_000, (
+        f"compaction must reclaim the consumed prefix (backing peaked at "
+        f"{max_backing}, would be ~{len(src)} if never compacted)"
+    )
+
+
+def test_jitter_buffer_drop_oldest_after_partial_read() -> None:
+    """Overflow drop advances the head; it must measure the live backlog from the
+    cursor, not the buffer start, so a partially-consumed prefix isn't counted as
+    droppable audio."""
+    jb = JitterBuffer(prebuffer_bytes=0, max_bytes=4)
+    jb.write(b"AB")
+    assert jb.read(1) == b"A"  # head now past 'A'; 'B' is the live backlog
+    jb.write(b"CDEF")  # live = B,C,D,E,F = 5 > cap 4 → drop oldest 1 ('B')
+    assert jb.dropped_bytes == 1
+    assert jb.read(4) == b"CDEF", "the consumed 'A' must not be re-read or mis-dropped"
+
+
+def test_jitter_buffer_flush_resets_nonzero_head() -> None:
+    """Barge-in path: flush must clear the buffer AND zero a non-trivial `_head`
+    cursor, so the next reply refills from a clean slate (no stale consumed-prefix
+    bytes leaking into the rearmed buffer)."""
+    jb = JitterBuffer(prebuffer_bytes=0, max_bytes=1 << 30)
+    jb.write(bytes(2000))
+    jb.read(1500)  # head now well past zero, backing non-trivial
+    assert jb._head > 0
+    jb.flush()
+    assert jb._head == 0 and jb._available() == 0
+    jb.write(b"NEXT")
+    assert jb.read(4) == b"NEXT", "post-flush reads start clean from the new audio"
+
+
 def test_null_output_device_pulls_from_buffer() -> None:
     jb = JitterBuffer(prebuffer_bytes=0)
     jb.write(np.array([1, 2, 3], dtype="<i2").tobytes())
