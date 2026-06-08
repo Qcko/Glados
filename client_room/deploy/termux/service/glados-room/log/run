@@ -1,0 +1,9 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# runit logger for glados-room: svlogd writes timestamped, rotated logs. `mkdir
+# -p` because runit will NOT create the directory; an absent logdir means the
+# client's output (including tracebacks merged via 2>&1 in run) vanishes — the
+# worst failure mode on a headless phone.
+: "${HOME:=/data/data/com.termux/files/home}"   # fall back under runsv's minimal env
+LOGDIR="$HOME/.local/var/log/glados-room"
+mkdir -p "$LOGDIR"
+exec svlogd -tt "$LOGDIR"

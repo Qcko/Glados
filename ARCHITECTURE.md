@@ -520,8 +520,14 @@ Each version is its own session-sized chunk. Heavy work is deferred.
     (degraded, not dark). Exits only on a signal or once both roles have exited.
     Reboot / both-dead survival is delegated to an OS supervisor — on the
     Android/Termux target that's Termux:Boot + termux-services (Android has no
-    systemd/init to run a unit), a phone-deploy concern. Design-duck panel
-    (architect/concurrency) ran pre-build.
+    systemd/init to run a unit), authored in `client_room/deploy/termux/`
+    (a foreground-supervised PulseAudio runit service running pulse's stock config
+    + a room-client runit service that gates on pulse readiness, loads
+    `module-sles-source` idempotently with a grep guard, and throttles its respawn
+    + a minimal Termux:Boot script that holds a wake-lock and starts the runit
+    tree). Scripts are dev-box-authored;
+    on-hardware verification is pending. Design-duck panel (architect/concurrency)
+    ran pre-build for the supervisor; a design duck reviewed the deploy lifecycle.
   - **Next:** phone deploy on the Galaxy S20 FE (Android + Termux). Mic capture
     is already **confirmed on stock Android** via PulseAudio `module-sles-source`
     + `parec` (the main Termux app lacks `RECORD_AUDIO`, but the OpenSL ES source
@@ -530,11 +536,12 @@ Each version is its own session-sized chunk. Heavy work is deferred.
     `SubprocessInput` (parec capture) and `SubprocessOutput` (pacat playback) —
     are now implemented and tested; Termux has no PortAudio, so neither
     `SoundDeviceInput` nor `SoundDeviceOutput` can drive the phone, which is why
-    capture uses parec and playback uses pacat. Remaining is on-hardware work:
-    wrap the room supervisor for Termux:Boot; confirm capture *and* pacat
-    playback on the Galaxy S20 FE; and confirm BT-speaker output (rides the
-    host's BlueZ/PulseAudio sink, not the GLaDOS protocol). Then AEC (revisit a
-    shared-clock duplex stream).
+    capture uses parec and playback uses pacat. The Termux:Boot + termux-services
+    wrapper is authored (`client_room/deploy/termux/`). Remaining is on-hardware
+    work: provision + verify that wrapper on the phone; confirm capture *and*
+    pacat playback on the Galaxy S20 FE against a live PulseAudio server; and
+    confirm BT-speaker output (rides the host's BlueZ/PulseAudio sink, not the
+    GLaDOS protocol). Then AEC (revisit a shared-clock duplex stream).
 
 - **v4 — wake word + dedup.** openWakeWord on Pi clients; same-utterance
   arbitration server-side.

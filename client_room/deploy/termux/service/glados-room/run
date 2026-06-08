@@ -1,0 +1,56 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# runit service: supervise the GLaDOS room client (mic + speaker in one process,
+# `python -m client_room.room`). runit restarts this whenever the process exits —
+# the Android replacement for a systemd `Restart=on-failure` unit, since Android
+# has no systemd/init.
+#
+# In-process resilience (per-client reconnect, clean SIGTERM shutdown, keep one
+# role alive on the other's terminal error) already lives in RoomSupervisor. This
+# script only does what runit-not-the-process must: throttle the respawn, ensure
+# the mic source is loaded, wait for PulseAudio, and exec the client with logs
+# captured.
+
+# runsv may exec `run` with a minimal environment; fall back to the fixed Termux
+# home so $HOME-derived paths resolve either way (must match glados-pulse so both
+# services see the same pulse runtime dir / socket).
+: "${HOME:=/data/data/com.termux/files/home}"
+export HOME
+
+# Crash-loop floor: a bad token / missing config makes the client exit fast;
+# without this, runit respawns at multiple Hz and drains the battery. The Python
+# side's backoff only covers reconnects *within* a live process — once the
+# process exits, this floor is the only throttle.
+sleep 1
+
+# Machine-specific paths are never committed. Sourced from the operator's env
+# file if present (see glados-room.env.example); otherwise Termux defaults.
+ENV_FILE="$HOME/.config/glados-room/env"
+[ -r "$ENV_FILE" ] && . "$ENV_FILE"
+: "${GLADOS_ROOM_DIR:=$HOME/glados}"
+: "${GLADOS_ROOM_PYTHON:=python}"
+
+# Gate on PulseAudio's daemon socket being up: glados-pulse is a sibling service
+# and may still be coming up on a cold boot. Cap the wait (~15s) then proceed
+# anyway so a genuinely-down pulse surfaces in the logs rather than hanging here.
+i=0
+until pactl info >/dev/null 2>&1; do
+  i=$((i + 1))
+  [ "$i" -ge 30 ] && break
+  sleep 0.5
+done
+
+# Ensure the Android OpenSL ES mic source is loaded, idempotently: the grep guard
+# means a client restart (or this loop running again) never stacks a duplicate
+# source module. `|| true` so a load failure doesn't kill `run` — the client will
+# then fail to find the source and reconnect, surfacing the problem in the logs
+# instead of a silent respawn. (Output sinks — e.g. a paired bluez_output.* — are
+# the operator's to provide via pacat_sink; not loaded here.)
+pactl list short sources 2>/dev/null | grep -q sles \
+  || pactl load-module module-sles-source >/dev/null 2>&1 \
+  || true
+
+cd "$GLADOS_ROOM_DIR" || exit 1
+# The client reads client_room/config.room.toml relative to the working dir
+# (the `python -m client_room.room` default). 2>&1 merges Python tracebacks into
+# stdout so svlogd (log/run) captures them — nothing should die silently here.
+exec "$GLADOS_ROOM_PYTHON" -m client_room.room 2>&1

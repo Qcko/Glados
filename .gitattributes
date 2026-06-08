@@ -1,3 +1,12 @@
 # The pre-commit hook is run through sh; CRLF would break its `#!` shebang on
 # Windows checkouts. Force LF regardless of core.autocrlf.
 .githooks/pre-commit text eol=lf
+
+# Termux/Android deploy scripts are exec'd by runit/Termux:Boot through sh; a
+# CRLF in the `#!` shebang breaks them on the phone. Force LF regardless of the
+# host's core.autocrlf (the `run`/`log/run` files have no extension).
+client_room/deploy/termux/boot/start-glados-room.sh    text eol=lf
+client_room/deploy/termux/service/glados-pulse/run     text eol=lf
+client_room/deploy/termux/service/glados-pulse/log/run text eol=lf
+client_room/deploy/termux/service/glados-room/run      text eol=lf
+client_room/deploy/termux/service/glados-room/log/run  text eol=lf

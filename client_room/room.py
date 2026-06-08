@@ -17,8 +17,10 @@ Resilience is layered:
     fully dark. It exits only on a signal or once both roles have exited.
 
 For a device that must also survive reboots or a both-roles-dead state, run this
-under an OS supervisor (e.g. a systemd unit with `Restart=on-failure`); that is
-the pmOS-deploy concern, separate from this in-process supervision.
+under an OS supervisor. On the Android/Termux target that's Termux:Boot +
+termux-services (runit) — Android has no systemd/init — wired up in
+`client_room/deploy/termux/` (the runit `Restart=on-failure` analog). That is a
+phone-deploy concern, separate from this in-process supervision.
 
 The single-role entry points (`python -m client_room.mic` / `.speaker`) remain
 for devices that only capture or only play.

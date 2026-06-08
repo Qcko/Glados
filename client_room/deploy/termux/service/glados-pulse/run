@@ -1,0 +1,30 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# runit service: supervise PulseAudio in the FOREGROUND.
+#
+# The room client's parec (capture) and pacat (playback) backends connect to a
+# running PulseAudio server; this service is that server. It must run in the
+# foreground (no --daemonize): runit supervises *this* process, so a pulse that
+# forked and exited would make runit respawn forever.
+#
+# We deliberately run pulse with its STOCK shipped config (no `-n`/`--file`), the
+# same config the confirmed `pulseaudio --start` mic-capture setup used — that
+# avoids depending on a stock `default.pa` existing at a fixed path (some Termux
+# pulse builds compile their config in, so an `.include` of a missing file would
+# abort startup and crash-loop). The Android mic source `module-sles-source` is
+# NOT loaded here; the room service loads it idempotently once the daemon is up
+# (a grep-guarded `load-module`, so it can never stack duplicates).
+
+# runsv may exec `run` with a minimal environment; fall back to the fixed Termux
+# home so $HOME-derived paths (pulse runtime dir, logs) resolve either way.
+: "${HOME:=/data/data/com.termux/files/home}"
+export HOME
+
+# Crash-loop floor: if pulse dies instantly (bad config), bound the respawn rate
+# so a headless phone doesn't pin a CPU core. runit re-execs `run` the moment it
+# exits; this is the standard runit throttle.
+sleep 1
+
+exec pulseaudio \
+  --exit-idle-time=-1 \
+  --disallow-exit \
+  --daemonize=no
