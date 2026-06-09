@@ -14,3 +14,4 @@ client_room/deploy/termux/selftest.sh                  text eol=lf
 client_room/deploy/termux/make-phone-bundle.sh         text eol=lf
 client_room/deploy/termux/install.sh                   text eol=lf
 client_room/deploy/termux/provision.sh                 text eol=lf
+client_room/deploy/termux/run.sh                        text eol=lf

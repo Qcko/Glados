@@ -24,6 +24,6 @@ git -C "$ROOT" archive --format=tar.gz --prefix=glados/ HEAD client_room > "$OUT
 echo "wrote $OUT ($(wc -c < "$OUT" | tr -d ' ') bytes)"
 echo
 echo "Copy it to the phone, then in Termux:"
-echo "  tar xzf $(basename "$OUT") -C \$HOME       # → ~/glados/"
-echo "  sh ~/glados/client_room/deploy/termux/install.sh    # installs all deps"
-echo "  sh ~/glados/client_room/deploy/termux/selftest.sh   # run the checks"
+echo "  termux-setup-storage                                  # once, if not done"
+echo "  tar xzf ~/storage/downloads/$(basename "$OUT") -C \$HOME"
+echo "  sh ~/glados/client_room/deploy/termux/run.sh         # installs + tests + cleans up"
