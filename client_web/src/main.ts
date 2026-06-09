@@ -21,10 +21,14 @@ app.innerHTML = `
     <span id="status" class="status">disconnected</span>
     <span id="latency" class="latency" title="time from last send to first server frame"></span>
     <div class="right">
-      <input id="clientId" size="10" title="client_id" />
-      <input id="roomId" size="6" title="room_id" />
-      <input id="token" size="14" title="token" />
-      <button id="connectBtn">connect</button>
+      <input id="clientId" size="10" placeholder="client_id" aria-label="client_id"
+             title="your client id, e.g. desk-ui" autocomplete="off" />
+      <input id="roomId" size="6" placeholder="room_id" aria-label="room_id"
+             title="the room this client joins, e.g. desk" autocomplete="off" />
+      <input id="token" size="14" type="password" placeholder="token" aria-label="token"
+             title="the client's auth token (validated against the server keyring)"
+             autocomplete="off" />
+      <button id="connectBtn" title="connect with the identity on the left">connect</button>
     </div>
   </header>
   <main id="log"></main>
