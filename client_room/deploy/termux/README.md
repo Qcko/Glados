@@ -24,6 +24,7 @@ deploy/termux/
     glados-room/log/run            svlogd logger for the client
   glados-room.env.example          operator paths template → ~/.config/glados-room/env
   install.sh                       idempotent dependency installer (Termux)
+  provision.sh                     symlink services + boot script into place (idempotent)
   requirements-phone.txt           Python deps (numpy, websockets)
   make-phone-bundle.sh / .ps1      build the one-file .tar.gz (dev box; sh or PowerShell)
   selftest.sh                      on-hardware diagnostic → report.md (see below)
@@ -48,7 +49,15 @@ duplicate source modules and exhaust the mic.
    its app has been launched at least once.
 3. Exempt Termux from battery optimization: Android Settings → Apps → Termux →
    Battery → **Unrestricted**. Otherwise Android kills the runit tree under doze.
-4. Packages:
+4. **Set up shared storage** so you can move the bundle in and pull the self-test
+   report out via Android's file picker (Termux's private `$HOME` is invisible to
+   it):
+   ```sh
+   termux-setup-storage      # grant the permission prompt; creates ~/storage/*
+   ```
+   With this done, `selftest.sh` publishes its report to `~/storage/downloads`
+   (Android **Downloads**), and you can drop the install bundle there too.
+5. Packages: handled by `install.sh` below, or by hand —
    ```sh
    pkg install python pulseaudio termux-services termux-api
    ```
@@ -69,18 +78,22 @@ git archive --format=tar.gz --prefix=glados/ HEAD client_room -o dist/glados-pho
 # → dist/glados-phone-bundle.tar.gz
 ```
 
-Copy that one file to the phone, then in Termux:
+Copy that one file to the phone's **Downloads** (so the file picker / `cp` can
+reach it), then in Termux — `cd` into the deploy dir once so every later command
+is short:
 
 ```sh
-tar xzf glados-phone-bundle.tar.gz -C $HOME          # → ~/glados/
-sh ~/glados/client_room/deploy/termux/install.sh     # installs all deps (idempotent)
+tar xzf ~/storage/downloads/glados-phone-bundle.tar.gz -C $HOME   # → ~/glados/
+cd ~/glados/client_room/deploy/termux
+sh install.sh        # installs all deps (idempotent)
 ```
 
 **B. Clone the repo** (if the phone has git/network to your remote):
 
 ```sh
 git clone <your-glados-remote> ~/glados
-sh ~/glados/client_room/deploy/termux/install.sh
+cd ~/glados/client_room/deploy/termux
+sh install.sh
 ```
 
 `install.sh` probes each dependency and installs only what's missing
@@ -120,28 +133,23 @@ file is fine if that matches your layout.
 
 ## Provision the services + boot script
 
-The runit service directory is `$PREFIX/var/service`. Symlink the two services
-in (symlink, so a `git pull` updates them), make every script executable, and
-provision the Termux:Boot script:
+`provision.sh` makes every script executable and symlinks the two services into
+the runit service dir (`$PREFIX/var/service`) and the boot script into
+`~/.termux/boot` — symlinks, so a `git pull` / re-extracted bundle is picked up.
+It's idempotent. From the deploy dir:
 
 ```sh
-PREFIX=/data/data/com.termux/files/usr
-D=~/glados/client_room/deploy/termux
-
-chmod +x "$D"/service/*/run "$D"/service/*/log/run "$D"/boot/start-glados-room.sh
-
-ln -sf "$D/service/glados-pulse" "$PREFIX/var/service/glados-pulse"
-ln -sf "$D/service/glados-room"  "$PREFIX/var/service/glados-room"
-
-mkdir -p ~/.termux/boot
-ln -sf "$D/boot/start-glados-room.sh" ~/.termux/boot/start-glados-room.sh
+sh provision.sh            # provision only
+sh provision.sh --enable   # also sv-enable both services (start now + on boot)
 ```
 
 > Termux:Boot executes `~/.termux/boot/*` directly, so that file must be
 > executable and carry the `#!/data/data/com.termux/files/usr/bin/sh` shebang
-> (both already true in the repo copy).
+> — `provision.sh` handles both.
 
 ## Enable and start
+
+If you didn't pass `--enable` above, bring the services up by hand:
 
 ```sh
 sv-enable glados-pulse     # auto-start on boot + bring up now
@@ -156,7 +164,7 @@ you don't have to reboot to test.
 ```sh
 sv status glados-pulse glados-room          # both should read "run"
 pactl info                                  # pulse reachable
-pactl list short sources | grep sles        # the mic source loaded
+pactl list short sources | grep module-sles-source   # the mic source loaded
 tail -f ~/.local/var/log/glados-room/current # client logs (svlogd)
 ```
 
@@ -173,17 +181,22 @@ tone, the Python client importing, and the runit service status. It is
 read-mostly — it starts pulse / loads the mic source only if they aren't already
 up (and reports what it changed), and never touches your config or services.
 
+From the deploy dir (`cd ~/glados/client_room/deploy/termux`):
+
 ```sh
-sh client_room/deploy/termux/selftest.sh            # interactive (mic + tone checks)
-sh client_room/deploy/termux/selftest.sh --client   # also run the client ~12s
-sh client_room/deploy/termux/selftest.sh --non-interactive   # no prompts (headless)
+sh selftest.sh            # interactive (mic + tone checks)
+sh selftest.sh --client   # also run the client ~12s
+sh selftest.sh --non-interactive   # no prompts (headless)
 ```
 
-It prints a `N PASS · N FAIL · N WARN · N SKIP` tally and the path to
-`~/glados-selftest-<timestamp>/report.md` (plus a `.tar.gz` bundle with the raw
-captures, including the recorded mic audio). Run it interactively the first time
-so the mic ("make noise") and tone ("did you hear it?") checks can be confirmed.
-Upload `report.md`.
+It prints a `N PASS · N FAIL · N WARN · N SKIP` tally and **publishes two files to
+`~/storage/downloads`** (Android Downloads, if you ran `termux-setup-storage` —
+otherwise `$HOME`): `glados-report-<stamp>.md` (the human-readable report) and
+`glados-selftest-<stamp>.tar.gz` (the raw captures, incl. the recorded mic audio).
+The scratch build dir is removed afterward, so each run leaves exactly those two
+files. Run it interactively the first time: it **prompts you to get ready before**
+recording the mic and before playing the tone, and lets you retry just that check
+if you miss the cue. Upload the report.
 
 ## Control
 
@@ -219,7 +232,7 @@ CPU being free to sleep during a client crash-loop's restart gaps.
   a bad stock config or a runtime-dir permission issue. Try `pulseaudio
   --daemonize=no --exit-idle-time=-1` by hand to see the error; the `sleep 1`
   floor keeps the respawn from pinning a core meanwhile.
-- **No mic.** `pactl list short sources` shows no `sles` source → the room
+- **No mic.** `pactl list short sources` shows no `module-sles-source` → the room
   service's `load-module module-sles-source` failed; run it by hand to see why
   (e.g. the OpenSL ES module isn't available on this build).
 - **`pactl` in the service can't reach pulse** (different socket than the

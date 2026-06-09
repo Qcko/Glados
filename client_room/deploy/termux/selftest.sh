@@ -60,12 +60,29 @@ fi
 : "${GLADOS_ROOM_PYTHON:=python}"
 
 # ---- output bundle ---------------------------------------------------------
+# Build into an app-private scratch dir (always writable, fast), then PUBLISH the
+# two deliverables (report + raw-capture tarball) to Android shared storage so the
+# system file picker / Downloads can see them — Termux's app-private $HOME is
+# invisible to the picker. The scratch dir is removed at the end (clean up after
+# ourselves): everything in it is captured by the published report + tarball.
 STAMP=$(date +%Y%m%d-%H%M%S)
-OUTDIR="$HOME/glados-selftest-$STAMP"
-mkdir -p "$OUTDIR"
+[ -n "$STAMP" ] || { echo "date failed — cannot stamp the run" >&2; exit 1; }
+WORKDIR="$HOME/.cache/glados-selftest-$STAMP"
+mkdir -p "$WORKDIR"
+OUTDIR="$WORKDIR"
 REPORT="$OUTDIR/report.md"
 SUMMARY="$OUTDIR/.summary"   # tab-separated STATUS\tname, assembled into report
 : > "$SUMMARY"
+
+# ~/storage/downloads exists only after `termux-setup-storage`; fall back to $HOME
+# so the run still completes (the report just lands somewhere less reachable).
+if [ -d "$HOME/storage/downloads" ] && [ -w "$HOME/storage/downloads" ]; then
+  DEST="$HOME/storage/downloads"
+  DEST_DESC="Android Downloads (~/storage/downloads)"
+else
+  DEST="$HOME"
+  DEST_DESC="\$HOME — run 'termux-setup-storage' to publish reports to Downloads instead"
+fi
 
 RATE=48000
 
@@ -197,7 +214,7 @@ section "Mic source (module-sles-source)"
 SRC=""
 LOADED_MODULE=0
 if pactl info >/dev/null 2>&1; then
-  if pactl list short sources 2>/dev/null | grep -q sles; then
+  if pactl list short sources 2>/dev/null | grep -q module-sles-source; then
     pass "module-sles-source already loaded"
   else
     printf '... loading module-sles-source (grep-guarded, as the deploy does)\n'
@@ -211,7 +228,10 @@ if pactl info >/dev/null 2>&1; then
   fi
   pactl list short sources > "$OUTDIR/sources.txt" 2>&1
   rfile "sources" "$OUTDIR/sources.txt"
-  SRC=$(awk '/sles/ {print $2; exit}' "$OUTDIR/sources.txt")
+  # Match the mic source by its module (column 3), not a loose "sles" substring:
+  # the output sink's monitor (`module-sles-sink.c`) also contains "sles" and would
+  # otherwise be picked, capturing silence from an idle sink instead of the mic.
+  SRC=$(awk '$3 ~ /module-sles-source/ {print $2; exit}' "$OUTDIR/sources.txt")
   [ -n "$SRC" ] && r "" && r "_Using source: \`$SRC\`_"
 else
   skip "mic-source checks (no PulseAudio)"
@@ -220,16 +240,21 @@ fi
 # ---- 4. mic capture (objective level check) --------------------------------
 section "Mic capture (parec)"
 if [ -n "$SRC" ] && have parec; then
-  if [ "$INTERACTIVE" = 1 ]; then
-    printf '\n>>> Make some NOISE near the phone for 5 seconds (speak, clap)...\n'
-    sleep 1
-  fi
   SRC_ARG=""
   [ -n "$SRC" ] && SRC_ARG="-d $SRC"
-  # shellcheck disable=SC2086
-  timeout 5 parec --format=s16le --rate=$RATE --channels=1 $SRC_ARG --raw \
-    > "$OUTDIR/mic.raw" 2>"$OUTDIR/mic.err"
-  if "$GLADOS_ROOM_PYTHON" - "$OUTDIR/mic.raw" >"$OUTDIR/mic-level.txt" 2>&1 <<'PY'
+  mic_ok=0
+  # Re-runnable: a missed cue (didn't make noise in time) can retry just this
+  # check without re-running the whole suite.
+  while :; do
+    if [ "$INTERACTIVE" = 1 ]; then
+      printf '\n>>> MIC TEST — about to record 5s from %s.\n' "$SRC"
+      printf '>>> Get ready to make NOISE (speak/clap), then press Enter... '
+      read -r _ || true
+    fi
+    # shellcheck disable=SC2086
+    timeout 5 parec --format=s16le --rate=$RATE --channels=1 $SRC_ARG --raw \
+      > "$OUTDIR/mic.raw" 2>"$OUTDIR/mic.err"
+    "$GLADOS_ROOM_PYTHON" - "$OUTDIR/mic.raw" >"$OUTDIR/mic-level.txt" 2>&1 <<'PY'
 import sys, math, array
 data = open(sys.argv[1], "rb").read()
 n = len(data) // 2
@@ -245,7 +270,15 @@ print(f"samples={len(a)}  peak={peak} ({dbfs(peak):.1f} dBFS)  rms={rms:.1f} ({d
 # real peak.
 sys.exit(0 if dbfs(rms) > -55.0 and dbfs(peak) > -45.0 else 1)
 PY
-  then
+    [ $? -eq 0 ] && mic_ok=1 || mic_ok=0
+    printf '    %s\n' "$(cat "$OUTDIR/mic-level.txt")"
+    # Only offer a retry when interactive AND it looked silent.
+    [ "$INTERACTIVE" = 1 ] && [ "$mic_ok" = 0 ] || break
+    printf '>>> mic read as silent/low. Retry this check? [y/N] '
+    ans=""; read -r ans || ans=""
+    case "$ans" in y|Y|yes) : ;; *) break ;; esac
+  done
+  if [ "$mic_ok" = 1 ]; then
     pass "mic captures non-silent audio ($(cat "$OUTDIR/mic-level.txt"))"
   else
     warn "mic capture silent/low ($(cat "$OUTDIR/mic-level.txt")) — check RECORD permission / source"
@@ -282,22 +315,36 @@ PY
       # otherwise the tone proves only the (often silent) default sink works.
       SINK_ARG=""
       [ -n "$BT" ] && SINK_ARG="-d $BT"
-      printf '... playing a 440 Hz test tone to %s\n' "${BT:-the default sink}"
       r "_Tone target sink: \`${BT:-<default>}\`_"
-      # shellcheck disable=SC2086
-      pacat --format=s16le --rate=$RATE --channels=1 $SINK_ARG --raw \
-        < "$OUTDIR/tone.raw" >"$OUTDIR/pacat.err" 2>&1
-      if [ "$INTERACTIVE" = 1 ]; then
-        printf '>>> Did you hear a beep? [y/N] '
+      tone_ok=skip
+      # Pre-flight the human cue: ready the speaker/volume BEFORE the tone plays,
+      # and allow a replay so a missed beep doesn't force a full re-run.
+      while :; do
+        if [ "$INTERACTIVE" = 1 ]; then
+          printf '\n>>> TONE TEST — turn the volume up and make sure the speaker'
+          printf ' (or paired BT) is connected.\n'
+          printf '>>> Press Enter to play a 440 Hz beep to %s... ' "${BT:-the default sink}"
+          read -r _ || true
+        fi
+        printf '... playing test tone\n'
+        # shellcheck disable=SC2086
+        pacat --format=s16le --rate=$RATE --channels=1 $SINK_ARG --raw \
+          < "$OUTDIR/tone.raw" >"$OUTDIR/pacat.err" 2>&1
+        [ "$INTERACTIVE" = 1 ] || break
+        printf '>>> Did you hear a beep? [y/N, or r to replay] '
         ans=""               # set -u + EOF on read would otherwise abort the run
         read -r ans || ans=""
         case "$ans" in
-          y|Y|yes) pass "pacat playback audible (operator confirmed)" ;;
-          *) fail "pacat playback NOT heard (operator) — check sink / volume / pacat_sink" ;;
+          y|Y|yes) tone_ok=1; break ;;
+          r|R|replay) continue ;;
+          *) tone_ok=0; break ;;
         esac
-      else
-        warn "tone played but not human-confirmed (--non-interactive) — re-run interactively to verify"
-      fi
+      done
+      case "$tone_ok" in
+        1) pass "pacat playback audible (operator confirmed)" ;;
+        0) fail "pacat playback NOT heard (operator) — check sink / volume / pacat_sink" ;;
+        *) warn "tone played but not human-confirmed (--non-interactive) — re-run interactively to verify" ;;
+      esac
       [ -s "$OUTDIR/pacat.err" ] && rfile "pacat stderr" "$OUTDIR/pacat.err"
     else
       skip "playback (pacat missing)"
@@ -388,12 +435,28 @@ r ""
 r "_State changed by this run: started PulseAudio=$STARTED_PULSE, loaded module-sles-source=$LOADED_MODULE._"
 rm -f "$SUMMARY"
 
-# ---- bundle + final instructions -------------------------------------------
-TARBALL="$OUTDIR.tar.gz"
-( cd "$(dirname "$OUTDIR")" && tar czf "$TARBALL" "$(basename "$OUTDIR")" ) 2>/dev/null
+# ---- publish deliverables + clean up ---------------------------------------
+# Two artifacts land in $DEST (Android Downloads when storage is set up): the
+# human-readable report and a tarball of the raw captures (mic.raw etc.) for
+# deeper debugging. Both names carry the timestamp so repeated runs don't clobber.
+REPORT_OUT="$DEST/glados-report-$STAMP.md"
+TARBALL="$DEST/glados-selftest-$STAMP.tar.gz"
+cp "$REPORT" "$REPORT_OUT" 2>/dev/null
+( cd "$(dirname "$WORKDIR")" && tar czf "$TARBALL" "$(basename "$WORKDIR")" ) 2>/dev/null
+
+# Clean up after ourselves — but ONLY once the report has actually been published,
+# so a failed copy/publish can never destroy the sole copy of the report. If the
+# publish failed, keep the scratch dir and say where it is.
+if [ -f "$REPORT_OUT" ]; then
+  rm -rf "$WORKDIR"
+else
+  printf 'WARN: could not publish report to %s — left it in %s\n' "$DEST" "$WORKDIR" >&2
+  REPORT_OUT="$REPORT"
+fi
 
 printf '\n========================================\n'
 printf '%s PASS · %s FAIL · %s WARN · %s SKIP\n' "$np" "$nf" "$nw" "$ns"
-printf 'Report:  %s\n' "$REPORT"
-[ -f "$TARBALL" ] && printf 'Bundle:  %s  (raw captures incl. mic.raw)\n' "$TARBALL"
-printf '\nUpload report.md back to the assistant. To read it now:\n  cat %s\n' "$REPORT"
+printf 'Written to: %s\n' "$DEST_DESC"
+[ -f "$REPORT_OUT" ] && printf 'Report:  %s\n' "$REPORT_OUT"
+[ -f "$TARBALL" ]    && printf 'Bundle:  %s  (raw captures incl. mic.raw)\n' "$TARBALL"
+printf '\nUpload the report back to the assistant. To read it now:\n  cat %s\n' "$REPORT_OUT"

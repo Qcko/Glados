@@ -41,11 +41,14 @@ done
 
 # Ensure the Android OpenSL ES mic source is loaded, idempotently: the grep guard
 # means a client restart (or this loop running again) never stacks a duplicate
-# source module. `|| true` so a load failure doesn't kill `run` — the client will
-# then fail to find the source and reconnect, surfacing the problem in the logs
-# instead of a silent respawn. (Output sinks — e.g. a paired bluez_output.* — are
-# the operator's to provide via pacat_sink; not loaded here.)
-pactl list short sources 2>/dev/null | grep -q sles \
+# source module. Match `module-sles-source` specifically, NOT a loose "sles"
+# substring — the stock output sink's monitor lists as `module-sles-sink.c`, which
+# contains "sles" and would make the guard think the mic source is already loaded
+# and skip it on every cold boot (a silent mic). `|| true` so a load failure
+# doesn't kill `run` — the client will then fail to find the source and reconnect,
+# surfacing the problem in the logs instead of a silent respawn. (Output sinks —
+# e.g. a paired bluez_output.* — are the operator's to provide via pacat_sink.)
+pactl list short sources 2>/dev/null | grep -q module-sles-source \
   || pactl load-module module-sles-source >/dev/null 2>&1 \
   || true
 
