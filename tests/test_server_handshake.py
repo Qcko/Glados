@@ -82,3 +82,21 @@ def test_bad_token_rejected(client: TestClient) -> None:
         err = ws.receive_json()
     assert err["type"] == "error"
     assert err["code"] == "auth_failed"
+
+
+def test_non_ascii_token_rejected_cleanly(client: TestClient) -> None:
+    # The constant-time check compares as bytes; a non-ASCII attacker token must
+    # reject (auth_failed), not raise from .encode()/compare_digest.
+    with client.websocket_connect("/ws/v1") as ws:
+        ws.send_json(
+            {
+                "type": "hello",
+                "client_id": "desk-ui",
+                "room_id": "desk",
+                "role": "ui",
+                "token": "wrøng-töken-日本語",
+            }
+        )
+        err = ws.receive_json()
+    assert err["type"] == "error"
+    assert err["code"] == "auth_failed"

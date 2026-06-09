@@ -13,6 +13,7 @@ imports the module-level `app = build_app()` default.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import os
 import sys
@@ -705,7 +706,13 @@ async def _handshake(
         await ws.close()
         return None
     expected = secrets.get("client-tokens", msg.client_id)
-    if expected is None or expected != msg.token:
+    # Constant-time compare so response timing can't leak how many leading token
+    # bytes matched — a classic per-byte timing attack that would let an attacker
+    # recover the token incrementally instead of searching the full keyspace.
+    # Compare as bytes: compare_digest rejects non-ASCII str, and msg.token is
+    # attacker-controlled. Rate-limiting failed handshakes is a separate, future
+    # hardening (see client_room/deploy/ROADMAP.md).
+    if expected is None or not hmac.compare_digest(expected.encode(), msg.token.encode()):
         await _send_error(ws, "auth_failed", "unknown client or bad token")
         await ws.close()
         return None

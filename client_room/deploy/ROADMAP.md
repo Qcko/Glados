@@ -91,3 +91,31 @@ TLS (wss://, no embedded creds)  →  pairing/enrollment protocol  →  config.s
   manually-minted tokens** (see termux/README.md). That manual config is the
   exact artifact the enroll step will later generate — writing it by hand first
   de-risks the schema.
+
+## Future: WS handshake rate-limiting / throttling (own design slice)
+
+The `/ws/v1` handshake (`server.py` `_handshake`) authenticates a per-client
+token. As of the TLS slice the token compare is **constant-time**
+(`hmac.compare_digest`), so response timing no longer leaks how many leading
+bytes matched. Combined with 256-bit (`secrets.token_urlsafe(32)`) tokens,
+online brute force is already infeasible by entropy alone.
+
+What is **not** yet handled, and wants a proper design pass before coding:
+
+- **Failed-handshake throttling / DoS.** Nothing caps how fast an unauthenticated
+  peer can open sockets and try hellos. With the server on `0.0.0.0` this is a
+  resource-exhaustion vector (many concurrent pending handshakes) more than a
+  brute-force one. Design the cheapest effective control — candidates: a cap on
+  concurrent un-authenticated connections + a handshake timeout (mostly
+  stateless), vs. per-source-IP failure counters with a lockout window (real
+  state, eviction policy, and a **new failure mode: locking out a misconfigured
+  but legitimate client** — note the room client already stops on terminal
+  handshake errors, so it won't self-hammer).
+- **Observability.** Repeated auth failures from one source should be logged /
+  surfaced (ties into the pairing/admin surface above) so an operator can see a
+  probe in progress.
+- **Interaction with pairing.** The future untrusted pre-pairing channel is an
+  even more exposed surface than the authenticated handshake — whatever throttle
+  shape we pick should cover both. Design them together.
+
+Crosses the trust boundary → design-duck (likely a panel) before implementing.
