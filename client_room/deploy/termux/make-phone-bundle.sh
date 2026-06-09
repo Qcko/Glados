@@ -1,7 +1,6 @@
 #!/usr/bin/env sh
-# Build the phone self-test bundle: ONE .tar.gz with the client_room package +
-# deploy scripts + self-test, to copy to the phone for all the local checks
-# (1-7), provisioning, and a real run.
+# Build the GLaDOS phone bundle: a self-extracting go.sh (and a raw .tar.gz
+# alongside it) with the client_room package + deploy scripts + self-test.
 #
 # Run on the DEV BOX (needs git). On Windows use make-phone-bundle.ps1 instead
 # (no `sh` required). Uses `git archive`, so the bundle contains only
@@ -10,20 +9,41 @@
 # state: commit local changes first if you want them included.
 #
 # Usage:
-#   sh client_room/deploy/termux/make-phone-bundle.sh [output.tar.gz]
+#   sh client_room/deploy/termux/make-phone-bundle.sh [out-dir]
 set -e
 
 ROOT=$(git rev-parse --show-toplevel)
-OUT=${1:-"$ROOT/dist/glados-phone-bundle.tar.gz"}
-mkdir -p "$(dirname "$OUT")"
+OUTDIR=${1:-"$ROOT/dist"}
+mkdir -p "$OUTDIR"
+TAR="$OUTDIR/glados-phone-bundle.tar.gz"
+GO="$OUTDIR/go.sh"
 
-# --prefix=glados/ so it extracts to ./glados/ (→ ~/glados when run in $HOME,
-# the GLADOS_ROOM_DIR default).
-git -C "$ROOT" archive --format=tar.gz --prefix=glados/ HEAD client_room > "$OUT"
+# --prefix=glados/ so it extracts to ./glados/ (→ ~/glados when run in $HOME).
+git -C "$ROOT" archive --format=tar.gz --prefix=glados/ HEAD client_room > "$TAR"
 
-echo "wrote $OUT ($(wc -c < "$OUT" | tr -d ' ') bytes)"
+# Build the self-extracting go.sh: LF-only header + raw tar appended.
+# tail -n +N skips the N-1 header lines then streams raw bytes (binary-safe).
+{
+  cat <<'HEADER'
+#!/data/data/com.termux/files/usr/bin/sh
+# GLaDOS phone bundle — self-extracting.
+# Copy this file to the phone, then in Termux (after termux-setup-storage):
+#   sh ~/storage/downloads/go.sh
+SKIP=$(awk '/^#__BUNDLE__$/{print NR+1; exit}' "$0")
+tail -n +$SKIP "$0" | tar xzf - -C "$HOME"
+sh "$HOME/glados/client_room/deploy/termux/run.sh"
+rm -f "$0"
+exit
+#__BUNDLE__
+HEADER
+  cat "$TAR"
+} > "$GO"
+
+TAR_BYTES=$(wc -c < "$TAR" | tr -d ' ')
+GO_BYTES=$(wc -c < "$GO" | tr -d ' ')
+echo "wrote $TAR ($TAR_BYTES bytes)"
+echo "wrote $GO ($GO_BYTES bytes)"
 echo
-echo "Copy it to the phone, then in Termux:"
-echo "  termux-setup-storage                                  # once, if not done"
-echo "  tar xzf ~/storage/downloads/$(basename "$OUT") -C \$HOME"
-echo "  sh ~/glados/client_room/deploy/termux/run.sh         # installs + tests + cleans up"
+echo "Copy go.sh to the phone, then in Termux:"
+echo "  termux-setup-storage                        # once, if not done"
+echo "  sh ~/storage/downloads/go.sh                # installs + tests + cleans up"

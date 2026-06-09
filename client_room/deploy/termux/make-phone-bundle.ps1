@@ -1,24 +1,50 @@
-# Build the phone self-test bundle (Windows / PowerShell). Mirror of
-# make-phone-bundle.sh — both just wrap `git archive`, so no `sh` is needed on
-# the dev box. Produces ONE .tar.gz with the client_room package + deploy scripts
-# + self-test, containing only TRACKED files (never your gitignored
-# config.room.toml / tokens / env), with the committed LF + exec bits intact.
+# Build the GLaDOS phone bundle (Windows / PowerShell). Mirror of
+# make-phone-bundle.sh — both wrap `git archive`, so no `sh` is needed on
+# the dev box. Produces a self-extracting go.sh (and a raw .tar.gz alongside
+# it) containing only TRACKED files (never your gitignored config.room.toml /
+# tokens / env), with the committed LF + exec bits intact.
 #
-#   pwsh client_room\deploy\termux\make-phone-bundle.ps1 [-Out path.tar.gz]
-param([string]$Out)
+#   powershell -File client_room\deploy\termux\make-phone-bundle.ps1 [-OutDir path]
+param([string]$OutDir)
 $ErrorActionPreference = 'Stop'
 
 $root = (git rev-parse --show-toplevel).Trim()
-if (-not $Out) { $Out = Join-Path $root 'dist\glados-phone-bundle.tar.gz' }
-New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null
+if (-not $OutDir) { $OutDir = Join-Path $root 'dist' }
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-# --prefix=glados/ so it extracts to ./glados/ (-> ~/glados when run in $HOME,
-# the GLADOS_ROOM_DIR default the self-test infers).
-git -C $root archive --format=tar.gz --prefix=glados/ HEAD client_room -o $Out
+$tar = Join-Path $OutDir 'glados-phone-bundle.tar.gz'
+$go  = Join-Path $OutDir 'go.sh'
 
-Write-Host "wrote $Out ($((Get-Item $Out).Length) bytes)"
+# --prefix=glados/ so it extracts to ./glados/ (-> ~/glados when run in $HOME).
+git -C $root archive --format=tar.gz --prefix=glados/ HEAD client_room -o $tar
+
+# Build the self-extracting go.sh: LF-only header bytes + raw tar appended.
+# tail -n +N skips the N-1 header lines then streams raw bytes (binary-safe).
+$header = "#!/data/data/com.termux/files/usr/bin/sh`n" +
+          "# GLaDOS phone bundle -- self-extracting.`n" +
+          "# Copy this file to the phone, then in Termux (after termux-setup-storage):`n" +
+          "#   sh ~/storage/downloads/go.sh`n" +
+          'SKIP=$(awk ''/^#__BUNDLE__$/{print NR+1; exit}'' "$0")' + "`n" +
+          'tail -n +$SKIP "$0" | tar xzf - -C "$HOME"' + "`n" +
+          'sh "$HOME/glados/client_room/deploy/termux/run.sh"' + "`n" +
+          'rm -f "$0"' + "`n" +
+          "exit`n" +
+          "#__BUNDLE__`n"
+
+$headerBytes = [System.Text.Encoding]::UTF8.GetBytes($header)
+$tarBytes    = [System.IO.File]::ReadAllBytes($tar)
+
+$stream = [System.IO.File]::Open($go, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+try {
+    $stream.Write($headerBytes, 0, $headerBytes.Length)
+    $stream.Write($tarBytes,    0, $tarBytes.Length)
+} finally {
+    $stream.Close()
+}
+
+Write-Host "wrote $tar ($((Get-Item $tar).Length) bytes)"
+Write-Host "wrote $go ($((Get-Item $go).Length) bytes)"
 Write-Host ""
-Write-Host "Copy it to the phone, then in Termux:"
-Write-Host "  termux-setup-storage                                  # once, if not done"
-Write-Host "  tar xzf ~/storage/downloads/$(Split-Path $Out -Leaf) -C `$HOME"
-Write-Host "  sh ~/glados/client_room/deploy/termux/run.sh         # installs + tests + cleans up"
+Write-Host "Copy go.sh to the phone, then in Termux:"
+Write-Host "  termux-setup-storage                        # once, if not done"
+Write-Host "  sh ~/storage/downloads/go.sh                # installs + tests + cleans up"

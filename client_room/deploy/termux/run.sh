@@ -1,9 +1,11 @@
 #!/data/data/com.termux/files/usr/bin/sh
-# Entry point for the GLaDOS phone bundle.
-# Runs install.sh then selftest.sh, then cleans up ~/glados/ and the bundle
-# tar from Downloads so nothing lingers on the phone.
+# Second stage of the GLaDOS phone bundle. Normally called by go.sh (the
+# self-extracting launcher), which handles extraction and its own cleanup.
+# Can also be run directly after a manual tar extraction.
 #
-# Usage (from Termux, after extracting the bundle into $HOME):
+# Runs install.sh then selftest.sh, then removes ~/glados/ so nothing lingers.
+#
+# Usage:
 #   sh ~/glados/client_room/deploy/termux/run.sh [selftest options...]
 #
 # Any flags are forwarded to selftest.sh (e.g. --non-interactive, --client).
