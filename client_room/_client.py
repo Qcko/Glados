@@ -23,6 +23,41 @@ from . import wire
 
 log = logging.getLogger("client_room.client")
 
+
+def _with_tls(connect, url: str, tls_ca: str | None):
+    """Wrap a websockets connect callable with a pinned-cert SSL context for
+    `wss://` URLs. The server is a self-hosted appliance with a self-signed cert
+    (scripts/gen-tls-cert.sh); the client PINS it via `tls_ca` — trusting only
+    that cert, not the public CA set. Plain `ws://` passes through unchanged so
+    test fakes and cleartext-LAN setups are unaffected."""
+    if not url.startswith("wss://"):
+        if tls_ca:
+            raise SystemExit(
+                f"tls_ca is set but server_url is not wss:// ({url}); "
+                f"use a wss:// URL or remove tls_ca."
+            )
+        return connect
+
+    import functools
+    import ssl
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # verifies + checks hostname
+    if tls_ca is None:
+        ctx.load_default_certs()  # wss:// against a public-CA server
+    else:
+        # Present-but-blank is a typo that would otherwise unpin silently
+        # (fall back to public CAs) — fail loudly instead.
+        if not tls_ca:
+            raise SystemExit(
+                "tls_ca is set to an empty string; give the server cert path "
+                "to pin, or remove tls_ca entirely for public-CA verification."
+            )
+        ca_path = Path(tls_ca).expanduser()
+        if not ca_path.is_file():
+            raise SystemExit(f"tls_ca file not found: {ca_path}")
+        ctx.load_verify_locations(cafile=str(ca_path))  # pin: trust only this
+    return functools.partial(connect, ssl=ctx)
+
 # Terminal handshake errors — the server closes the socket after sending one,
 # and retrying with the same credentials/binding would just loop. The server
 # handshake (`server.py` `_handshake`) is role-agnostic, so every role shares
@@ -47,6 +82,7 @@ class ReconnectingClient(abc.ABC):
         role: str,
         token: str,
         connect=None,
+        tls_ca: str | None = None,
         backoff_min_s: float = 0.5,
         backoff_max_s: float = 30.0,
     ) -> None:
@@ -59,7 +95,7 @@ class ReconnectingClient(abc.ABC):
             import websockets  # lazy: keeps the import cost off test paths
 
             connect = websockets.connect
-        self._connect = connect
+        self._connect = _with_tls(connect, self._url, tls_ca)
         self._backoff_min = backoff_min_s
         self._backoff_max = backoff_max_s
         self._stop = False

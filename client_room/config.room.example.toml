@@ -18,6 +18,13 @@
 server_url = "ws://127.0.0.1:8765"
 room_id = "bedroom"
 
+# TLS: when the server runs with a cert (scripts/gen-tls-cert.sh), use a wss://
+# URL and pin the server's self-signed cert here. tls_ca is the path to the
+# cert.pem copied from the server; the client then trusts ONLY that cert. Omit
+# both (ws:// + no tls_ca) for a cleartext-LAN setup.
+#   server_url = "wss://192.168.50.x:8765"
+# tls_ca = "<your-secrets-dir>/glados-server-cert.pem"
+
 [mic]
 client_id = "bedroom-mic"
 # Token precedence keyring → env → file (first present wins). Keys are PER-ROLE

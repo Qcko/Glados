@@ -29,6 +29,36 @@ from client_room.audio import (
 from client_room.mic import MicClient, load_token
 from client_room.room import RoomSupervisor
 from client_room.speaker import SpeakerClient
+from client_room._client import _with_tls
+
+
+# ---- TLS pinning (_with_tls) --------------------------------------------
+# The successful wss:// pin path (cert verifies, token authenticates) is
+# covered by manual integration against a live TLS server; these lock the
+# guard branches that must never silently fall back to cleartext.
+
+
+def test_with_tls_plain_ws_passes_connect_through() -> None:
+    sentinel = object()
+    assert _with_tls(sentinel, "ws://host:8765/ws/v1", None) is sentinel
+
+
+def test_with_tls_ca_on_plain_ws_is_an_error() -> None:
+    # tls_ca with a ws:// URL is a misconfig that would silently not encrypt.
+    with pytest.raises(SystemExit, match="not wss"):
+        _with_tls(object(), "ws://host:8765/ws/v1", "some-ca.pem")
+
+
+def test_with_tls_missing_ca_file_is_an_error(tmp_path) -> None:
+    missing = tmp_path / "nope.pem"
+    with pytest.raises(SystemExit, match="not found"):
+        _with_tls(object(), "wss://host:8765/ws/v1", str(missing))
+
+
+def test_with_tls_blank_ca_on_wss_is_an_error() -> None:
+    # Present-but-blank tls_ca must not silently unpin to public CAs.
+    with pytest.raises(SystemExit, match="empty string"):
+        _with_tls(object(), "wss://host:8765/ws/v1", "")
 
 
 # ---- wire ---------------------------------------------------------------

@@ -57,6 +57,7 @@ class SpeakerClient(ReconnectingClient):
         token: str,
         device_factory: DeviceFactory,
         connect=None,
+        tls_ca: str | None = None,
         prebuffer_ms: float = 120.0,
         max_buffer_s: float = 10.0,
         backoff_min_s: float = 0.5,
@@ -69,6 +70,7 @@ class SpeakerClient(ReconnectingClient):
             role="speaker",
             token=token,
             connect=connect,
+            tls_ca=tls_ca,
             backoff_min_s=backoff_min_s,
             backoff_max_s=backoff_max_s,
         )
@@ -273,6 +275,7 @@ def main(config_path: str = "client_room/config.toml") -> None:
         token=token,
         device_factory=_make_device_factory(cfg),
         prebuffer_ms=cfg.get("prebuffer_ms", 120.0),
+        tls_ca=cfg.get("tls_ca"),
     )
     try:
         asyncio.run(client.run())

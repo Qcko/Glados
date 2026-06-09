@@ -19,6 +19,10 @@ class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8765
     traces_dir: Path = Path("traces")
+    # TLS (wss:// / https://). Both empty = plain HTTP. Self-signed cert pinned
+    # by clients; generate with scripts/gen-tls-cert.sh. See deploy/ROADMAP.md.
+    tls_certfile: str = ""
+    tls_keyfile: str = ""
 
 
 class AuthConfig(BaseModel):
@@ -262,6 +266,10 @@ def _apply_env_overrides(cfg: GladosConfig) -> GladosConfig:
             raise ValueError(
                 f"GLADOS_PORT must be an integer, got {port_str!r}"
             ) from exc
+    if (cert := os.environ.get("GLADOS_TLS_CERT")) is not None:
+        server_updates["tls_certfile"] = cert
+    if (key := os.environ.get("GLADOS_TLS_KEY")) is not None:
+        server_updates["tls_keyfile"] = key
     if server_updates:
         cfg = cfg.model_copy(update={"server": cfg.server.model_copy(update=server_updates)})
 

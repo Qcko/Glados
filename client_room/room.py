@@ -78,6 +78,7 @@ class RoomSupervisor:
             env_var=spk_cfg.get("token_env"),
             token_file=spk_cfg.get("token_file"),
         )
+        tls_ca = cfg.get("tls_ca")
         mic = MicClient(
             server_url=server_url,
             client_id=mic_client_id,
@@ -85,6 +86,7 @@ class RoomSupervisor:
             token=mic_token,
             device=_make_device(mic_cfg),
             connect=connect,
+            tls_ca=tls_ca,
         )
         speaker = SpeakerClient(
             server_url=server_url,
@@ -94,6 +96,7 @@ class RoomSupervisor:
             device_factory=_make_device_factory(spk_cfg),
             prebuffer_ms=spk_cfg.get("prebuffer_ms", 120.0),
             connect=connect,
+            tls_ca=tls_ca,
         )
         return cls(mic, speaker)
 

@@ -8,6 +8,7 @@ traces/
 *.log
 .env.uv
 configs/servers.toml
+configs/tls/
 client_web/node_modules/
 client_web/dist/
 client_room/config.toml

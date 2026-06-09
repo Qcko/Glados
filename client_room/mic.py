@@ -43,6 +43,7 @@ class MicClient(ReconnectingClient):
         token: str,
         device: InputDevice,
         connect=None,
+        tls_ca: str | None = None,
         queue_max: int = 64,
         backoff_min_s: float = 0.5,
         backoff_max_s: float = 30.0,
@@ -54,6 +55,7 @@ class MicClient(ReconnectingClient):
             role="mic",
             token=token,
             connect=connect,
+            tls_ca=tls_ca,
             backoff_min_s=backoff_min_s,
             backoff_max_s=backoff_max_s,
         )
@@ -169,6 +171,7 @@ def main(config_path: str = "client_room/config.toml") -> None:
         room_id=cfg["room_id"],
         token=token,
         device=device,
+        tls_ca=cfg.get("tls_ca"),
     )
     try:
         asyncio.run(client.run())
