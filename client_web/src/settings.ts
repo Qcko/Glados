@@ -8,15 +8,16 @@ export interface Settings {
   token: string;
 }
 
-// Dev-fixture defaults. The server reads real tokens from the OS keyring
-// (scope `glados.client-tokens`, username = client id); for this default
-// to work, run `python -m glados.secrets set client-tokens desk-ui` on
-// the server and store the same value. Override here for any non-dev
-// deploy; never reuse the literal below in production.
+// No embedded credentials. The bundle is served unauthenticated, so a baked-in
+// client_id/token would ship working credentials to anyone who can load the page
+// (see deploy/ROADMAP.md and ARCHITECTURE.md §9). The operator types their
+// identity into the connect form; it persists to localStorage from there. The
+// server validates the token against the OS keyring (scope `glados.client-tokens`,
+// username = client id) at the WS handshake — that is the real trust boundary.
 const DEFAULTS: Settings = {
-  clientId: "desk-ui",
-  roomId: "desk",
-  token: "dev-token-desk",
+  clientId: "",
+  roomId: "",
+  token: "",
 };
 
 export function loadSettings(): Settings {
