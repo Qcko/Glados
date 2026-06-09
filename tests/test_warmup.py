@@ -68,7 +68,8 @@ def test_startup_event_schedules_warmup() -> None:
     app.state.stt = stt
     app.state.tts = tts
 
-    with TestClient(app) as client:
+    # /healthz is loopback-gated; present as a loopback caller.
+    with TestClient(app, client=("127.0.0.1", 12345)) as client:
         resp = client.get("/healthz")
         assert resp.status_code == 200
 

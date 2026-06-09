@@ -25,7 +25,9 @@ def client():
     from glados.core.server import build_app
 
     app = build_app()
-    with TestClient(app) as c:
+    # Present as a loopback caller: /admin/memory is gated to loopback-only
+    # now that GLADOS_HOST can expose the server on the LAN.
+    with TestClient(app, client=("127.0.0.1", 12345)) as c:
         yield c
 
 
@@ -54,6 +56,17 @@ def test_admin_memory_reports_blocks_metadata_only(client: TestClient) -> None:
     assert blocks[0]["sha256"] == "a" * 64
     assert blocks[0]["length"] == 3700
     assert "approve" in blocks[0]["reason"]
+
+
+def test_admin_memory_rejects_non_loopback() -> None:
+    os.environ["GLADOS_CONFIG_DIR"] = str(Path(__file__).parent.parent / "configs")
+    os.environ["GLADOS_LLM_BACKEND"] = "fake"
+    from glados.core.server import build_app
+
+    app = build_app()
+    with TestClient(app, client=("192.168.50.99", 5555)) as lan:
+        assert lan.get("/admin/memory").status_code == 403
+        assert lan.get("/healthz").status_code == 403
 
 
 def test_ui_client_gets_block_notice_on_connect(client: TestClient) -> None:

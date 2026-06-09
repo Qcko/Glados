@@ -19,7 +19,9 @@ def client():
     # Import after env vars are set so server picks up correct config.
     from glados.core.server import app
 
-    with TestClient(app) as c:
+    # /healthz is loopback-gated; present as a loopback caller (the WS
+    # handshake test below is unaffected by the peer address).
+    with TestClient(app, client=("127.0.0.1", 12345)) as c:
         yield c
 
 

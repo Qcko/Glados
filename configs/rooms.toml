@@ -9,3 +9,15 @@ client_id = "desk2-ui"
 room_id = "desk2"
 role = "ui"
 default_user = "qcko"
+
+[[clients]]
+client_id = "livingroom-mic"
+room_id = "livingroom"
+role = "mic"
+default_user = "qcko"
+
+[[clients]]
+client_id = "livingroom-speaker"
+room_id = "livingroom"
+role = "speaker"
+default_user = "qcko"

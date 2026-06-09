@@ -8,7 +8,7 @@ traces_dir = "traces"
 #   python -m glados.secrets set client-tokens desk-ui
 # This file only enumerates which client ids are allowed to connect.
 [auth]
-clients = ["desk-ui", "desk2-ui"]
+clients = ["desk-ui", "desk2-ui", "livingroom-mic", "livingroom-speaker"]
 
 [llm]
 # backend: "fake" (deterministic, used in tests) or "ollama"

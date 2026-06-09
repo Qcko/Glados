@@ -252,6 +252,19 @@ def load_glados_config(path: Path) -> GladosConfig:
 
 
 def _apply_env_overrides(cfg: GladosConfig) -> GladosConfig:
+    server_updates: dict = {}
+    if (host := os.environ.get("GLADOS_HOST")) is not None:
+        server_updates["host"] = host
+    if (port_str := os.environ.get("GLADOS_PORT")) is not None:
+        try:
+            server_updates["port"] = int(port_str)
+        except ValueError as exc:
+            raise ValueError(
+                f"GLADOS_PORT must be an integer, got {port_str!r}"
+            ) from exc
+    if server_updates:
+        cfg = cfg.model_copy(update={"server": cfg.server.model_copy(update=server_updates)})
+
     llm_updates: dict = {}
     backend = os.environ.get("GLADOS_LLM_BACKEND")
     if backend in ("fake", "ollama"):

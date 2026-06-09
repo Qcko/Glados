@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -565,6 +565,23 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     return app
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
+
+
+def _require_loopback(request: Request) -> None:
+    """Reject non-loopback callers with 403.
+
+    These operator routes leak inventory (the wired tool list, blocked
+    server-memory metadata). That was acceptable while the server bound to
+    127.0.0.1; once `GLADOS_HOST` exposes it on the LAN, the routes must stay
+    loopback-only. The web UI shell (`/`, `/assets`) is intentionally not
+    gated — it carries no inventory and clients fetch their data over the
+    token-authenticated WS, not these routes."""
+    peer = request.client.host if request.client else None
+    if peer not in _LOOPBACK_HOSTS:
+        raise HTTPException(status_code=403, detail="loopback only")
+
+
 def _register_routes(app: FastAPI) -> None:
     """Bind HTTP + WS routes to `app`. Each handler reads runtime state
     from `app.state` rather than module globals."""
@@ -577,6 +594,7 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.get("/healthz")
     async def healthz(request: Request) -> dict:
+        _require_loopback(request)
         s = request.app.state
         return {
             "ok": True,
@@ -587,10 +605,12 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/admin/memory")
     async def admin_memory(request: Request) -> dict:
         """Operator view of trusted-server memory that failed the LocalGuard
-        gate (ARCH §14). Metadata only — no untrusted blob bytes — so it is
-        safe to expose alongside /healthz. The review/approve step that would
-        accept a blocked blob is a separate, high-friction desktop action, not
-        anything this read-only endpoint can grant."""
+        gate (ARCH §14). Metadata only — no untrusted blob bytes. Loopback-only
+        (see _require_loopback): the metadata is operator inventory, not for
+        LAN clients. The review/approve step that would accept a blocked blob
+        is a separate, high-friction desktop action, not anything this
+        read-only endpoint can grant."""
+        _require_loopback(request)
         blocks = request.app.state.memory_blocks
         return {"blocks": [b.model_dump() for b in blocks]}
 
