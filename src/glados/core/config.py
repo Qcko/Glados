@@ -25,6 +25,29 @@ class ServerConfig(BaseModel):
     tls_keyfile: str = ""
 
 
+class HandshakeConfig(BaseModel):
+    """Admission control for the /ws/v1 handshake (DoS + probe hardening;
+    see client_room/deploy/DESIGN-ws-handshake-rate-limit.md).
+
+    All controls key on the transport peer address — no reverse proxy is
+    assumed in front of GLaDOS. Behind one, every client would share the
+    proxy's IP and the per-IP cap/lockout would misfire."""
+
+    # Max seconds an accepted socket may take to complete the handshake.
+    timeout_s: float = 10.0
+    # Concurrent handshakes still pending auth: across all peers / per peer.
+    max_pending: int = 8
+    max_pending_per_ip: int = 2
+    # Credential failures (unknown client id / bad token) within
+    # `fail_window_s` that lock the source IP out for `lockout_s`. The
+    # lockout self-expires and a successful handshake clears the counter.
+    fail_threshold: int = 5
+    fail_window_s: float = 60.0
+    lockout_s: float = 60.0
+    # Bound on the failure-tracking table (expired entries evict first).
+    max_tracked_ips: int = 1024
+
+
 class AuthConfig(BaseModel):
     # Client ids allowed to connect. Tokens themselves live in the OS
     # keyring under service `glados.client-tokens` (see core/secrets.py).
@@ -160,6 +183,7 @@ class TTSConfig(BaseModel):
 
 class GladosConfig(BaseModel):
     server: ServerConfig = ServerConfig()
+    handshake: HandshakeConfig = HandshakeConfig()
     auth: AuthConfig = AuthConfig()
     llm: LLMConfig = LLMConfig()
     router: RouterConfig = RouterConfig()
@@ -272,6 +296,28 @@ def _apply_env_overrides(cfg: GladosConfig) -> GladosConfig:
         server_updates["tls_keyfile"] = key
     if server_updates:
         cfg = cfg.model_copy(update={"server": cfg.server.model_copy(update=server_updates)})
+
+    handshake_updates: dict = {}
+    for env_name, field_name, parse in (
+        ("GLADOS_HANDSHAKE_TIMEOUT_S", "timeout_s", float),
+        ("GLADOS_HANDSHAKE_MAX_PENDING", "max_pending", int),
+        ("GLADOS_HANDSHAKE_MAX_PENDING_PER_IP", "max_pending_per_ip", int),
+        ("GLADOS_HANDSHAKE_FAIL_THRESHOLD", "fail_threshold", int),
+        ("GLADOS_HANDSHAKE_FAIL_WINDOW_S", "fail_window_s", float),
+        ("GLADOS_HANDSHAKE_LOCKOUT_S", "lockout_s", float),
+        ("GLADOS_HANDSHAKE_MAX_TRACKED_IPS", "max_tracked_ips", int),
+    ):
+        if (raw := os.environ.get(env_name)) is not None:
+            try:
+                handshake_updates[field_name] = parse(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{env_name} must be a {parse.__name__}, got {raw!r}"
+                ) from exc
+    if handshake_updates:
+        cfg = cfg.model_copy(
+            update={"handshake": cfg.handshake.model_copy(update=handshake_updates)}
+        )
 
     llm_updates: dict = {}
     backend = os.environ.get("GLADOS_LLM_BACKEND")

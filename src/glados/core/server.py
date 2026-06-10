@@ -52,6 +52,7 @@ from .config import (
     load_rooms_config,
     load_servers_config,
 )
+from .handshake_gate import HandshakeGate, Verdict
 from .logging_setup import setup_logging
 from . import memory_gate
 from .ollama_lifecycle import OllamaLifecycle
@@ -561,6 +562,9 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     # Secrets store: defaults to the real OS keyring. Tests inject
     # InMemorySecrets via `app.state.secrets = ...` after build_app().
     app.state.secrets = KeyringSecrets()
+    # Handshake admission control (caps + per-IP failure lockout). Tests
+    # swap it post-build_app() to drive its injectable clock.
+    app.state.handshake_gate = HandshakeGate(glados_cfg.handshake)
 
     _register_routes(app)
     return app
@@ -619,12 +623,31 @@ def _register_routes(app: FastAPI) -> None:
     async def ws_v1(ws: WebSocket) -> None:
         await ws.accept()
         state = ws.app.state
+        gate: HandshakeGate = state.handshake_gate
+        peer_ip = ws.client.host if ws.client else "unknown"
+        verdict = gate.admit(peer_ip)
+        if verdict is not Verdict.OK:
+            await _reject(ws, verdict)
+            return
         client_id: str | None = None
         pipeline: AudioPipeline | None = None
         try:
-            binding = await _handshake(
-                ws, state.glados_cfg, state.rooms_cfg, state.secrets
-            )
+            # The slot taken by admit() above covers exactly the pending
+            # (pre-auth) phase: released in the finally below on every exit
+            # path — success, auth failure, disconnect, timeout, or
+            # cancellation — exactly once, before the serve loop starts.
+            try:
+                async with asyncio.timeout(state.glados_cfg.handshake.timeout_s):
+                    binding = await _handshake(
+                        ws, state.glados_cfg, state.rooms_cfg, state.secrets,
+                        gate, peer_ip,
+                    )
+            except TimeoutError:
+                log.warning("handshake timed out for %s", peer_ip)
+                await _close_quietly(ws)
+                return
+            finally:
+                gate.release(peer_ip)
             if binding is None:
                 return
             client_id = binding.client_id
@@ -688,6 +711,8 @@ async def _handshake(
     glados_cfg: GladosConfig,
     rooms_cfg: RoomsConfig,
     secrets: SecretsStore,
+    gate: HandshakeGate,
+    peer_ip: str,
 ):
     raw = await ws.receive_json()
     try:
@@ -701,7 +726,13 @@ async def _handshake(
         await ws.close()
         return None
 
+    # Only the two credential failures below count toward the per-IP
+    # lockout. Malformed hellos (above) and binding mismatches (below — the
+    # peer holds a valid token, it's just misconfigured) are bounded by the
+    # caps and timeout instead, so a fuzzer can't trip the lockout cheaply
+    # and a legitimate-but-misconfigured device can't lock itself out.
     if msg.client_id not in glados_cfg.auth.clients:
+        gate.record_failure(peer_ip)
         await _send_error(ws, "auth_failed", "unknown client or bad token")
         await ws.close()
         return None
@@ -710,12 +741,13 @@ async def _handshake(
     # bytes matched — a classic per-byte timing attack that would let an attacker
     # recover the token incrementally instead of searching the full keyspace.
     # Compare as bytes: compare_digest rejects non-ASCII str, and msg.token is
-    # attacker-controlled. Rate-limiting failed handshakes is a separate, future
-    # hardening (see client_room/deploy/ROADMAP.md).
+    # attacker-controlled.
     if expected is None or not hmac.compare_digest(expected.encode(), msg.token.encode()):
+        gate.record_failure(peer_ip)
         await _send_error(ws, "auth_failed", "unknown client or bad token")
         await ws.close()
         return None
+    gate.record_success(peer_ip)
 
     binding = rooms_cfg.find(msg.client_id)
     if binding is None:
@@ -781,6 +813,29 @@ async def _push_memory_blocks(
             await ws.send_json(notice.model_dump())
         except Exception:
             return
+
+
+async def _reject(ws: WebSocket, verdict: Verdict) -> None:
+    """Turn away a connection the gate refused. WS close code 1013
+    ("try again later") plus a distinct error code so a locked-out operator
+    debugging a misconfigured device sees the truth, not `auth_failed`."""
+    code, message = (
+        ("server_busy", "too many pending handshakes; retry shortly")
+        if verdict is Verdict.BUSY
+        else ("rate_limited", "too many failed handshakes; retry later")
+    )
+    try:
+        await _send_error(ws, code, message)
+        await ws.close(code=1013)
+    except Exception:
+        pass  # peer already gone — the reject must not become a 500
+
+
+async def _close_quietly(ws: WebSocket) -> None:
+    try:
+        await ws.close(code=1013)
+    except Exception:
+        pass  # already disconnected or close raced the timeout
 
 
 async def _send_error(ws: WebSocket, code: str, message: str) -> None:
