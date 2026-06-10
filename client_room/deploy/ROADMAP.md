@@ -94,6 +94,15 @@ TLS (wss://, no embedded creds)  →  pairing/enrollment protocol  →  config.s
 
 ## Future: WS handshake rate-limiting / throttling (own design slice)
 
+> **Addressed.** Implemented as handshake admission control: per-handshake
+> timeout, global + per-IP pending caps, and a per-IP credential-failure
+> lockout, configurable via `[handshake]` / `GLADOS_HANDSHAKE_*`. Design
+> decisions and panel adjudications in
+> `DESIGN-ws-handshake-rate-limit.md`; implementation in
+> `src/glados/core/handshake_gate.py`. The pairing-channel interaction
+> below remains open by design — the caps + timeout transfer to a future
+> pre-auth pairing endpoint, the credential lockout deliberately does not.
+
 The `/ws/v1` handshake (`server.py` `_handshake`) authenticates a per-client
 token. As of the TLS slice the token compare is **constant-time**
 (`hmac.compare_digest`), so response timing no longer leaks how many leading
