@@ -6,8 +6,17 @@ Rubber-ducking is the cheap fail-safe in this repo, and we lean on it. The cost
 of a bug climbs by an order of magnitude at each stage it survives: a flaw
 caught in **design** is cheaper than one caught while **coding**, which is far
 cheaper than one that reaches **production**. So we duck at the two cheapest
-places to catch one. A duck is an independent Agent (general-purpose, model
-`opus`) that reviews and reports back but **never edits code**.
+places to catch one. A duck is an independent Agent (general-purpose) that
+reviews and reports back but **never edits code**.
+
+**Duck model: `fable` first, `opus` fallback.** Design and rubber-duck
+subagents (single ducks and every panel member) use model `fable` when it is
+available. If a `fable` Agent spawn is rejected or errors (model not offered —
+access is only confirmed through 2026-06-22; availability after that is
+unknown), fall back to `opus` for that duck and note the substitution when
+summarising the findings. The 2026-06-10 bake-off showed the model premium
+pays off at design/review stage, not implementation — so spend it on the
+ducks, not the main loop.
 
 ### 1. Design duck — before writing code, for slices with real design content
 
