@@ -183,6 +183,16 @@ class TTSConfig(BaseModel):
     # nouns/acronyms; map the written form → a phonetic spelling. Whole-word,
     # case-insensitive. Add a row per mispronounced name.
     pronunciations: dict[str, str] = {"GLaDOS": "Gladoss"}
+    # Feedback-gate timing (server-side mic-mute that stops a room's speaker
+    # output from self-triggering a turn via its own mic — see Organizer). The
+    # gate holds a room's mic for the *estimated playback duration* of the reply
+    # (so it scales with reply length, unlike a fixed cooldown), then a short
+    # tail cooldown. A speaker client may shorten the estimate by reporting
+    # PlaybackDone. Bump these for high-latency sinks (Bluetooth, external
+    # speakers); a room device with no echo cancellation needs the margin.
+    gate_cooldown_s: float = 0.200      # reverb/tail after playback is judged done
+    gate_drain_margin_s: float = 0.5    # padding on the duration estimate (jitter buffer + sink latency)
+    gate_max_s: float = 120.0           # hard ceiling on a single gate (guards a duration-accounting bug)
 
 
 class GladosConfig(BaseModel):

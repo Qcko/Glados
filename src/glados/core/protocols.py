@@ -44,8 +44,19 @@ class ToolConfirmResponse(BaseModel):
     granted: bool
 
 
+class PlaybackDone(BaseModel):
+    """A speaker client reports that the TTS audio for `session_id` has finished
+    playing out of its buffer. Lets the server shorten the feedback gate from
+    the duration estimate to the short tail cooldown (see Organizer). Only
+    honored from a speaker-role client (server enforces); advisory — a missing
+    one just falls back to the estimate."""
+
+    type: Literal["playback_done"] = "playback_done"
+    session_id: str
+
+
 ClientMessage = Annotated[
-    Hello | UserText | Interrupt | ToolConfirmResponse,
+    Hello | UserText | Interrupt | ToolConfirmResponse | PlaybackDone,
     Field(discriminator="type"),
 ]
 

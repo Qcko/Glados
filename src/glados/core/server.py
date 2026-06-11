@@ -71,6 +71,7 @@ from .protocols import (
     MemoryBlockNotice,
     ObserveRoom,
     ObservedEvent,
+    PlaybackDone,
     ToolConfirmResponse,
     UserText,
 )
@@ -440,6 +441,9 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         binding_for_client=rooms_cfg.find,
         clients_in_room=clients_in_room,
         notify_observers=notify_observers,
+        tts_cooldown_s=glados_cfg.tts.gate_cooldown_s,
+        gate_drain_margin_s=glados_cfg.tts.gate_drain_margin_s,
+        gate_max_s=glados_cfg.tts.gate_max_s,
         router=router,
         specialist_llm=specialist_llm,
         escalate_on_failed=glados_cfg.router.escalate_on_failed,
@@ -1018,6 +1022,10 @@ async def _serve(
             await organizer.handle_interrupt(client_id, msg.session_id)
         elif isinstance(msg, ToolConfirmResponse):
             await organizer.handle_tool_confirm_response(client_id, msg)
+        elif isinstance(msg, PlaybackDone):
+            # Speaker reports its audio drained — shortens the feedback gate.
+            # The organizer role-scopes this to speaker-bound clients.
+            await organizer.handle_playback_done(client_id, msg.session_id)
 
 
 async def _handle_audio(ws: WebSocket, pipeline: AudioPipeline, data: bytes) -> None:

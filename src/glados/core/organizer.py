@@ -15,6 +15,7 @@ import logging
 import re
 import uuid
 from contextlib import aclosing
+from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal
 
 from pydantic import BaseModel
@@ -51,6 +52,20 @@ RoomLookup = Callable[[str], list[str]]
 # (room_id, message) -> forward to any admin observers of that room. The impl
 # owns the forward allowlist + envelope; the organizer just taps every broadcast.
 ObserverNotify = Callable[[str, BaseModel], Awaitable[None]]
+
+
+@dataclass
+class _TtsGate:
+    """Per-room feedback-gate state. `phase` walks sending → draining →
+    cooldown; absence from the gate dict means open. `deadline` is the
+    estimated playback-end (draining) or the cooldown end. `earliest_release`
+    is the soonest a PlaybackDone is believed for this turn (an implausibly
+    early one is a buggy/forged client and is ignored)."""
+
+    phase: str  # "sending" | "draining" | "cooldown"
+    session_id: str
+    deadline: float = 0.0
+    earliest_release: float = 0.0
 UserTextSource = Literal["voice", "text"]
 
 _MAX_TOOL_LOOP = 8
@@ -123,6 +138,8 @@ class Organizer:
         tts: TTS | None = None,
         room_queues: RoomQueueManager | None = None,
         tts_cooldown_s: float = 0.200,
+        gate_drain_margin_s: float = 0.5,
+        gate_max_s: float = 120.0,
         confirm_timeout_s: float = 30.0,
         router: Router | None = None,
         specialist_llm: LLM | None = None,
@@ -165,29 +182,24 @@ class Organizer:
         # session_id -> (task, room_id). Lets handle_interrupt cancel the
         # right turn and route the Cancelled broadcast to the right room.
         self._inflight: dict[str, tuple[asyncio.Task, str]] = {}
-        # TTS feedback gate (server-side mic-mute layer). While a room's
-        # speaker is mid-TTS — or within `_tts_cooldown_s` of finishing —
-        # non-barge-in audio transcripts from that room are dropped to
-        # prevent the speaker→mic loop self-triggering a new turn. Barge-
-        # in regex still passes through so the user can interrupt by
-        # voice. Cooldown catches the TTS tail (decay, room reverb) that
-        # the browser-side AEC may not fully suppress.
+        # TTS feedback gate (server-side mic-mute layer). One `_TtsGate` per
+        # room, walking SENDING → DRAINING → COOLDOWN → (gone = open). While a
+        # room is gated, non-barge-in audio transcripts from it are dropped so
+        # the speaker→mic loop can't self-trigger a turn (barge-in regex still
+        # passes — voice interrupt must always work).
         #
-        # The 200 ms default matches the plan in the 2026-05-20 brainstorm
-        # entry. Browser `AudioContext` buffers can trail the `Done`
-        # broadcast by 100–500 ms depending on fill, so external speakers
-        # or Pi clients (v3) may want a longer value — bump per Organizer
-        # construction once field-tested.
-        #
-        # `_speaking_rooms` is cleared and `_tts_finish_time` is stamped
-        # in `_speak`'s finally, so cancellation also arms the cooldown
-        # (in-flight audio that already crossed the WS still plays out on
-        # the client). The only path that leaks an entry in
-        # `_speaking_rooms` is hard process death before `finally` runs;
-        # asyncio cancellation always runs `finally`.
+        # The DRAINING deadline is the *estimated playback end* (send start +
+        # audio duration + margin), so the gate scales with reply length — the
+        # old fixed cooldown reopened the gate while a long reply was still
+        # playing, and the room heard itself. A speaker client may shorten the
+        # estimate by reporting PlaybackDone once its buffer drains; the
+        # estimate is the load-bearing fallback when no signal arrives (no
+        # speaker connected, a disconnect, or an older client). COOLDOWN is the
+        # short reverb/sink tail after playback is judged done.
         self._tts_cooldown_s = tts_cooldown_s
-        self._speaking_rooms: set[str] = set()
-        self._tts_finish_time: dict[str, float] = {}
+        self._gate_drain_margin_s = gate_drain_margin_s
+        self._gate_max_s = gate_max_s
+        self._tts_gate: dict[str, _TtsGate] = {}
         # Permission gate state. When a tool with requires_confirmation
         # is about to dispatch, the Organizer parks a Future in
         # _pending_confirms keyed by request_id, broadcasts a
@@ -389,16 +401,105 @@ class Organizer:
             return
         await self.handle_user_text(client_id, text, source="voice")
 
+    # The soonest fraction of the estimated playback at which a PlaybackDone is
+    # believed. A signal before this is implausibly early (a buggy or forged
+    # client trying to re-open the gate mid-playback) and is ignored.
+    _MIN_RELEASE_FRACTION = 0.5
+    # Tolerance on the early-release clamp: a PlaybackDone within this of the
+    # earliest plausible time is accepted (absorbs coarse-clock / near-zero
+    # estimates). Only a signal earlier than this — which only happens for a
+    # genuinely long reply — is treated as implausible and ignored.
+    _CLAMP_GRACE_S = 0.05
+
     def _room_mic_gated(self, room_id: str) -> bool:
-        """True if `room_id` is mid-TTS or within the post-Done cooldown
-        that catches the TTS tail (room reverb, late buffered audio that
-        beat the Done broadcast)."""
-        if room_id in self._speaking_rooms:
-            return True
-        finish = self._tts_finish_time.get(room_id)
-        if finish is None:
+        """True while a room's reply is (estimated to be) still audible. Walks
+        the gate: SENDING and DRAINING gate; DRAINING collapses to a short
+        COOLDOWN once its estimated playback-end passes; COOLDOWN opens (and
+        drops the entry) when it expires."""
+        gate = self._tts_gate.get(room_id)
+        if gate is None:
             return False
-        return asyncio.get_running_loop().time() - finish < self._tts_cooldown_s
+        now = asyncio.get_running_loop().time()
+        if gate.phase == "sending":
+            return True
+        if gate.phase == "draining":
+            if now < gate.deadline:
+                return True
+            # Estimated playback end reached → tail cooldown, anchored to the
+            # playback-end (NOT to `now`, so a late first check after the
+            # boundary doesn't restart the cooldown clock).
+            gate.phase = "cooldown"
+            gate.deadline = gate.deadline + self._tts_cooldown_s
+        # cooldown (fall through from the draining transition above)
+        if now >= gate.deadline:
+            del self._tts_gate[room_id]
+            return False
+        return True
+
+    def _room_has_speaker(self, room_id: str) -> bool:
+        for cid in self.clients_in_room(room_id):
+            binding = self.binding_for_client(cid)
+            if binding is not None and binding.role == "speaker":
+                return True
+        return False
+
+    async def handle_playback_done(self, client_id: str, session_id: str) -> None:
+        """A speaker client reports its audio for `session_id` finished playing
+        — shorten that room's gate from the duration estimate to the short tail
+        cooldown. Role-scoped (only a speaker may drive the gate), turn-
+        correlated, and clamped against an implausibly early signal."""
+        binding = self.binding_for_client(client_id)
+        if binding is None or binding.role != "speaker":
+            return
+        gate = self._tts_gate.get(binding.room_id)
+        if gate is None or gate.phase != "draining" or gate.session_id != session_id:
+            return  # not draining this turn (mid next turn, stale, or cooled)
+        now = asyncio.get_running_loop().time()
+        if now < gate.earliest_release - self._CLAMP_GRACE_S:
+            return  # implausibly early (only fires for a long reply) — ignore.
+            # The grace keeps a near-zero estimate + coarse clock from falsely
+            # rejecting a legitimately-timed signal on a short reply.
+        gate.phase = "cooldown"
+        gate.deadline = now + self._tts_cooldown_s
+
+    def _arm_gate_after_send(
+        self,
+        room_id: str,
+        session_id: str,
+        send_start: float,
+        total_samples: int,
+        sample_rate: int,
+        cancelled: bool,
+    ) -> None:
+        """Transition a room out of SENDING once the reply has been streamed.
+        A cancelled turn was flushed on the client, so it gets only the short
+        tail cooldown — never the full unplayed duration (which would deafen the
+        mic to the user's follow-up). A room with no connected speaker played
+        nothing, so the gate just opens."""
+        # A cancelled _speak's finally runs on a later tick (handle_interrupt
+        # only .cancel()s the task), by which point the *next* turn may already
+        # own the gate in SENDING. Only arm if this turn still owns it — same
+        # successor-clobber guard as `_inflight` (entry[0] is task).
+        gate = self._tts_gate.get(room_id)
+        if gate is None or gate.session_id != session_id or gate.phase != "sending":
+            return
+        now = asyncio.get_running_loop().time()
+        if not self._room_has_speaker(room_id):
+            self._tts_gate.pop(room_id, None)
+            return
+        if cancelled or sample_rate <= 0:
+            self._tts_gate[room_id] = _TtsGate(
+                phase="cooldown", session_id=session_id, deadline=now + self._tts_cooldown_s
+            )
+            return
+        audio_dur = total_samples / sample_rate
+        deadline = min(send_start + audio_dur + self._gate_drain_margin_s, now + self._gate_max_s)
+        self._tts_gate[room_id] = _TtsGate(
+            phase="draining",
+            session_id=session_id,
+            deadline=deadline,
+            earliest_release=send_start + audio_dur * self._MIN_RELEASE_FRACTION,
+        )
 
     def _active_session_in_room(self, room_id: str) -> str | None:
         # v1 invariant: at most one in-flight session per room (one speaker,
@@ -641,10 +742,15 @@ class Organizer:
         text = _strip_markdown_for_tts(text)
         if not text.strip():
             return
-        # Mark the room as speaking BEFORE any chunk goes out so the gate
-        # is up the moment a mic could start hearing TTS audio. Cleared
-        # in finally so cancellation still arms the post-Done cooldown.
-        self._speaking_rooms.add(room_id)
+        # Gate the room SENDING before any chunk goes out, so the mic is muted
+        # the instant TTS audio could reach it. The finally arms the rest of the
+        # gate (DRAINING for the estimated playback, or a short cooldown) from
+        # the audio actually streamed — counting samples to size the estimate.
+        send_start = asyncio.get_running_loop().time()
+        self._tts_gate[room_id] = _TtsGate(phase="sending", session_id=session_id)
+        total_samples = 0
+        sample_rate = 0
+        cancelled = False
         seq = 0
         try:
             async with aclosing(self.tts.synthesize(text)) as stream:
@@ -658,6 +764,8 @@ class Organizer:
                             pcm_b64=base64.b64encode(chunk.pcm).decode("ascii"),
                         ),
                     )
+                    total_samples += len(chunk.pcm) // 2  # PCM16-LE mono
+                    sample_rate = chunk.sample_rate  # constant per turn in practice
                     trace.event(
                         "tts_chunk",
                         seq=seq,
@@ -666,14 +774,16 @@ class Organizer:
                     )
                     seq += 1
         except asyncio.CancelledError:
+            cancelled = True
             raise
         except Exception:
             # TTS is a side-channel — don't break the turn if synth blows up.
             log.exception("tts synthesize failed")
             trace.event("tts_error")
         finally:
-            self._speaking_rooms.discard(room_id)
-            self._tts_finish_time[room_id] = asyncio.get_running_loop().time()
+            self._arm_gate_after_send(
+                room_id, session_id, send_start, total_samples, sample_rate, cancelled
+            )
 
     async def _run_tool_calls(
         self,
