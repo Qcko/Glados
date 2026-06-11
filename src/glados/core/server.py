@@ -41,6 +41,7 @@ from .adapters import LLM, STT, TTS, VAD
 from .audio_sink import AudioSink, FrameTooShort
 from .config import (
     GladosConfig,
+    HandshakeConfig,
     LLMConfig,
     RoomsConfig,
     RouterConfig,
@@ -52,7 +53,7 @@ from .config import (
     load_rooms_config,
     load_servers_config,
 )
-from .handshake_gate import HandshakeGate, Verdict
+from .handshake_gate import FailureOutcome, HandshakeGate, Verdict
 from .logging_setup import setup_logging
 from . import memory_gate
 from .ollama_lifecycle import OllamaLifecycle
@@ -741,7 +742,7 @@ async def _handshake(
     # caps and timeout instead, so a fuzzer can't trip the lockout cheaply
     # and a legitimate-but-misconfigured device can't lock itself out.
     if msg.client_id not in glados_cfg.auth.clients:
-        gate.record_failure(peer_ip)
+        _note_auth_failure(gate, peer_ip, glados_cfg.handshake)
         await _send_error(ws, "auth_failed", "unknown client or bad token")
         await ws.close()
         return None
@@ -752,7 +753,7 @@ async def _handshake(
     # Compare as bytes: compare_digest rejects non-ASCII str, and msg.token is
     # attacker-controlled.
     if expected is None or not hmac.compare_digest(expected.encode(), msg.token.encode()):
-        gate.record_failure(peer_ip)
+        _note_auth_failure(gate, peer_ip, glados_cfg.handshake)
         await _send_error(ws, "auth_failed", "unknown client or bad token")
         await ws.close()
         return None
@@ -822,6 +823,26 @@ async def _push_memory_blocks(
             await ws.send_json(notice.model_dump())
         except Exception:
             return
+
+
+def _note_auth_failure(
+    gate: HandshakeGate, peer_ip: str, cfg: HandshakeConfig
+) -> None:
+    """Record a credential failure and narrate the transition — the gate is
+    pure policy and never logs; what the operator sees is decided here."""
+    outcome = gate.record_failure(peer_ip)
+    if outcome is FailureOutcome.ALREADY_LOCKED:
+        return  # no per-attempt noise during a lockout
+    log.warning("handshake auth failure from %s", peer_ip)
+    if outcome is FailureOutcome.LOCKOUT_ENGAGED:
+        log.warning(
+            "handshake lockout engaged for %s (%d failures in %.0fs window; "
+            "locked for %.0fs)",
+            peer_ip,
+            cfg.fail_threshold,
+            cfg.fail_window_s,
+            cfg.lockout_s,
+        )
 
 
 async def _reject(ws: WebSocket, verdict: Verdict) -> None:

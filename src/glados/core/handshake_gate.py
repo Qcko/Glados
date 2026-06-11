@@ -10,11 +10,14 @@ and every method is atomic between awaits. The caller resolves the peer IP
 (no reverse proxy is assumed; see HandshakeConfig) and anchors
 `admit`/`release` in its own try/finally so a slot is released exactly once
 on every exit path.
+
+The gate never logs: it reports transitions through return values
+(`Verdict`, `FailureOutcome`) and the server layer owns what an operator
+sees, so policy state stays unit-testable without log capture.
 """
 
 from __future__ import annotations
 
-import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -22,13 +25,19 @@ from typing import Callable
 
 from .config import HandshakeConfig
 
-log = logging.getLogger(__name__)
-
 
 class Verdict(Enum):
     OK = "ok"
     BUSY = "busy"
     LOCKED_OUT = "locked_out"
+
+
+class FailureOutcome(Enum):
+    """What record_failure() did, so the caller can log the transition."""
+
+    COUNTED = "counted"
+    LOCKOUT_ENGAGED = "lockout_engaged"
+    ALREADY_LOCKED = "already_locked"
 
 
 @dataclass
@@ -89,29 +98,23 @@ class HandshakeGate:
         else:
             self._pending_by_ip[ip] = remaining
 
-    def record_failure(self, ip: str) -> None:
+    def record_failure(self, ip: str) -> FailureOutcome:
         """Count a credential failure (unknown client id / bad token).
-        Engages a lockout when the threshold is hit inside the window."""
+        Engages a lockout when the threshold is hit inside the window; the
+        outcome tells the caller which transition to surface."""
         now = self._clock()
         state = self._touch(ip, now)
         if now < state.locked_until:
-            return  # already locked; don't extend or log per-attempt
+            return FailureOutcome.ALREADY_LOCKED  # don't extend per-attempt
         state.failure_times = [
             t for t in state.failure_times if now - t <= self._cfg.fail_window_s
         ]
         state.failure_times.append(now)
-        log.warning("handshake auth failure from %s", ip)
         if len(state.failure_times) >= self._cfg.fail_threshold:
             state.locked_until = now + self._cfg.lockout_s
             state.failure_times.clear()
-            log.warning(
-                "handshake lockout engaged for %s (%d failures in %.0fs window; "
-                "locked for %.0fs)",
-                ip,
-                self._cfg.fail_threshold,
-                self._cfg.fail_window_s,
-                self._cfg.lockout_s,
-            )
+            return FailureOutcome.LOCKOUT_ENGAGED
+        return FailureOutcome.COUNTED
 
     def record_success(self, ip: str) -> None:
         self._ips.pop(ip, None)
@@ -126,7 +129,6 @@ class HandshakeGate:
             return False
         now = self._clock()
         if state.locked_until and now >= state.locked_until:
-            log.info("handshake lockout expired for %s", ip)
             state.locked_until = 0.0
         return now < state.locked_until
 

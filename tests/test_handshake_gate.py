@@ -8,7 +8,7 @@ test_server_handshake.py.
 from __future__ import annotations
 
 from glados.core.config import HandshakeConfig
-from glados.core.handshake_gate import HandshakeGate, Verdict
+from glados.core.handshake_gate import FailureOutcome, HandshakeGate, Verdict
 
 
 class FakeClock:
@@ -63,6 +63,15 @@ def test_per_ip_cap_rejects_third_slot_from_one_peer() -> None:
     assert gate.admit("10.0.0.1") is Verdict.BUSY
     # A different peer still gets the remaining global slot.
     assert gate.admit("10.0.0.2") is Verdict.OK
+
+
+def test_record_failure_reports_each_transition() -> None:
+    # The gate never logs; the server narrates from these outcomes.
+    gate, _ = make_gate()  # fail_threshold=3
+    assert gate.record_failure("10.0.0.5") is FailureOutcome.COUNTED
+    assert gate.record_failure("10.0.0.5") is FailureOutcome.COUNTED
+    assert gate.record_failure("10.0.0.5") is FailureOutcome.LOCKOUT_ENGAGED
+    assert gate.record_failure("10.0.0.5") is FailureOutcome.ALREADY_LOCKED
 
 
 def test_peek_mirrors_admit_without_taking_a_slot() -> None:
