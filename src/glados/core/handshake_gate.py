@@ -67,6 +67,17 @@ class HandshakeGate:
         self._pending_by_ip[ip] = self._pending_by_ip.get(ip, 0) + 1
         return Verdict.OK
 
+    def peek(self, ip: str) -> Verdict:
+        """The verdict admit() would return right now, without taking a
+        slot (it may lazily clear an expired lockout, so it is not pure).
+        Lets the WS handler refuse a doomed connection before paying for
+        the upgrade; admit() stays the authoritative check."""
+        if self._locked_out(ip):
+            return Verdict.LOCKED_OUT
+        if self._at_capacity(ip):
+            return Verdict.BUSY
+        return Verdict.OK
+
     def release(self, ip: str) -> None:
         # Clamp rather than trust the caller contract (one release per OK
         # admit) — a future second caller must not be able to drive the

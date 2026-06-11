@@ -621,10 +621,19 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.websocket("/ws/v1")
     async def ws_v1(ws: WebSocket) -> None:
-        await ws.accept()
         state = ws.app.state
         gate: HandshakeGate = state.handshake_gate
         peer_ip = ws.client.host if ws.client else "unknown"
+        # Cheap pre-accept reject for the flood case: when the caps are
+        # already full, decline the upgrade without paying for the 101
+        # handshake, so rejects stay cheaper than the attack. BUSY only — a
+        # pre-accept close carries no close frame, and a locked-out (or
+        # raced-to-capacity) peer must still get the explanatory reject
+        # below. The peek takes no slot; admit() stays authoritative.
+        if gate.peek(peer_ip) is Verdict.BUSY:
+            await _close_quietly(ws)
+            return
+        await ws.accept()
         verdict = gate.admit(peer_ip)
         if verdict is not Verdict.OK:
             await _reject(ws, verdict)

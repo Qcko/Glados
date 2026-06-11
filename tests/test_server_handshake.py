@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 
 @pytest.fixture(scope="module")
@@ -149,9 +150,25 @@ def test_lockout_engages_after_repeated_bad_tokens_and_recovers() -> None:
         assert gate.pending_count == 0  # leak canary
 
 
-def test_busy_rejected_when_pending_cap_reached() -> None:
+def test_busy_refused_before_accept_when_pending_cap_reached() -> None:
+    # The pre-accept peek refuses the upgrade outright under flood — no
+    # 101, no server_busy frame — so rejects stay cheaper than the attack.
     with _fresh_client() as client:
         _swap_gate(client, max_pending=0)
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/ws/v1"):
+                pass
+
+
+def test_peek_admit_race_still_gets_server_busy_frame() -> None:
+    # Capacity can fill between the pre-accept peek and the authoritative
+    # admit() (during the ws.accept() suspension). The raced peer must get
+    # the explanatory server_busy frame, not a hang or a 500.
+    from glados.core.handshake_gate import Verdict
+
+    with _fresh_client() as client:
+        gate, _ = _swap_gate(client, max_pending=0)
+        gate.peek = lambda ip: Verdict.OK  # simulate losing the race
         with client.websocket_connect("/ws/v1") as ws:
             err = ws.receive_json()
         assert err["code"] == "server_busy"

@@ -65,6 +65,20 @@ def test_per_ip_cap_rejects_third_slot_from_one_peer() -> None:
     assert gate.admit("10.0.0.2") is Verdict.OK
 
 
+def test_peek_mirrors_admit_without_taking_a_slot() -> None:
+    gate, _ = make_gate()
+    assert gate.peek("10.0.0.1") is Verdict.OK
+    assert gate.pending_count == 0  # peek never takes a slot
+    for ip in ("10.0.0.1", "10.0.0.2", "10.0.0.3"):
+        gate.admit(ip)
+    assert gate.peek("10.0.0.4") is Verdict.BUSY
+    lock_out(gate, "10.0.0.9")
+    # Lockout outranks capacity (mirrors admit), so a locked-out peer is
+    # routed to the explanatory post-accept reject even when caps are full.
+    assert gate.peek("10.0.0.9") is Verdict.LOCKED_OUT
+    assert gate.pending_count == 3
+
+
 def test_release_frees_both_caps() -> None:
     gate, _ = make_gate()
     gate.admit("10.0.0.1")
