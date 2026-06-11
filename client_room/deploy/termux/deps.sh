@@ -1,10 +1,10 @@
 #!/data/data/com.termux/files/usr/bin/sh
 # One-shot dependency installer for the GLaDOS room client on Termux/Android.
 # Idempotent: probes each dependency and installs ONLY what's missing, so it's
-# safe to re-run. Run it after getting the files onto the phone (bundle or clone)
-# and before selftest.sh.
+# safe to re-run. Called by dispatch.sh (both the doctor and install paths); can
+# also be run on its own after getting the files onto the phone (bundle or clone).
 #
-#   sh client_room/deploy/termux/install.sh
+#   sh client_room/deploy/termux/deps.sh
 #
 # numpy is installed from the prebuilt Termux package (`python-numpy`), NOT pip —
 # pip would try to COMPILE numpy on the phone, which is slow and fragile.
@@ -72,7 +72,7 @@ fi
 
 echo "All dependencies present."
 echo
-echo "Next:"
-echo "  cp $SCRIPT_DIR/../../config.room.example.toml $SCRIPT_DIR/../../config.room.toml"
-echo "  \$EDITOR $SCRIPT_DIR/../../config.room.toml      # server_url, room_id, client_ids, tokens"
-echo "  sh $SCRIPT_DIR/selftest.sh                       # verify the phone's audio plumbing"
+echo "Next (usually driven for you by dispatch.sh / go.sh):"
+echo "  sh $SCRIPT_DIR/selftest.sh         # doctor: verify the phone's audio plumbing"
+echo "  sh $SCRIPT_DIR/provision.sh        # install: wire the runit services (left DOWN)"
+echo "  sh $SCRIPT_DIR/enroll.sh           # give the device its identity, then start it"

@@ -23,12 +23,29 @@ deploy/termux/
     glados-room/run                supervise the room client; gate on pulse, load mic source
     glados-room/log/run            svlogd logger for the client
   glados-room.env.example          operator paths template → ~/.config/glados-room/env
-  install.sh                       idempotent dependency installer (Termux)
-  provision.sh                     symlink services + boot script into place (idempotent)
+  deps.sh                          idempotent dependency installer (Termux)
+  dispatch.sh                      bundle second stage: doctor (default) | install
+  provision.sh                     symlink services + boot script (left DOWN by default)
+  enroll.sh                        give the device its identity (config + tokens + cert)
   requirements-phone.txt           Python deps (numpy, websockets)
-  make-phone-bundle.sh / .ps1      build the one-file .tar.gz (dev box; sh or PowerShell)
+  make-phone-bundle.sh / .ps1      build the self-extracting go.sh (dev box; sh or PowerShell)
   selftest.sh                      on-hardware diagnostic → report.md (see below)
 ```
+
+## Three paths: doctor, install, enroll
+
+The deploy splits by **secret posture** (see `../ROADMAP.md`):
+
+- **doctor** — *"is this device healthy?"* `sh go.sh` (default) runs deps + the
+  self-test, then deletes `~/glados`. Secret-free, re-runnable.
+- **install** — *"make this device a GLaDOS appliance."* `sh go.sh install` runs
+  deps + provisions the runit services (left **DOWN**) and leaves `~/glados` in
+  place. Secret-free.
+- **enroll** — *"give this device its identity."* `sh enroll.sh` installs the
+  config + tokens + cert (mode-600) and starts the services. The only
+  secret-bearing step. Today the secrets are side-loaded via Downloads; the
+  ROADMAP target mints them server-side at pairing so no secret file ever
+  touches the device.
 
 PulseAudio is its **own** runit service (not started from inside the client's
 `run`), which decouples its lifecycle from client restarts. It runs pulse with
@@ -64,61 +81,87 @@ duplicate source modules and exhaust the mic.
 
 ## Install the client
 
-Two ways to get `client_room/` onto the phone — pick one.
-
-**A. One-file bundle (no git on the phone).** On the dev box, build a tarball of
-the tracked client files (this never includes your gitignored config/tokens).
-It just wraps `git archive`, so no `sh` is needed:
+On the dev box, build the self-extracting bundle (only TRACKED files — never your
+gitignored config/tokens). It just wraps `git archive`, so no `sh` is needed:
 
 ```sh
 sh client_room/deploy/termux/make-phone-bundle.sh        # Linux/macOS/git-bash
 pwsh client_room\deploy\termux\make-phone-bundle.ps1     # Windows PowerShell
-# …or the raw git command, anywhere git runs:
-git archive --format=tar.gz --prefix=glados/ HEAD client_room -o dist/glados-phone-bundle.tar.gz
-# → dist/glados-phone-bundle.tar.gz
+# → dist/go.sh   (and dist/glados-phone-bundle.tar.gz alongside)
 ```
 
-Copy that one file to the phone's **Downloads** (so the file picker / `cp` can
-reach it), then in Termux — `cd` into the deploy dir once so every later command
-is short:
+Copy `dist/go.sh` to the phone's **Downloads** (so the file picker / `cp` can
+reach it), then in Termux:
 
 ```sh
-tar xzf ~/storage/downloads/glados-phone-bundle.tar.gz -C $HOME   # → ~/glados/
-cd ~/glados/client_room/deploy/termux
-sh install.sh        # installs all deps (idempotent)
+sh ~/storage/downloads/go.sh            # doctor: deps + self-test, then self-cleans
+sh ~/storage/downloads/go.sh install    # install: deps + provision, leaves ~/glados
 ```
 
-**B. Clone the repo** (if the phone has git/network to your remote):
+- **doctor** (no arg) is the health check — see *Self-test* below. It deletes
+  `~/glados` and `go.sh` when done, so it's safe to re-run.
+- **install** extracts to `~/glados`, installs deps, wires the runit services +
+  Termux:Boot, and leaves everything in place with the services **DOWN** (no
+  identity yet). Give it one with `enroll.sh` (next section).
+
+`deps.sh` (run by both paths) probes each dependency and installs only what's
+missing (`python pulseaudio termux-services termux-api`, plus `numpy` from the
+prebuilt **`python-numpy`** package — never pip-compiled — and `websockets` via
+pip). The client is pure portable Python and never imports the server package;
+`keyring` is optional (token loading falls back to an env var / mode-600 file).
+Deps are also listed in `requirements-phone.txt`.
+
+> **Clone instead of bundle?** If the phone has git, `git clone <remote> ~/glados`
+> then `sh ~/glados/client_room/deploy/termux/dispatch.sh install` is equivalent
+> (`dispatch.sh` is what `go.sh` runs after extracting).
+
+## Enroll — give the device its identity
+
+`enroll.sh` is the only secret-bearing step. It installs the room config, the
+per-role token files (mode 600), and the server's pinned cert, then enables and
+starts the services. **A mic token grants live room-audio capture** — treat the
+token files as the sensitive material they are.
+
+On the **dev box**, author `config.room.toml` from the example, using the
+canonical on-phone paths so nothing needs editing on the device:
+
+```toml
+server_url = "wss://<server-LAN-ip>:8765"
+tls_ca     = "~/.config/glados-room/glados-server-cert.pem"
+[mic]
+client_id  = "livingroom-mic"
+token_file = "~/.config/glados-room/secrets/livingroom-mic.token"
+capture_backend = "parec"
+[speaker]
+client_id  = "livingroom-speaker"
+token_file = "~/.config/glados-room/secrets/livingroom-speaker.token"
+playback_backend = "pacat"
+# pacat_sink = "bluez_output.XX_XX_XX_XX_XX_XX.1"   # your output sink
+```
+
+Stage these four files into the phone's **Downloads** (named exactly so):
+
+| file | what | secret? |
+|------|------|---------|
+| `config.room.toml` | the config above | no (paths + LAN addr) |
+| `<client_id>.token` | one per role, basename = the `token_file` basename | **yes** |
+| `glados-server-cert.pem` | the server's PUBLIC pinned cert (`configs/tls/cert.pem`) | no |
+
+Then on the phone:
 
 ```sh
-git clone <your-glados-remote> ~/glados
-cd ~/glados/client_room/deploy/termux
-sh install.sh
+sh ~/glados/client_room/deploy/termux/enroll.sh
 ```
 
-`install.sh` probes each dependency and installs only what's missing
-(`python pulseaudio termux-services termux-api`, plus `numpy` from the prebuilt
-**`python-numpy`** package — never pip-compiled — and `websockets` via pip). It's
-idempotent, so re-running it is safe. The client is pure portable Python and
-never imports the server package; `keyring` is optional (token loading falls back
-to an env var / mode-600 file). If you'd rather install by hand, the deps are in
-`requirements-phone.txt`.
+It moves the files out of shared storage, sets the secrets dir to mode 700 and
+each token to 600, validates the config parses, removes the Downloads copies
+(even on failure), then starts the services. **Re-running enroll** replaces the
+full token set and bounces the client, so rotating a token or moving rooms needs
+no reinstall and no reboot. After rotating, revoke the old token server-side
+(`rooms.toml` / keyring).
 
-Provide the room config and tokens:
-
-```sh
-cp client_room/config.room.example.toml client_room/config.room.toml
-$EDITOR client_room/config.room.toml          # set server_url, room_id, both client_ids
-# Set capture_backend = "parec" and playback_backend = "pacat" (no PortAudio on
-# the phone). Point pacat_sink at your output sink (e.g. a bluez_output.* sink).
-
-# Token files must be mode 600 (the client rejects group/other-readable tokens).
-install -m 600 /dev/stdin ~/.secrets/bedroom-mic.token     <<<'…mic token…'
-install -m 600 /dev/stdin ~/.secrets/bedroom-speaker.token <<<'…speaker token…'
-# …and set token_file for each role in config.room.toml accordingly.
-```
-
-`config.room.toml` and the token files are gitignored / never committed.
+`config.room.toml` and the token files are gitignored / never committed; the
+token files are also staged out-of-repo on the dev box.
 
 ## Operator env
 
@@ -133,31 +176,34 @@ file is fine if that matches your layout.
 
 ## Provision the services + boot script
 
-`provision.sh` makes every script executable and symlinks the two services into
-the runit service dir (`$PREFIX/var/service`) and the boot script into
-`~/.termux/boot` — symlinks, so a `git pull` / re-extracted bundle is picked up.
-It's idempotent. From the deploy dir:
+`provision.sh` (run for you by `install`) makes every script executable and
+symlinks the two services into the runit service dir (`$PREFIX/var/service`) and
+the boot script into `~/.termux/boot` — symlinks, so a re-extracted bundle is
+picked up. It's idempotent. From the deploy dir:
 
 ```sh
-sh provision.sh            # provision only
-sh provision.sh --enable   # also sv-enable both services (start now + on boot)
+sh provision.sh            # wire the services but leave them DOWN (no identity yet)
+sh provision.sh --enable   # wire + sv-enable both (start now + on every boot)
 ```
+
+Why DOWN by default: `runsvdir` auto-starts any service it finds symlinked into
+`$PREFIX/var/service` **unless a `down` marker exists** in the service dir. An
+identity-less room client would crash-loop, so provision drops a `down` marker
+and `enroll.sh` removes it (via `--enable`) once the device has a config + tokens.
+This makes "enabled but no config" unreachable by construction. (Re-running plain
+`provision.sh` re-disables the services — after a reinstall, re-run `enroll.sh`.)
 
 > Termux:Boot executes `~/.termux/boot/*` directly, so that file must be
 > executable and carry the `#!/data/data/com.termux/files/usr/bin/sh` shebang
 > — `provision.sh` handles both.
 
-## Enable and start
-
-If you didn't pass `--enable` above, bring the services up by hand:
+`enroll.sh` enables and starts the services for you, so you normally never call
+`sv-enable` by hand. To do it manually after a bare `provision.sh`:
 
 ```sh
-sv-enable glados-pulse     # auto-start on boot + bring up now
+sv-enable glados-pulse     # removes the down marker, starts now + on boot
 sv-enable glados-room
 ```
-
-`sv-enable` both marks the service to start at boot and starts it immediately, so
-you don't have to reboot to test.
 
 ## Verify
 

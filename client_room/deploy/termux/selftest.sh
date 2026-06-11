@@ -158,7 +158,7 @@ done
 rfile "tools" "$OUTDIR/tools.txt"
 
 if [ -n "$MISSING" ]; then
-  fail "required tools present (missing:$MISSING — run install.sh to fix)"
+  fail "required tools present (missing:$MISSING — run deps.sh to fix)"
 else
   pass "required tools present (python/pulseaudio/pactl/parec/pacat)"
 fi

@@ -78,8 +78,8 @@ file. (Also satisfies the on-device-script standard's "minimize typed commands".
 ## Dependency order & where we are today
 
 ```
-TLS (wss://, no embedded creds)  →  pairing/enrollment protocol  →  config.sh
-        [in progress]                      [future epic]            [future]
+TLS (wss://, no embedded creds)  →  pairing/enrollment protocol  →  enroll.sh
+        [done]                             [future epic]          [interim: side-load]
 ```
 
 - **Auth layer** is already token-based (per-client tokens validated at the WS

@@ -26,14 +26,18 @@ git -C "$ROOT" archive --format=tar.gz --prefix=glados/ HEAD client_room > "$TAR
 {
   cat <<'HEADER'
 #!/data/data/com.termux/files/usr/bin/sh
-# GLaDOS phone bundle — self-extracting.
-# Copy this file to the phone, then in Termux (after termux-setup-storage):
-#   sh ~/storage/downloads/go.sh
+# GLaDOS phone bundle — self-extracting. Copy to the phone, then in Termux
+# (after termux-setup-storage):
+#   sh ~/storage/downloads/go.sh            # doctor: health-check, then self-clean
+#   sh ~/storage/downloads/go.sh install    # install as a persistent appliance
+# After `install`, give the device its identity:  sh ~/glados/client_room/deploy/termux/enroll.sh
 SKIP=$(awk '/^#__BUNDLE__$/{print NR+1; exit}' "$0")
+[ -n "$SKIP" ] || { echo "go.sh: bundle marker not found — the file is truncated/corrupted; re-copy it." >&2; exit 1; }
 tail -n +$SKIP "$0" | tar xzf - -C "$HOME"
-sh "$HOME/glados/client_room/deploy/termux/run.sh"
+sh "$HOME/glados/client_room/deploy/termux/dispatch.sh" "$@"
+rc=$?
 rm -f "$0"
-exit
+exit $rc
 #__BUNDLE__
 HEADER
   cat "$TAR"
@@ -46,4 +50,5 @@ echo "wrote $GO ($GO_BYTES bytes)"
 echo
 echo "Copy go.sh to the phone, then in Termux:"
 echo "  termux-setup-storage                        # once, if not done"
-echo "  sh ~/storage/downloads/go.sh                # installs + tests + cleans up"
+echo "  sh ~/storage/downloads/go.sh                # doctor: health-check + self-clean"
+echo "  sh ~/storage/downloads/go.sh install        # install persistent appliance, then enroll.sh"

@@ -14,4 +14,8 @@ client_web/dist/
 client_room/config.toml
 client_room/config.room.toml
 client_room/deploy/termux/glados-room.env
+# runit "down" markers created by provision.sh (wired-but-not-enabled);
+# the symlink target is this repo dir, so the markers land here. Machine
+# state, never committed.
+client_room/deploy/termux/service/*/down
 dist/

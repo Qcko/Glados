@@ -12,9 +12,10 @@ client_room/deploy/termux/service/glados-room/run      text eol=lf
 client_room/deploy/termux/service/glados-room/log/run  text eol=lf
 client_room/deploy/termux/selftest.sh                  text eol=lf
 client_room/deploy/termux/make-phone-bundle.sh         text eol=lf
-client_room/deploy/termux/install.sh                   text eol=lf
+client_room/deploy/termux/deps.sh                      text eol=lf
+client_room/deploy/termux/dispatch.sh                  text eol=lf
+client_room/deploy/termux/enroll.sh                    text eol=lf
 client_room/deploy/termux/provision.sh                 text eol=lf
-client_room/deploy/termux/run.sh                        text eol=lf
 
 # Server-side TLS cert generator, run through sh on the dev box / server.
 scripts/gen-tls-cert.sh                                text eol=lf

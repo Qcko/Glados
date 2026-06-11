@@ -24,6 +24,12 @@ room_id = "bedroom"
 # both (ws:// + no tls_ca) for a cleartext-LAN setup.
 #   server_url = "wss://192.168.50.x:8765"
 # tls_ca = "<your-secrets-dir>/glados-server-cert.pem"
+#
+# On a Termux phone brought up via enroll.sh, use the CANONICAL paths enroll
+# installs to (so no on-device editing is needed) — author this config on the
+# dev box with these and stage it alongside the tokens + cert in Downloads:
+#   tls_ca     = "~/.config/glados-room/glados-server-cert.pem"
+#   token_file = "~/.config/glados-room/secrets/<client_id>.token"   # per role below
 
 [mic]
 client_id = "bedroom-mic"
@@ -33,6 +39,8 @@ client_id = "bedroom-mic"
 # shared device).
 # token_env = "GLADOS_BEDROOM_MIC_TOKEN"
 # token_file = "<your-secrets-dir>/bedroom-mic.token"
+# Termux/enroll.sh canonical path:
+# token_file = "~/.config/glados-room/secrets/bedroom-mic.token"
 # Capture backend: "sounddevice" (PortAudio, default) or "parec" (+ parec_*).
 # capture_backend = "sounddevice"
 # input_device = 1
@@ -44,6 +52,8 @@ client_id = "bedroom-mic"
 client_id = "bedroom-speaker"
 # token_env = "GLADOS_BEDROOM_SPEAKER_TOKEN"
 # token_file = "<your-secrets-dir>/bedroom-speaker.token"
+# Termux/enroll.sh canonical path:
+# token_file = "~/.config/glados-room/secrets/bedroom-speaker.token"
 # Playback backend: "sounddevice" (PortAudio, default) or "pacat" (+ pacat_*,
 # PulseAudio playback for Termux/Android — the mirror of "parec" capture).
 # playback_backend = "sounddevice"
