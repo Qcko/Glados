@@ -190,6 +190,60 @@ class ErrorMessage(BaseModel):
     message: str
 
 
+# ---- Admin observe channel (loopback-only admin port) -------------------
+# A separate, loopback-bound surface (core/server.py admin_app, default
+# 127.0.0.1:9765) lets an operator watch any room's conversation as text for
+# debugging. It NEVER rides the LAN-facing /ws/v1, and the house-wide observe
+# capability answers only on loopback + behind a distinct admin secret
+# (ARCHITECTURE §9).
+
+
+class AdminHello(BaseModel):
+    """First message on the admin channel: authenticate with the admin
+    secret (constant-time compared server-side). Distinct from the room
+    `Hello` — the admin surface has no room/role binding."""
+
+    type: Literal["admin_hello"] = "admin_hello"
+    token: str
+
+
+class ObserveRoom(BaseModel):
+    """Admin asks to observe `room_id` (read-only). `room_id=None` stops
+    observing — closes the tab server-side so a dead subscription can't
+    keep fanning out."""
+
+    type: Literal["observe_room"] = "observe_room"
+    room_id: str | None = None
+
+
+class HelloAck(BaseModel):
+    """Server reply to a verified AdminHello: the rooms available to observe
+    (derived from rooms.toml bindings). The admin client builds its room
+    picker from this — no separate HTTP route, so nothing admin leaks onto
+    the LAN-facing app."""
+
+    type: Literal["hello_ack"] = "hello_ack"
+    rooms: list[str]
+
+
+class ObservedEvent(BaseModel):
+    """A room's forwarded conversation event, wrapped so the admin client can
+    attribute it to a room (the inner events carry only `session_id`). `event`
+    is a serialized server message; only an allowlist of text turn-events is
+    ever forwarded (audio, tool-confirm, and memory notices are not — see
+    `server.py` `_make_notify_observers`)."""
+
+    type: Literal["observed_event"] = "observed_event"
+    room_id: str
+    event: dict
+
+
+AdminClientMessage = Annotated[
+    AdminHello | ObserveRoom,
+    Field(discriminator="type"),
+]
+
+
 ServerMessage = Annotated[
     Welcome
     | UserTranscript

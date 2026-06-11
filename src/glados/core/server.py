@@ -17,6 +17,7 @@ import hmac
 import logging
 import os
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -60,11 +61,16 @@ from .ollama_lifecycle import OllamaLifecycle
 from .organizer import Organizer
 from .secrets import KeyringSecrets, SecretsStore
 from .protocols import (
+    AdminClientMessage,
+    AdminHello,
     ClientMessage,
     ErrorMessage,
     Hello,
+    HelloAck,
     Interrupt,
     MemoryBlockNotice,
+    ObserveRoom,
+    ObservedEvent,
     ToolConfirmResponse,
     UserText,
 )
@@ -129,6 +135,92 @@ _WARMUP_TEXT = "hi"
 
 # Stateless validator — fine at module level.
 _client_msg = TypeAdapter(ClientMessage)
+_admin_msg = TypeAdapter(AdminClientMessage)
+
+# Bound how long a single observer send may block the broadcast loop, and cap
+# concurrent admin connections (loopback + secret already gate it; this stops a
+# reconnect-looping operator client from growing the registry unbounded).
+_OBSERVER_SEND_TIMEOUT_S = 2.0
+_MAX_ADMIN_CONNS = 8
+
+# Server→client message types an admin observer is allowed to see: text turn-
+# events only. Everything else (TtsChunk audio, ToolConfirmRequest, memory
+# notices, errors) is withheld by default — a deny-by-default allowlist so a
+# future message type can't silently leak into the observe stream (ARCH §9).
+_OBSERVABLE_TYPES = frozenset(
+    {
+        "welcome",
+        "user_transcript",
+        "assistant_delta",
+        "tool_call",
+        "tool_result",
+        "done",
+        "cancelled",
+        "turn_outcome",
+        "route_notice",
+    }
+)
+
+
+def _make_notify_observers(
+    admin_conns: dict, admin_observed: dict
+):
+    """Build the broadcast tap the Organizer calls for every room event. It
+    applies the observe allowlist + ObservedEvent envelope and fans out to the
+    admin connections watching that room. Failure-isolated per observer: a dead
+    admin socket is dropped and never breaks delivery to the real room."""
+
+    async def notify_observers(room_id: str, msg: BaseModel) -> None:
+        payload = _observed_payload(msg)
+        if payload is None:
+            return
+        envelope = ObservedEvent(room_id=room_id, event=payload).model_dump()
+        for conn_id in list(admin_observed):  # snapshot: send loop may mutate
+            if admin_observed.get(conn_id) != room_id:
+                continue
+            ws = admin_conns.get(conn_id)
+            if ws is None:
+                continue
+            try:
+                # Bound the send: a connected-but-not-reading admin socket would
+                # otherwise fill its TCP buffer and block here, stalling the
+                # Organizer broadcast — and thus the real room. On timeout the
+                # observer is dropped like a dead one; the room never waits.
+                await asyncio.wait_for(ws.send_json(envelope), _OBSERVER_SEND_TIMEOUT_S)
+            except Exception:
+                admin_conns.pop(conn_id, None)
+                admin_observed.pop(conn_id, None)
+
+    return notify_observers
+
+
+def _observed_payload(msg: BaseModel) -> dict | None:
+    """The dict to forward to admin observers for `msg`, or None if `msg`
+    is not on the observe allowlist. `tool_result` is minimized to its
+    outcome — the raw `content` can carry sensitive tool output and
+    `<external>` untrusted bytes an observer has no need to see."""
+    data = msg.model_dump()
+    kind = data.get("type")
+    if kind not in _OBSERVABLE_TYPES:
+        return None
+    if kind == "tool_result":
+        # Drop raw `content` — it can hold sensitive tool output + <external>
+        # bytes an observer has no need to see.
+        return {
+            k: data[k]
+            for k in ("type", "session_id", "call_id", "ok", "error")
+            if k in data
+        }
+    if kind == "tool_call":
+        # Drop `args` symmetrically — call arguments routinely carry the same
+        # sensitive material as results (paths, message bodies, credentials).
+        # The observer still sees which tool ran (server/name).
+        return {
+            k: data[k]
+            for k in ("type", "session_id", "call_id", "server", "name")
+            if k in data
+        }
+    return data
 
 # Source-checkout layout only: src/glados/core/server.py → repo root is parents[3].
 # GLaDOS is self-hosted, not pip-distributed; if that ever changes, ship the
@@ -324,6 +416,16 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             if c.room_id == room_id and c.client_id in connections
         ]
 
+    # Loopback admin room-viewer registries (populated only when the admin
+    # app is bound — see build_admin_app + main()). admin_conns: conn_id -> ws;
+    # admin_observed: conn_id -> the room it currently watches (None = none).
+    # Kept separate from `connections` so observers are NEVER mistaken for room
+    # members (they must not affect mic-gating, tool-confirm, or "one session
+    # per room"). Stored on app.state so build_admin_app shares the same dicts.
+    admin_conns: dict[str, WebSocket] = {}
+    admin_observed: dict[str, str | None] = {}
+    notify_observers = _make_notify_observers(admin_conns, admin_observed)
+
     sessions = SessionRegistry(idle_window_s=glados_cfg.session.idle_window_s)
     organizer = Organizer(
         llm=llm,
@@ -334,6 +436,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         send=send,
         binding_for_client=rooms_cfg.find,
         clients_in_room=clients_in_room,
+        notify_observers=notify_observers,
         router=router,
         specialist_llm=specialist_llm,
         escalate_on_failed=glados_cfg.router.escalate_on_failed,
@@ -537,6 +640,11 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     app.state.servers_cfg = servers_cfg
     app.state.organizer = organizer
     app.state.connections = connections
+    # Shared with build_admin_app + the notify_observers closure above (same
+    # dict objects, so an observe registered on the admin app is seen by the
+    # broadcast tap running under the main app — one process, one Organizer).
+    app.state.admin_conns = admin_conns
+    app.state.admin_observed = admin_observed
     app.state.mcp = mcp
     app.state.stdio_servers = stdio_servers
     # Trusted-server memory that failed the LocalGuard gate at load time
@@ -569,6 +677,106 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
 
     _register_routes(app)
     return app
+
+
+def build_admin_app(app: FastAPI) -> FastAPI:
+    """The loopback-only admin room-viewer surface (ARCHITECTURE §9). Served on
+    its own FastAPI bound to 127.0.0.1:admin_port (see main()), so the
+    house-wide observe capability never reaches the LAN-facing app. Shares the
+    main app's state — same Organizer, same admin registries — so an observe
+    registered here is seen by the broadcast tap running under the main app.
+
+    Auth is the admin secret (keyring `glados.admin`/`observe-token`),
+    constant-time compared; loopback binding is the primary control, the secret
+    is defense-in-depth. The channel is strictly read-only: it accepts only
+    AdminHello + ObserveRoom and can never inject into a room."""
+    admin = FastAPI()
+
+    @admin.websocket("/ws/admin")
+    async def ws_admin(ws: WebSocket) -> None:  # pragma: no cover - see tests
+        await ws.accept()
+        state = app.state
+        if len(state.admin_conns) >= _MAX_ADMIN_CONNS:
+            await _admin_reject(ws, "too_many_admin_connections")
+            return
+        if not await _admin_authenticate(ws, state):
+            return
+        rooms = sorted({c.room_id for c in state.rooms_cfg.clients})
+        await ws.send_json(HelloAck(rooms=rooms).model_dump())
+        conn_id = uuid.uuid4().hex
+        state.admin_conns[conn_id] = ws
+        state.admin_observed[conn_id] = None
+        log.info("admin observe: connected %s (rooms=%s)", conn_id, rooms)
+        try:
+            await _serve_admin(ws, conn_id, state)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            state.admin_conns.pop(conn_id, None)
+            state.admin_observed.pop(conn_id, None)
+            log.info("admin observe: disconnected %s", conn_id)
+
+    return admin
+
+
+async def _admin_authenticate(ws: WebSocket, state) -> bool:
+    """First message must be an AdminHello carrying the admin secret. Returns
+    True on success; on any failure closes and returns False."""
+    try:
+        raw = await ws.receive_json()
+    except Exception:
+        # Non-JSON/binary first frame, or the peer vanished — close and bail.
+        await _admin_reject(ws, "expected admin_hello")
+        return False
+    try:
+        msg = _admin_msg.validate_python(raw)
+    except ValidationError:
+        await _admin_reject(ws, "expected admin_hello")
+        return False
+    if not isinstance(msg, AdminHello):
+        await _admin_reject(ws, "expected admin_hello")
+        return False
+    expected = state.secrets.get("admin", "observe-token")
+    if not expected or not hmac.compare_digest(expected.encode(), msg.token.encode()):
+        # INFO so an operator sees probes against the admin surface.
+        log.info("admin observe: rejected handshake (bad or unset admin secret)")
+        await _admin_reject(ws, "auth_failed")
+        return False
+    return True
+
+
+async def _serve_admin(ws: WebSocket, conn_id: str, state) -> None:
+    while True:
+        try:
+            raw = await ws.receive_json()
+        except WebSocketDisconnect:
+            raise
+        except Exception:
+            # Bad (non-JSON) frame — report and keep the connection, rather
+            # than dropping the operator with a stack trace.
+            await _send_error(ws, "bad_message", "expected JSON")
+            continue
+        try:
+            msg = _admin_msg.validate_python(raw)
+        except ValidationError as e:
+            await _send_error(ws, "bad_message", str(e))
+            continue
+        if isinstance(msg, ObserveRoom):
+            prev = state.admin_observed.get(conn_id)
+            state.admin_observed[conn_id] = msg.room_id
+            # Audit: who observed which room, when. A house-wide surveillance
+            # capability must leave a trail (ARCHITECTURE §9).
+            log.info(
+                "admin observe: %s switched %s -> %s", conn_id, prev, msg.room_id
+            )
+
+
+async def _admin_reject(ws: WebSocket, code: str) -> None:
+    try:
+        await _send_error(ws, code, code)
+        await ws.close(code=1008)  # policy violation
+    except Exception:
+        pass  # peer already gone
 
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})

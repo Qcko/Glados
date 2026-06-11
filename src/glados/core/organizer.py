@@ -48,6 +48,9 @@ log = logging.getLogger(__name__)
 SendFn = Callable[[str, BaseModel], Awaitable[None]]
 BindingLookup = Callable[[str], ClientBinding | None]
 RoomLookup = Callable[[str], list[str]]
+# (room_id, message) -> forward to any admin observers of that room. The impl
+# owns the forward allowlist + envelope; the organizer just taps every broadcast.
+ObserverNotify = Callable[[str, BaseModel], Awaitable[None]]
 UserTextSource = Literal["voice", "text"]
 
 _MAX_TOOL_LOOP = 8
@@ -116,6 +119,7 @@ class Organizer:
         send: SendFn,
         binding_for_client: BindingLookup,
         clients_in_room: RoomLookup,
+        notify_observers: ObserverNotify | None = None,
         tts: TTS | None = None,
         room_queues: RoomQueueManager | None = None,
         tts_cooldown_s: float = 0.200,
@@ -152,6 +156,11 @@ class Organizer:
         self.send = send
         self.binding_for_client = binding_for_client
         self.clients_in_room = clients_in_room
+        # Optional read-only tap for the loopback admin room-viewer. Called for
+        # every room broadcast; the impl (server.py) applies the forward
+        # allowlist + envelope and fans out to admin observers. None = no admin
+        # surface wired (the default; tests and the no-admin-port case).
+        self._notify_observers = notify_observers
         self._queues = room_queues if room_queues is not None else RoomQueueManager()
         # session_id -> (task, room_id). Lets handle_interrupt cancel the
         # right turn and route the Cancelled broadcast to the right room.
@@ -768,6 +777,12 @@ class Organizer:
     async def _broadcast(self, room_id: str, msg: BaseModel) -> None:
         for cid in self.clients_in_room(room_id):
             await self.send(cid, msg)
+        # Read-only admin tap, AFTER room members so a slow/dead admin socket
+        # can never delay or break delivery to the actual participants. The
+        # impl applies the forward allowlist (text turn-events only) + the
+        # ObservedEvent envelope; non-forwardable types are dropped there.
+        if self._notify_observers is not None:
+            await self._notify_observers(room_id, msg)
 
     # ---- Permission gates -------------------------------------------------
 

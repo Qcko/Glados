@@ -23,6 +23,10 @@ class ServerConfig(BaseModel):
     # by clients; generate with scripts/gen-tls-cert.sh. See deploy/ROADMAP.md.
     tls_certfile: str = ""
     tls_keyfile: str = ""
+    # Loopback-only admin room-viewer port (observe any room's conversation as
+    # text — see ARCHITECTURE §9). 0 = disabled. ALWAYS bound to 127.0.0.1 so
+    # the house-wide capability never reaches the LAN, regardless of `host`.
+    admin_port: int = 0
 
 
 class HandshakeConfig(BaseModel):
@@ -289,6 +293,13 @@ def _apply_env_overrides(cfg: GladosConfig) -> GladosConfig:
         except ValueError as exc:
             raise ValueError(
                 f"GLADOS_PORT must be an integer, got {port_str!r}"
+            ) from exc
+    if (admin_str := os.environ.get("GLADOS_ADMIN_PORT")) is not None:
+        try:
+            server_updates["admin_port"] = int(admin_str)
+        except ValueError as exc:
+            raise ValueError(
+                f"GLADOS_ADMIN_PORT must be an integer, got {admin_str!r}"
             ) from exc
     if (cert := os.environ.get("GLADOS_TLS_CERT")) is not None:
         server_updates["tls_certfile"] = cert
