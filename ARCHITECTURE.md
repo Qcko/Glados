@@ -248,7 +248,19 @@ Invariants:
   Populate via `python -m glados.secrets set <scope> <name>`. See
   `src/glados/core/secrets.py`.
 - *Auth is per-client, revocable.* Token loss compromises one client, not the
-  house.
+  house. **Exception — the admin room-viewer (debugging).** A loopback-only
+  admin surface (`core/server.py` `build_admin_app`, default off, bound to
+  `127.0.0.1:admin_port`) can observe *any* room's conversation as text. This
+  deliberately widens the per-client invariant — one credential there can read
+  the whole house — so it is constrained two ways: (1) it is **never bound to a
+  non-loopback interface**, so the capability is unreachable from the LAN (same
+  posture as `/admin/*` and `/healthz`); and (2) it requires a **distinct admin
+  secret** (keyring `glados.admin`/`observe-token`), constant-time compared, on
+  top of loopback. The channel is **read-only** (it can observe, never inject
+  into a room), forwards a deny-by-default **allowlist of text turn-events**
+  only (no audio, no tool-confirm prompts, no memory notices), and **strips**
+  `tool_call.args` and `tool_result.content` (they carry the same sensitive
+  material a participant sees). Observe start/stop/switch is **audit-logged**.
 
 ---
 

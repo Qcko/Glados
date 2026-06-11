@@ -143,6 +143,9 @@ _admin_msg = TypeAdapter(AdminClientMessage)
 _OBSERVER_SEND_TIMEOUT_S = 2.0
 _MAX_ADMIN_CONNS = 8
 
+# The loopback admin viewer page (self-contained, no build step).
+_ADMIN_UI_HTML = str(Path(__file__).resolve().parent.parent / "web" / "admin.html")
+
 # Server→client message types an admin observer is allowed to see: text turn-
 # events only. Everything else (TtsChunk audio, ToolConfirmRequest, memory
 # notices, errors) is withheld by default — a deny-by-default allowlist so a
@@ -691,6 +694,10 @@ def build_admin_app(app: FastAPI) -> FastAPI:
     is defense-in-depth. The channel is strictly read-only: it accepts only
     AdminHello + ObserveRoom and can never inject into a room."""
     admin = FastAPI()
+
+    @admin.get("/")
+    async def admin_index() -> FileResponse:  # pragma: no cover - static file
+        return FileResponse(_ADMIN_UI_HTML)
 
     @admin.websocket("/ws/admin")
     async def ws_admin(ws: WebSocket) -> None:  # pragma: no cover - see tests

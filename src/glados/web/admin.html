@@ -1,0 +1,189 @@
+<!doctype html>
+<!--
+  GLaDOS admin room-viewer (loopback-only — ARCHITECTURE §9). Read-only: watch
+  any room's conversation as text for debugging. Self-contained (no build step);
+  served by core/server.py build_admin_app at GET / on the loopback admin port.
+  It speaks the admin channel: AdminHello -> HelloAck{rooms}; ObserveRoom; and
+  renders the ObservedEvent{room_id,event} stream. There is NO compose box — the
+  channel cannot inject into a room.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GLaDOS — admin room viewer</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #14151a; color: #e6e6e6; }
+  header { padding: 10px 14px; background: #1d1f27; border-bottom: 1px solid #2c2f3a; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 14px; margin: 0 8px 0 0; font-weight: 600; color: #9fb3ff; }
+  input[type=password] { background: #0f1014; border: 1px solid #2c2f3a; color: #e6e6e6; padding: 5px 8px; border-radius: 5px; }
+  button { background: #2c2f3a; border: 1px solid #3a3e4d; color: #e6e6e6; padding: 5px 10px; border-radius: 5px; cursor: pointer; }
+  button:hover { background: #353947; }
+  button.active { background: #3a4a8c; border-color: #5566bb; }
+  #status { margin-left: auto; font-size: 12px; color: #8a8f9c; }
+  #status.ok { color: #6fcf97; }
+  #status.err { color: #ff7a7a; }
+  #rooms { padding: 8px 14px; display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid #2c2f3a; }
+  #rooms:empty { display: none; }
+  #log { padding: 12px 14px; }
+  .row { margin: 6px 0; display: flex; }
+  .bubble { padding: 6px 10px; border-radius: 8px; max-width: 80%; white-space: pre-wrap; word-break: break-word; }
+  .user .bubble { background: #2a3350; margin-left: auto; }
+  .user.voice .bubble::before { content: "🎙 "; opacity: .6; }
+  .assistant .bubble { background: #232a22; }
+  .tool .bubble { background: #2a2520; color: #d7c9a7; font-family: ui-monospace, monospace; font-size: 12px; }
+  .system .bubble { background: transparent; color: #6b7080; font-size: 12px; font-style: italic; }
+  .error .bubble { background: #3a2222; color: #ff9b9b; }
+  .hint { color: #6b7080; padding: 24px 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>GLaDOS admin viewer</h1>
+  <input id="secret" type="password" placeholder="admin secret" autocomplete="off" aria-label="admin secret" />
+  <button id="connect">Connect</button>
+  <span id="status">disconnected</span>
+</header>
+<div id="rooms" role="tablist" aria-label="rooms"></div>
+<div id="log"><p class="hint">Enter the admin secret and Connect, then pick a room to watch.</p></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status"), roomsEl = $("rooms"), logEl = $("log");
+
+let ws = null, rooms = [], currentRoom = null, retry = null, stopped = false;
+const liveBubbles = new Map();   // session_id -> assistant bubble (delta accumulation)
+
+function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = cls || ""; }
+
+function wsUrl() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${location.host}/ws/admin`;
+}
+
+// Neuter an existing socket so its handlers can't fire a duplicate reconnect.
+function teardown() {
+  if (!ws) return;
+  ws.onclose = ws.onmessage = ws.onerror = null;
+  try { ws.close(); } catch (_) {}
+  ws = null;
+}
+
+function connect() {
+  const secret = $("secret").value.trim();
+  if (!secret) { setStatus("enter the admin secret", "err"); return; }
+  sessionStorage.setItem("glados-admin-secret", secret);
+  clearTimeout(retry);
+  teardown();           // close any prior socket first — no parallel loops
+  stopped = false;
+  setStatus("connecting…");
+  ws = new WebSocket(wsUrl());
+  ws.onopen = () => ws.send(JSON.stringify({ type: "admin_hello", token: secret }));
+  ws.onmessage = (ev) => {
+    let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
+    onMessage(m);
+  };
+  ws.onclose = () => {
+    if (stopped) return;   // auth_failed / explicit teardown — don't hammer
+    setStatus("disconnected — retrying…", "err");
+    // The server requires a fresh AdminHello + ObserveRoom after any reconnect.
+    retry = setTimeout(connect, 1500);
+  };
+  ws.onerror = () => { if (ws) ws.close(); };
+}
+
+function onMessage(msg) {
+  switch (msg.type) {
+    case "hello_ack":
+      rooms = msg.rooms || [];
+      setStatus("connected", "ok");
+      renderRoomTabs();
+      // Re-observe across a reconnect WITHOUT wiping the pane (server streams
+      // live-only, so re-observing won't duplicate what's already shown).
+      if (currentRoom && rooms.includes(currentRoom)) sendObserve(currentRoom);
+      break;
+    case "observed_event":
+      if (msg.room_id === currentRoom) ingest(msg.event);
+      break;
+    case "error":
+      if (msg.code === "auth_failed") {
+        stopped = true; clearTimeout(retry); teardown();
+        setStatus("auth failed — check the secret", "err");
+      } else {
+        setStatus(`error: ${msg.code}`, "err");
+      }
+      break;
+  }
+}
+
+function renderRoomTabs() {
+  roomsEl.innerHTML = "";
+  for (const r of rooms) {
+    const b = document.createElement("button");
+    b.textContent = r; b.setAttribute("role", "tab");
+    if (r === currentRoom) b.classList.add("active");
+    b.onclick = () => selectRoom(r);
+    roomsEl.appendChild(b);
+  }
+}
+
+function sendObserve(room) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "observe_room", room_id: room }));
+  }
+}
+
+// Operator picked a room: reset the pane, then observe it.
+function selectRoom(room) {
+  currentRoom = room;
+  liveBubbles.clear();
+  logEl.innerHTML = "";
+  renderRoomTabs();
+  sendObserve(room);
+}
+
+function ingest(e) {
+  switch (e.type) {
+    case "welcome": row("system", `session ${e.session_id}`); break;
+    case "user_transcript": {
+      const r = row("user", e.text);
+      if (e.source === "voice") r.classList.add("voice");
+      break;
+    }
+    case "assistant_delta": {
+      let bubble = liveBubbles.get(e.session_id);
+      if (!bubble) { bubble = row("assistant", "").querySelector(".bubble"); liveBubbles.set(e.session_id, bubble); }
+      bubble.textContent += e.text;
+      break;
+    }
+    // tool_call/tool_result arrive minimized (no args/content) from the server.
+    case "tool_call": row("tool", `→ ${e.server}.${e.name}`); break;
+    case "tool_result": row("tool", e.ok ? `← ok` : `← error: ${e.error || ""}`); break;
+    case "turn_outcome": row("system", `outcome: ${e.outcome}`); break;
+    case "route_notice": row("system", `route → ${e.target}${e.escalated ? " (escalated)" : ""}`); break;
+    case "done": row("system", "— done —"); liveBubbles.delete(e.session_id); break;
+    case "cancelled": row("system", "— cancelled —"); liveBubbles.delete(e.session_id); break;
+  }
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function row(kind, text) {
+  const r = document.createElement("div");
+  r.className = `row ${kind}`;
+  const b = document.createElement("div");
+  b.className = "bubble";
+  b.textContent = text;
+  r.appendChild(b);
+  logEl.appendChild(r);
+  return r;
+}
+
+$("connect").onclick = connect;
+$("secret").addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
+const saved = sessionStorage.getItem("glados-admin-secret");
+if (saved) { $("secret").value = saved; connect(); }
+</script>
+</body>
+</html>

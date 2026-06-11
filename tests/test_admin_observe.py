@@ -147,6 +147,22 @@ def _admin_client(token: str = "adm-secret"):
     return app, TestClient(build_admin_app(app))
 
 
+def test_admin_index_serves_the_viewer_page() -> None:
+    _app, client = _admin_client()
+    r = client.get("/")
+    assert r.status_code == 200
+    # The page must speak the live protocol — assert the message types so a
+    # schema rename breaks this test, not the operator's debugging session.
+    for token in (
+        "admin_hello",
+        "hello_ack",
+        "observe_room",
+        "observed_event",
+        "auth_failed",
+    ):
+        assert token in r.text
+
+
 def test_admin_rejects_bad_secret() -> None:
     _app, client = _admin_client()
     with client.websocket_connect("/ws/admin") as ws:

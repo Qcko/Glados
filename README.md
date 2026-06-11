@@ -94,6 +94,23 @@ Then open http://127.0.0.1:8765/ for the UI, or use `ws://127.0.0.1:8765/ws/v1`
 directly. `GET /healthz` for a liveness check. Tests: `uv run pytest`
 (integration tests skip when Ollama isn't reachable).
 
+### Admin room-viewer (loopback-only debugging)
+
+A separate, **loopback-only** surface lets you watch any room's conversation as
+text — useful for debugging a remote room client (e.g. a phone). It is off by
+default and, by design, never reachable from the LAN (ARCHITECTURE §9). To
+enable it, stage a distinct admin secret in the keyring and set its port:
+
+```powershell
+python -m glados.secrets set admin observe-token   # paste a strong secret when prompted
+setx GLADOS_ADMIN_PORT 9765                         # or set for the session before `uv run glados`
+```
+
+Then open **http://127.0.0.1:9765/** on the server box, enter that secret, and
+pick a room. The view is read-only (it cannot inject into a room), text-only (no
+audio), and strips tool arguments/results. Leave `GLADOS_ADMIN_PORT` unset to
+keep the surface disabled.
+
 For client iteration, run Vite's dev server with HMR — it proxies the WS to
 the FastAPI backend running on 8765/8000:
 
