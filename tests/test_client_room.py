@@ -83,6 +83,9 @@ def test_wire_matches_server_protocol() -> None:
     # The built hello must validate against the real Pydantic model.
     model = p.Hello(**wire.hello("c", "r", "mic", "t"))
     assert model.type == "hello" and model.role == "mic" and model.client_id == "c"
+    # The built playback_done must validate against the real Pydantic model.
+    done = p.PlaybackDone(**wire.playback_done("sess-1"))
+    assert done.type == "playback_done" and done.session_id == "sess-1"
 
 
 # ---- resampler ----------------------------------------------------------
@@ -841,6 +844,88 @@ async def test_speaker_done_does_not_flush() -> None:
     inbound = [_msg("welcome"), _tts_chunk(0, 22_050, [7, 8, 9]), _msg("done")]
     client, conns, task = await _run_speaker(inbound, lambda _r: dev)
     assert np.frombuffer(dev.pull(3), dtype="<i2").tolist() == [7, 8, 9]
+    await _stop_speaker(client, conns, task)
+
+
+# ---- Slice B: playback_done drain signal --------------------------------
+
+
+def _playback_dones(conn) -> list:
+    """Session ids of every `playback_done` frame the speaker sent on `conn`."""
+    out = []
+    for data in conn.sent:
+        try:
+            m = json.loads(data)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(m, dict) and m.get("type") == "playback_done":
+            out.append(m.get("session_id"))
+    return out
+
+
+async def _wait_until(predicate, *, timeout: float = 2.0) -> bool:
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
+
+async def test_speaker_signals_playback_done_after_drain() -> None:
+    dev = NullOutputDevice(22_050)  # tail_s = 0.0
+    inbound = [_msg("welcome"), _tts_chunk(0, 22_050, [7, 8, 9]), _msg("done")]
+    client, conns, task = await _run_speaker(inbound, lambda _r: dev)
+    # Reply still buffered → no signal yet (an early one would reopen the mic
+    # mid-TTS, the feedback bug Slice A fixed).
+    assert _playback_dones(conns[0]) == []
+    dev.pull(3)  # the device pulls the last bytes → buffer drains
+    assert await _wait_until(lambda: _playback_dones(conns[0]) == ["sess"])
+    await _stop_speaker(client, conns, task)
+
+
+async def test_speaker_signals_playback_done_for_silent_reply() -> None:
+    """A turn that produced no audio (no device ever built) releases the gate at
+    once — nothing is playing locally to feed back."""
+    dev = NullOutputDevice(22_050)
+    inbound = [_msg("welcome"), _msg("done")]
+    client, conns, task = await _run_speaker(inbound, lambda _r: dev)
+    assert await _wait_until(lambda: _playback_dones(conns[0]) == ["sess"])
+    await _stop_speaker(client, conns, task)
+
+
+async def test_speaker_cancel_after_done_drops_playback_done() -> None:
+    """`cancelled` flushes the buffer (→ instantly empty) AND cancels the drain
+    watch: the flush-induced empty must NOT be mistaken for a clean drain and
+    fire a stale signal for the cancelled turn."""
+    dev = NullOutputDevice(22_050)
+    inbound = [
+        _msg("welcome"), _tts_chunk(0, 22_050, [1, 2, 3]),
+        _msg("done"), _msg("cancelled"),
+    ]
+    client, conns, task = await _run_speaker(inbound, lambda _r: dev)
+    dev.pull(3)  # buffer already flushed empty by cancelled
+    assert not await _wait_until(
+        lambda: _playback_dones(conns[0]) != [], timeout=0.2
+    )
+    await _stop_speaker(client, conns, task)
+
+
+async def test_speaker_suppressed_during_tail_skips_signal() -> None:
+    """White-box: a barge-in that lands while the watch is in its post-drain tail
+    sleep must be caught by the pre-send recheck, not signalled. Drives the race
+    deterministically — tail (0.2s) >> the 0.05s we wait before flipping
+    suppression — so the flip always lands inside the tail sleep."""
+    dev = NullOutputDevice(22_050, tail_s=0.2)
+    inbound = [_msg("welcome"), _tts_chunk(0, 22_050, [1, 2, 3]), _msg("done")]
+    client, conns, task = await _run_speaker(inbound, lambda _r: dev)
+    dev.pull(3)  # drain → watch passes _await_buffer_empty, enters the tail sleep
+    await asyncio.sleep(0.05)
+    client._suppressed = True  # a cancel's effect, landing mid-tail
+    assert not await _wait_until(
+        lambda: _playback_dones(conns[0]) != [], timeout=0.4
+    )
     await _stop_speaker(client, conns, task)
 
 

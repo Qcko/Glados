@@ -45,6 +45,15 @@ def hello(client_id: str, room_id: str, role: str, token: str) -> dict:
     }
 
 
+def playback_done(session_id: str) -> dict:
+    """Build the `playback_done` control frame. Sent by a speaker once the TTS
+    audio for `session_id` has finished playing out of its buffer + device, so
+    the server can early-release its mic feedback gate from the duration
+    estimate to the short tail cooldown. Advisory: a missing one just falls back
+    to the estimate (see Organizer.handle_playback_done)."""
+    return {"type": "playback_done", "session_id": session_id}
+
+
 def frame(seq: int, pcm: bytes) -> bytes:
     """Prefix a PCM16-LE payload with its big-endian uint32 sequence number.
     `seq` is masked to 32 bits so a long-running client wraps cleanly instead

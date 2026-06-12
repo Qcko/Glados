@@ -381,6 +381,14 @@ class SubprocessInput:
 # Output side (speaker client)
 # ===========================================================================
 
+# Padding added to every device's drain tail (see OutputDevice.tail_s). The
+# tail is the load-bearing guard against signalling PlaybackDone while audio is
+# still audible; the device's own latency figure can under-report (scheduling
+# jitter, sink buffering), so we always add this cushion. Generous on purpose —
+# a late signal only loses the early-release benefit, an early one reopens the
+# mic mid-TTS.
+_DRAIN_TAIL_MARGIN_S = 0.05
+
 
 class JitterBuffer:
     """Thread-safe PCM byte ring feeding a real-time playback callback.
@@ -483,9 +491,34 @@ class JitterBuffer:
             self._head = 0
             self._armed = self._prebuffer_bytes <= 0
 
+    def bytes_remaining(self) -> int:
+        """Live (written-but-unconsumed) PCM bytes — what the playback callback
+        has yet to pull. The drain detector polls this after `done`: 0 means the
+        device has pulled every byte of the reply (hardware/pipe tail still
+        pending — that's the OutputDevice's `tail_s`). Takes the lock; safe to
+        call cross-thread."""
+        with self._lock:
+            return self._available()
+
+    def force_arm(self) -> None:
+        """Arm draining regardless of the prebuffer threshold. Called on `done`:
+        a reply shorter than `prebuffer_bytes` would otherwise never arm, so it
+        would neither play nor ever reach `bytes_remaining() == 0` (the drain
+        detector would hang). Once `done` is in, no more audio is coming, so the
+        prebuffer has nothing left to smooth — drain what we have."""
+        with self._lock:
+            self._armed = True
+
 
 class OutputDevice(Protocol):
     samplerate: int
+    # Seconds the device + its sink still hold after `JitterBuffer` empties: the
+    # gap between "callback pulled the last bytes" and "the speaker went silent"
+    # (PortAudio stream latency + DAC, or pacat's stdin pipe + --latency-msec).
+    # The drain detector waits this out before signalling PlaybackDone, so the
+    # mic gate never reopens while the tail is still audible. Err generous — the
+    # only cushion for an under-estimate is the server's short tail cooldown.
+    tail_s: float
 
     def start(
         self,
@@ -507,8 +540,9 @@ class NullOutputDevice:
     bytes the real callback would have requested) and simulates an unexpected
     stream death with `fail`."""
 
-    def __init__(self, samplerate: int = 22_050) -> None:
+    def __init__(self, samplerate: int = 22_050, tail_s: float = 0.0) -> None:
         self.samplerate = samplerate
+        self.tail_s = tail_s
         self._buffer: JitterBuffer | None = None
         self._on_close: Optional[CloseCallback] = None
         self.started = False
@@ -562,6 +596,10 @@ class SoundDeviceOutput:
         # barge-in flush). Keep it short so barge-in feels immediate.
         self._blocksize = blocksize
         self._latency = latency
+        # Drain tail (see OutputDevice.tail_s). A conservative default until
+        # `start` learns the stream's real output latency; padded so an
+        # under-estimate never reopens the mic mid-tail.
+        self.tail_s = _DRAIN_TAIL_MARGIN_S
         self._stream: object | None = None
 
     def start(
@@ -593,6 +631,10 @@ class SoundDeviceOutput:
             callback=_cb,
             finished_callback=_finished,
         )
+        # Now that PortAudio has opened the stream, its real output latency is
+        # known — use it (plus a margin) as the drain tail instead of the
+        # construction-time guess.
+        self.tail_s = float(self._stream.latency) + _DRAIN_TAIL_MARGIN_S
         self._stream.start()
 
     def stop(self) -> None:
@@ -658,6 +700,11 @@ class SubprocessOutput:
         chunk_frames = max(1, int(samplerate * chunk_ms / 1000.0))
         self._chunk_bytes = chunk_frames * _PCM_DTYPE.itemsize
         self._chunk_s = chunk_frames / samplerate
+        # Drain tail (see OutputDevice.tail_s): after the JitterBuffer empties,
+        # pacat's sink still holds ~--latency-msec, and the self-clocked writer
+        # may have pushed up to one chunk ahead into the stdin pipe. Sum both,
+        # plus the shared margin.
+        self.tail_s = latency_msec / 1000.0 + self._chunk_s + _DRAIN_TAIL_MARGIN_S
         # An argv LIST passed to Popen with shell=False — no shell, no string
         # splitting, so a sink name or extra arg can't inject a command.
         self._extra_args = list(extra_args or [])

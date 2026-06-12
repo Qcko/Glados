@@ -2,8 +2,8 @@
 
 Lifecycle of one session:
   1. open the socket, send `hello` (role="speaker") as the first message; a good
-     handshake is silent (no `welcome` ack). The speaker is recv-only after that
-     — it never uploads audio.
+     handshake is silent (no `welcome` ack). The speaker never uploads audio; it
+     sends only one advisory control frame — `playback_done` (see below).
   2. a recv loop dispatches server JSON: `tts_chunk` (base64 PCM16-LE + seq +
      sample_rate) is decoded and written into a `JitterBuffer`; the output
      device's real-time callback pulls from that buffer to feed the speaker.
@@ -11,12 +11,23 @@ Lifecycle of one session:
      next `welcome`; `done` lets the buffer drain naturally (no flush). An
      `error` frame is terminal (bad token / binding) — stop, don't reconnect.
 
-Turn state machine (mirrors client_web/src/audio/tts.ts):
+Playback-done signal: on `done` the speaker starts a drain watch — once the
+`JitterBuffer` has emptied AND the device's `tail_s` (hardware/sink residue) has
+elapsed, it sends `playback_done{session_id}` so the server can early-release its
+mic feedback gate from the duration estimate to the short tail cooldown. It is
+purely advisory: a dropped/late signal just falls back to the server's estimate
+(see Organizer.handle_playback_done). The signal must never be EARLY — that would
+reopen the mic while TTS is still audible — so the tail is deliberately generous
+and the watch is cancelled the instant a `cancelled`/`welcome`/teardown
+invalidates the turn it was started for.
+
+Turn state machine (extends client_web/src/audio/tts.ts — the browser does not
+yet send `playback_done`; see the signal note above):
   welcome   → clear suppression (allow playback for the new turn)
   tts_chunk → if not suppressed: decode + enqueue (build/rebuild the device on
               the first chunk or a sample-rate change)
-  cancelled → flush + suppress (drop the cancelled turn's late chunks)
-  done      → nothing; the tail drains
+  cancelled → flush + suppress + cancel the drain watch
+  done      → no flush (the tail drains); start the drain watch
 
 Why "suppress until welcome" is race-free without a turn id on the wire: the
 server streams over a single ordered socket and processes a room's turns
@@ -37,6 +48,7 @@ import json
 import logging
 from typing import Callable
 
+from . import wire
 from ._client import ReconnectingClient, load_config, load_token
 from .audio import JitterBuffer, OutputDevice
 
@@ -45,6 +57,11 @@ log = logging.getLogger("client_room.speaker")
 DeviceFactory = Callable[[int], OutputDevice]
 
 _BYTES_PER_SAMPLE = 2  # PCM16-LE mono
+
+# How often the drain watch re-checks the JitterBuffer for empty. Coarse on
+# purpose: the signal only shortens the gate, so a few tens of ms of detection
+# lag is invisible — and a tight loop would burn a core polling a phone.
+_DRAIN_POLL_S = 0.03
 
 
 class SpeakerClient(ReconnectingClient):
@@ -94,6 +111,16 @@ class SpeakerClient(ReconnectingClient):
         # host-specific finished_callback timing.
         self._device_gen = 0
         self._wake_closed: Callable[[], None] = lambda: None
+        # Live socket for this session — the drain watch reads it (as a spawn
+        # argument) to send `playback_done`. Re-set per session in `_session`.
+        self._ws = None
+        # The in-flight drain watch (one per turn, spawned on `done`). Cancelling
+        # it — on cancelled/welcome/teardown — is the ONLY thing that keeps it
+        # from firing for a turn the client has moved past; `_device_gen` resets
+        # to 0 each session, so the task identity, not the gen alone, is the
+        # cross-session guard. Teardown cancels it before the next session's
+        # `_reset_turn_state` runs, closing the gen-reuse hole.
+        self._drain_task: asyncio.Task | None = None
 
     async def _session(self) -> None:
         # MUST run first: clears the device generation a prior teardown left
@@ -104,6 +131,7 @@ class SpeakerClient(ReconnectingClient):
         # Device death (callback thread) wakes the session (asyncio thread).
         self._wake_closed = lambda: loop.call_soon_threadsafe(closed.set)
         async with self._connect(self._url) as ws:
+            self._ws = ws
             await self._send_hello(ws)
             recv_task = asyncio.create_task(self._recv_loop(ws), name="speaker-recv")
             closed_task = asyncio.create_task(closed.wait(), name="speaker-closed")
@@ -112,6 +140,8 @@ class SpeakerClient(ReconnectingClient):
                     {recv_task, closed_task}, return_when=asyncio.FIRST_COMPLETED
                 )
             finally:
+                self._cancel_drain_watch()
+                self._ws = None
                 self._teardown_device()
                 for t in (recv_task, closed_task):
                     t.cancel()
@@ -147,20 +177,111 @@ class SpeakerClient(ReconnectingClient):
         kind = msg.get("type")
         if kind == "tts_chunk":
             self._on_tts_chunk(msg)
+        elif kind == "done":
+            self._on_done(msg)
         elif kind == "cancelled":
             self._on_cancelled()
         elif kind == "welcome":
-            # New turn: allow playback again (clears a prior barge-in suppress).
-            self._suppressed = False
-        # `done` and every other type: ignore. `done` deliberately does NOT
-        # flush — the synthesized tail finishes playing.
+            self._on_welcome()
+        # every other type: ignore.
+
+    def _on_welcome(self) -> None:
+        # New turn: allow playback again (clears a prior barge-in suppress). A
+        # drain watch from the previous turn is superseded — drop it so it can't
+        # fire against this turn's audio (the server serializes turns, so this is
+        # belt-and-suspenders over the per-turn cancels).
+        self._cancel_drain_watch()
+        self._suppressed = False
 
     def _on_cancelled(self) -> None:
         if self._buffer is not None:
             self._buffer.flush()
         # Stays suppressed until the next `welcome`, so the cancelled turn's
         # in-flight chunks (still arriving on the socket) are dropped, not played.
+        # Order matters: set suppression BEFORE cancelling the watch, so even if
+        # the watch is mid-send it sees `_suppressed` on its pre-send recheck.
         self._suppressed = True
+        self._cancel_drain_watch()
+
+    def _on_done(self, msg: dict) -> None:
+        # `done` deliberately does NOT flush — the synthesized tail finishes
+        # playing. It DOES start the drain watch: the reply is now complete
+        # (ordered socket → every tts_chunk already enqueued), so an empty buffer
+        # from here on means drained, not network-starved.
+        session_id = msg.get("session_id")
+        if not isinstance(session_id, str) or self._suppressed:
+            return
+        self._cancel_drain_watch()  # at most one watch in flight
+        tail_s = self._device.tail_s if self._device is not None else 0.0
+        self._drain_task = asyncio.create_task(
+            self._watch_drain(self._ws, session_id, self._buffer, tail_s, self._device_gen),
+            name="speaker-drain",
+        )
+
+    def _cancel_drain_watch(self) -> None:
+        task = self._drain_task
+        self._drain_task = None
+        if task is not None:
+            task.cancel()
+
+    async def _watch_drain(
+        self, ws, session_id: str, buffer: JitterBuffer | None, tail_s: float, gen: int
+    ) -> None:
+        """Wait until this turn's audio has fully played out, then send
+        `playback_done`. Captured `(buffer, tail_s, gen)` pin the turn: a
+        rate-change rebuild or teardown bumps `_device_gen`, so a stale watch
+        bails instead of signalling against the next turn's audio."""
+        if buffer is None:
+            # No device built (empty or fully-suppressed reply): nothing played
+            # locally, so the gate can release now. Recheck first — a `cancelled`
+            # could have landed in the tick between spawn and this task running.
+            if gen != self._device_gen or self._suppressed:
+                return
+            await self._send_playback_done(ws, session_id)
+            return
+        # A reply shorter than the prebuffer would never arm (so never drain);
+        # `done` means no more audio is coming, so drain what we have.
+        buffer.force_arm()
+        if not await self._await_buffer_empty(buffer, gen):
+            return  # invalidated or timed out — the server estimate covers it.
+        # The buffer is empty but the device/sink still holds `tail_s` of audio;
+        # wait it out so the signal lands at silence, never before it.
+        await asyncio.sleep(tail_s)
+        if gen != self._device_gen or self._suppressed:
+            return  # a cancelled / next turn landed during the tail wait.
+        await self._send_playback_done(ws, session_id)
+
+    async def _await_buffer_empty(self, buffer: JitterBuffer, gen: int) -> bool:
+        """Poll until the buffer drains (True) or the watch is invalidated /
+        times out (False). The cap is a safety net: at `done` the buffer holds at
+        most `max_buffer_s` of audio (its own backlog cap) and drains at realtime,
+        so a longer wait means something wedged — fall back to the estimate."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._max_buffer_s + 2.0
+        while True:
+            if gen != self._device_gen or self._suppressed:
+                return False
+            if buffer.bytes_remaining() == 0:
+                return True
+            if loop.time() >= deadline:
+                log.warning(
+                    "drain watch exceeded %.1fs without emptying; "
+                    "falling back to the server's gate estimate",
+                    self._max_buffer_s + 2.0,
+                )
+                return False
+            await asyncio.sleep(_DRAIN_POLL_S)
+
+    async def _send_playback_done(self, ws, session_id: str) -> None:
+        if ws is None:
+            return
+        try:
+            await ws.send(json.dumps(wire.playback_done(session_id)))
+        except Exception as e:  # noqa: BLE001 - transport/close; estimate covers it
+            log.debug(
+                "playback_done send failed (%s); server falls back to its estimate",
+                type(e).__name__,
+            )
 
     def _on_tts_chunk(self, msg: dict) -> None:
         if self._suppressed:
