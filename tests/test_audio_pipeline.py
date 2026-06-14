@@ -95,10 +95,10 @@ async def test_fake_stt_accepts_callable() -> None:
 
 @pytest.mark.asyncio
 async def test_pipeline_invokes_on_utterance_at_vad_boundary(tmp_path: Path) -> None:
-    seen: list[str] = []
+    seen: list[tuple[str, float]] = []
 
-    async def on_utterance(text: str) -> None:
-        seen.append(text)
+    async def on_utterance(text: str, captured_at: float) -> None:
+        seen.append((text, captured_at))
 
     pipe = AudioPipeline(
         sink=AudioSink(tmp_path, "desk-ui"),
@@ -110,14 +110,45 @@ async def test_pipeline_invokes_on_utterance_at_vad_boundary(tmp_path: Path) -> 
     assert seen == []  # below threshold
     await pipe.feed_frame(_frame(1, [3, 4]))
     await pipe.drain()
-    assert seen == ["transcribed"]
+    assert [t for t, _ in seen] == ["transcribed"]
+    assert isinstance(seen[0][1], float)  # capture timestamp threaded through
+
+
+@pytest.mark.asyncio
+async def test_pipeline_anchors_capture_at_utterance_start(tmp_path: Path) -> None:
+    """`captured_at` must be stamped at VadStart, not VadEnd — anchoring on the
+    start is what lets the feedback gate catch a long TTS bleed despite the VAD
+    silence-hangover. A VadStart in one frame, then a delay, then the VadEnd:
+    the timestamp handed to on_utterance must reflect the START, not the later
+    end."""
+    seen: list[float] = []
+
+    async def on_utterance(text: str, captured_at: float) -> None:
+        seen.append(captured_at)
+
+    pipe = AudioPipeline(
+        sink=None,
+        vad=FakeVAD(utterance_samples=4),
+        stt=FakeSTT("x"),
+        on_utterance=on_utterance,
+    )
+    loop = asyncio.get_running_loop()
+    await pipe.feed_frame(_frame(0, [1, 2]))  # VadStart (buffer 2 < 4)
+    t_after_start = loop.time()
+    await asyncio.sleep(0.050)
+    await pipe.feed_frame(_frame(1, [3, 4]))  # VadEnd (buffer 4)
+    await pipe.drain()
+    assert len(seen) == 1
+    assert seen[0] <= t_after_start + 0.001, (
+        "capture must be anchored to utterance start, not the later VadEnd"
+    )
 
 
 @pytest.mark.asyncio
 async def test_pipeline_skips_empty_transcripts(tmp_path: Path) -> None:
     seen: list[str] = []
 
-    async def on_utterance(text: str) -> None:
+    async def on_utterance(text: str, captured_at: float) -> None:
         seen.append(text)
 
     pipe = AudioPipeline(
@@ -137,7 +168,7 @@ async def test_pipeline_with_no_sink_skips_wav(tmp_path: Path) -> None:
         sink=None,
         vad=FakeVAD(utterance_samples=2),
         stt=FakeSTT(""),
-        on_utterance=lambda _t: asyncio.sleep(0),
+        on_utterance=lambda _t, _c: asyncio.sleep(0),
     )
     await pipe.feed_frame(_frame(0, [1, 2]))
     await pipe.close()
@@ -150,7 +181,7 @@ async def test_pipeline_rejects_short_frame() -> None:
         sink=None,
         vad=FakeVAD(utterance_samples=2),
         stt=FakeSTT(""),
-        on_utterance=lambda _t: asyncio.sleep(0),
+        on_utterance=lambda _t, _c: asyncio.sleep(0),
     )
     with pytest.raises(FrameTooShort):
         await pipe.feed_frame(b"\x00\x00\x00")
@@ -170,7 +201,7 @@ async def test_pipeline_logs_stt_errors_and_does_not_fire(
         sink=None,
         vad=FakeVAD(utterance_samples=2),
         stt=BrokenSTT(),
-        on_utterance=lambda t: seen.append(t) or asyncio.sleep(0),
+        on_utterance=lambda t, _c: seen.append(t) or asyncio.sleep(0),
     )
     with caplog.at_level("ERROR", logger="glados.audio.pipeline"):
         await pipe.feed_frame(_frame(0, [1, 2]))
@@ -191,7 +222,7 @@ async def test_pipeline_close_drains_in_flight(tmp_path: Path) -> None:
             await finish.wait()
             return "late"
 
-    async def on_utterance(text: str) -> None:
+    async def on_utterance(text: str, captured_at: float) -> None:
         results.append(text)
 
     pipe = AudioPipeline(

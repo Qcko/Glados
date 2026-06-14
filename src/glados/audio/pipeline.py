@@ -21,11 +21,11 @@ from typing import Awaitable, Callable
 
 log = logging.getLogger(__name__)
 
-from ..core.adapters import STT, VAD, VadEnd
+from ..core.adapters import STT, VAD, VadEnd, VadStart
 from ..core.audio_sink import AudioSink, FrameTooShort
 from ..core.protocols import AUDIO_HEADER_LEN
 
-OnUtterance = Callable[[str], Awaitable[None]]
+OnUtterance = Callable[[str, float], Awaitable[None]]
 
 
 class AudioPipeline:
@@ -42,14 +42,33 @@ class AudioPipeline:
         self._stt = stt
         self._on_utterance = on_utterance
         self._tasks: set[asyncio.Task[None]] = set()
+        self._utterance_start_at: float | None = None
 
     async def feed_frame(self, framed: bytes) -> None:
         pcm = self._parse(framed)
         if self._sink is not None:
             self._sink.write(framed)
         for event in self._vad.feed(pcm):
-            if isinstance(event, VadEnd):
-                self._spawn_transcription(event.pcm)
+            if isinstance(event, VadStart):
+                # Anchor the utterance to when speech BEGAN, not when the VAD
+                # reports it ended. The feedback gate judges suppression against
+                # this stamp; using the start defeats the VAD silence-hangover
+                # (~200ms) and round-trip latency that would otherwise push a
+                # VadEnd stamp past the gate's horizon and leak TTS bleed. A
+                # bleed always *begins* while GLaDOS is still playing, so the
+                # start lands inside the closed window regardless of how long
+                # the utterance is.
+                self._utterance_start_at = asyncio.get_running_loop().time()
+            elif isinstance(event, VadEnd):
+                # Pair with the VadStart stamp (fall back to now for a VadEnd
+                # with no recorded start — a force-cut or a reset mid-utterance).
+                captured_at = (
+                    self._utterance_start_at
+                    if self._utterance_start_at is not None
+                    else asyncio.get_running_loop().time()
+                )
+                self._utterance_start_at = None
+                self._spawn_transcription(event.pcm, captured_at)
 
     async def drain(self) -> None:
         """Wait for transcriptions spawned before this call. Tasks spawned
@@ -74,12 +93,12 @@ class AudioPipeline:
             raise FrameTooShort(f"PCM payload length {len(pcm)} is not a whole number of int16 samples")
         return pcm
 
-    def _spawn_transcription(self, pcm: bytes) -> None:
-        task = asyncio.create_task(self._transcribe_and_dispatch(pcm))
+    def _spawn_transcription(self, pcm: bytes, captured_at: float) -> None:
+        task = asyncio.create_task(self._transcribe_and_dispatch(pcm, captured_at))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _transcribe_and_dispatch(self, pcm: bytes) -> None:
+    async def _transcribe_and_dispatch(self, pcm: bytes, captured_at: float) -> None:
         try:
             text = await self._stt.transcribe(pcm)
         except Exception:
@@ -89,4 +108,4 @@ class AudioPipeline:
             log.exception("STT.transcribe failed (utterance %d bytes)", len(pcm))
             return
         if text.strip():
-            await self._on_utterance(text)
+            await self._on_utterance(text, captured_at)

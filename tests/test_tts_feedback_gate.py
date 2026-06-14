@@ -330,3 +330,105 @@ async def test_playback_done_implausibly_early_is_ignored(tmp_path: Path) -> Non
         assert org._tts_gate["desk"].phase == "draining", (
             "an implausibly early PlaybackDone must not collapse the gate"
         )
+
+
+@pytest.mark.asyncio
+async def test_gate_judged_against_capture_time_not_arrival(tmp_path: Path) -> None:
+    """The bug this fix exists for: STT takes ~2s, so a transcript of GLaDOS's
+    own voice arrives AFTER the gate (sized to playback) has opened. A
+    `now`-based check would admit it → feedback loop. The decision must be made
+    against the audio's *capture* time, which fell inside the closed window."""
+    async with _make_organizer(
+        [_DESK, _DESK_SPK], tmp_path, tts=FakeTTS(),
+        tts_cooldown_s=0.050, gate_drain_margin_s=0.050,
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "hello there")
+        await org.flush()
+        closed_until = org._tts_gate["desk"].closed_until
+
+        # Simulate STT latency: real `now` is past the horizon (gate has
+        # opened), but the audio was captured just before it closed.
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(max(0.0, closed_until - loop.time()) + 0.020)
+        now = loop.time()
+        assert now >= closed_until, "precondition: the gate has opened by `now`"
+        assert not org._room_mic_gated("desk"), "a now-based check sees it open"
+
+        before = len(sink)
+        await org.handle_audio_text(
+            "desk-ui", "echo of my own voice", captured_at=closed_until - 0.010
+        )
+        assert len(sink) == before, (
+            "audio captured while the gate was closed must be dropped even "
+            "though its transcript arrived after the gate opened"
+        )
+
+        # A genuinely fresh utterance captured AFTER the horizon still passes.
+        before = len(sink)
+        await org.handle_audio_text(
+            "desk-ui", "a real new question", captured_at=now
+        )
+        await org.flush()
+        assert any(m["type"] == "welcome" for _, m in sink[before:]), (
+            "audio captured after the gate opened must run a normal turn"
+        )
+
+
+@pytest.mark.asyncio
+async def test_out_of_order_transcripts_judged_independently(tmp_path: Path) -> None:
+    """Two background Whisper tasks can finish out of order. Each transcript
+    must be judged against its OWN capture time, not arrival order — the
+    during-playback echo dropped, the post-gate utterance admitted, regardless
+    of which `handle_audio_text` call lands first."""
+    async with _make_organizer(
+        [_DESK, _DESK_SPK], tmp_path, tts=FakeTTS(),
+        tts_cooldown_s=0.050, gate_drain_margin_s=0.050,
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "hello there")
+        await org.flush()
+        closed_until = org._tts_gate["desk"].closed_until
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(max(0.0, closed_until - loop.time()) + 0.020)
+        after = loop.time()
+
+        before = len(sink)
+        # The LATER-captured (fresh) utterance's transcript arrives FIRST...
+        await org.handle_audio_text("desk-ui", "fresh", captured_at=after)
+        await org.flush()
+        assert any(m["type"] == "welcome" for _, m in sink[before:]), (
+            "the post-gate utterance must run even when its transcript arrives "
+            "before the earlier echo's"
+        )
+        # ...then the EARLIER-captured echo arrives and is still dropped.
+        before = len(sink)
+        await org.handle_audio_text(
+            "desk-ui", "echo", captured_at=closed_until - 0.010
+        )
+        assert len(sink) == before, "the during-playback echo is still dropped"
+
+
+@pytest.mark.asyncio
+async def test_stale_playback_done_cannot_reraise_horizon(tmp_path: Path) -> None:
+    """A duplicate/late PlaybackDone arriving after the horizon has already
+    passed must NOT push `closed_until` back into the future — that would
+    deafen the mic to a fresh user utterance. Early-release only ever lowers."""
+    async with _make_organizer(
+        [_DESK, _DESK_SPK], tmp_path,
+        tts=FakeTTS(samples_per_chunk=1),  # ~0s audio → earliest_release ≈ now
+        tts_cooldown_s=0.050, gate_drain_margin_s=0.0,
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "hello there")
+        await org.flush()
+        sid = next(m for _, m in sink if m["type"] == "welcome")["session_id"]
+
+        # Let the (tiny) horizon pass so the gate is open.
+        await asyncio.sleep(0.080)
+        assert not org._room_mic_gated("desk")
+        opened_horizon = org._tts_gate["desk"].closed_until
+
+        # A late duplicate PlaybackDone must not raise the horizon.
+        await org.handle_playback_done("desk-spk", sid)
+        assert org._tts_gate["desk"].closed_until == opened_horizon, (
+            "a stale PlaybackDone must not push the horizon into the future"
+        )
+        assert not org._room_mic_gated("desk"), "the gate must stay open"

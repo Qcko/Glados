@@ -924,8 +924,8 @@ def _build_pipeline(
         else None
     )
 
-    async def on_utterance(text: str) -> None:
-        await organizer.handle_audio_text(client_id, text)
+    async def on_utterance(text: str, captured_at: float) -> None:
+        await organizer.handle_audio_text(client_id, text, captured_at)
 
     return AudioPipeline(
         sink=sink,
