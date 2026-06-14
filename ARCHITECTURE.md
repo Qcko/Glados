@@ -762,6 +762,33 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   needed, and the same path works for non-AA cars. Trade-off: SIP
   brings real-time audio into the server's outward surface; needs
   per-device SIP creds and probably its own subprocess for isolation.
+- **Multi-speaker room audio + echo-path calibration.** A room with
+  several speakers, each individually controlled with a per-speaker
+  playback delay. Two distinct delay sets, for two different points:
+  *Set A* time-aligns arrivals at the **listener** (room center) for
+  playback quality — closer speaker delayed more — calibratable with a
+  temporary mic placed at the center playing a tone per speaker; *Set B*
+  is each speaker's echo-path delay to the **phone mic**, measured (tone
+  per speaker on the built-in mic) *after* Set A is applied (so B already
+  includes A — this resolves the "two conflicting delays" trap: you align
+  for the listener, then measure the resulting echo path, no conflict).
+  The appeal is feeding Set B to AEC as a warm-started echo-path prior.
+  **Finding — parked as nice-to-have, NOT on the v3 path:** an *adaptive*
+  AEC already performs Set B continuously from the live audio (that is
+  what "adaptive" means — it self-measures and tracks the echo path), so
+  explicit calibration is **redundant** except in two corner cases: the
+  echo delay-spread **exceeds the AEC filter's tail** (large room / widely
+  spread speakers) or you need **instant convergence** (no 1–2 s warm-up).
+  Both also require a **custom** AEC — the turnkey PulseAudio
+  `module-echo-cancel` (the chosen v3 AEC, §3) self-adapts and exposes no
+  API to inject measured per-speaker delays. And none of it fixes the real
+  AEC killer, **Bluetooth latency jitter** (a one-shot calibration is stale
+  by the next packet). So: a genuine feature for *playback* (Set A,
+  whole-room time-aligned sound, with its own distance-calibration design
+  problem), couple it to the **v7 rich whole-room audio** tier — but its
+  AEC angle (Set B) buys little over letting the adaptive filter self-
+  calibrate, and is not worth a custom-AEC build for GLaDOS's "one phone +
+  maybe a speaker per room" reality.
 
 ---
 
