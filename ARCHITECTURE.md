@@ -858,6 +858,41 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   Chosen: (b). The Organizer doesn't care whether a tool's MCP lives
   in a subprocess or behind a WS; the registry abstraction holds. Pi
   clients are unaffected because they declare nothing extra.
+- **Cross-room message delivery (intercom). Parked — not yet a version.**
+  Let a user in room A ask GLaDOS to speak a message into room B ("tell the
+  livingroom dinner's ready"). No roadmap slice owns this; it's an unplanned
+  feature, post-v3 (real rooms must exist first), sitting *beside* v7 — it
+  rides v7's tool-as-capability model but is its opposite: a **server-side
+  egress capability**, not a client-declared one. Fit, confirmed against the
+  code 2026-06-14:
+    - **The egress half already exists.** `_broadcast(room_id, msg)` and
+      `_speak(session_id, room_id, text, …)` (organizer.py) already synthesize
+      TTS into an arbitrary room and arm that room's feedback gate — egress
+      routing by `room_id` is a first-class Organizer job (§3.5). The target
+      room is just a parameter that today always equals the originating room.
+    - **The missing piece is the trigger, and it is NOT an MCP tool.** MCP
+      tools only return content to the LLM's message history; they cannot emit
+      audio into a room. So this is a **built-in Organizer capability** (the
+      first "tool the Organizer answers itself"), validating a target room and
+      reusing `_speak`/`_broadcast` — chosen over a callback-MCP (punches a
+      trust hole: an external subprocess driving any room's speaker is exactly
+      the §9 escalation) or a v7 client capability (egress is server-side, not
+      client-owned).
+    - **New concurrency interaction (the load-bearing risk).** `_speak` arms
+      `_tts_gate[room_id]` keyed to a session; announcing into room B while
+      room B runs its OWN turn collides two TTS streams on one speaker and
+      stomps the gate's single-owner guard. The single-session-per-room
+      invariant (§3) doesn't account for a second egress writer. Needs an
+      explicit policy: queue behind B's active turn / interrupt it / refuse.
+    - **Crosses a trust boundary (§3/§9).** §3's "confirms are per-user, spoken
+      back to the originating room" doesn't answer "who may broadcast INTO a
+      room they're not in." Plus addressing (a friendly-name→`room_id` table
+      the LLM can see) and a persona that knows rooms exist (§14 prompt path) —
+      the grocery persona refuses off-domain asks today.
+    - **Gate before any code:** design-duck PANEL (architect + security +
+      concurrency), not a single duck — it crosses a trust boundary *and* adds
+      a concurrency interaction. Defer the version call until a multi-room
+      household actually wants intercom.
 - **Remote-access transport.** Three viable shapes: Tailscale (zero
   public surface, mesh-VPN, hard dependency on Tailscale's
   coordination server for control-plane), Cloudflare Tunnel (public
