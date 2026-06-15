@@ -14,19 +14,24 @@
 <title>GLaDOS — admin room viewer</title>
 <style>
   :root { color-scheme: dark; }
-  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #14151a; color: #e6e6e6; }
+  /* Grid layout (matches client_web): header + room tabs stay put; only #log
+     scrolls — same frozen-header behaviour as the non-admin client. */
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #14151a; color: #e6e6e6;
+         display: grid; grid-template-rows: auto 1fr; height: 100vh; }
   header { padding: 10px 14px; background: #1d1f27; border-bottom: 1px solid #2c2f3a; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   header h1 { font-size: 14px; margin: 0 8px 0 0; font-weight: 600; color: #9fb3ff; }
   input[type=password] { background: #0f1014; border: 1px solid #2c2f3a; color: #e6e6e6; padding: 5px 8px; border-radius: 5px; }
   button { background: #2c2f3a; border: 1px solid #3a3e4d; color: #e6e6e6; padding: 5px 10px; border-radius: 5px; cursor: pointer; }
   button:hover { background: #353947; }
   button.active { background: #3a4a8c; border-color: #5566bb; }
+  button.disconnect { background: #8c3a3a; border-color: #bb5566; color: #fff; }
   #status { margin-left: auto; font-size: 12px; color: #8a8f9c; }
   #status.ok { color: #6fcf97; }
   #status.err { color: #ff7a7a; }
-  #rooms { padding: 8px 14px; display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid #2c2f3a; }
+  /* Room tabs live inside the header band, wrapping onto their own full-width line. */
+  #rooms { flex-basis: 100%; display: flex; gap: 6px; flex-wrap: wrap; }
   #rooms:empty { display: none; }
-  #log { padding: 12px 14px; }
+  #log { padding: 12px 14px; overflow-y: auto; }
   .row { margin: 6px 0; display: flex; }
   .bubble { padding: 6px 10px; border-radius: 8px; max-width: 80%; white-space: pre-wrap; word-break: break-word; }
   .user .bubble { background: #2a3350; margin-left: auto; }
@@ -43,9 +48,10 @@
   <h1>GLaDOS admin viewer</h1>
   <input id="secret" type="password" placeholder="admin secret" autocomplete="off" aria-label="admin secret" />
   <button id="connect">Connect</button>
+  <button id="clear">Clear chat</button>
   <span id="status">disconnected</span>
+  <div id="rooms" role="tablist" aria-label="rooms"></div>
 </header>
-<div id="rooms" role="tablist" aria-label="rooms"></div>
 <div id="log"><p class="hint">Enter the admin secret and Connect, then pick a room to watch.</p></div>
 
 <script>
@@ -53,10 +59,17 @@
 const $ = (id) => document.getElementById(id);
 const statusEl = $("status"), roomsEl = $("rooms"), logEl = $("log");
 
-let ws = null, rooms = [], currentRoom = null, retry = null, stopped = false;
+let ws = null, rooms = [], currentRoom = null, retry = null, stopped = false, active = false;
 const liveBubbles = new Map();   // session_id -> assistant bubble (delta accumulation)
 
 function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = cls || ""; }
+
+// Single button toggles connect <-> disconnect, matching the non-admin client.
+function reflectBtn() {
+  const b = $("connect");
+  b.textContent = active ? "Disconnect" : "Connect";
+  b.classList.toggle("disconnect", active);
+}
 
 function wsUrl() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -78,6 +91,7 @@ function connect() {
   clearTimeout(retry);
   teardown();           // close any prior socket first — no parallel loops
   stopped = false;
+  active = true; reflectBtn();
   setStatus("connecting…");
   ws = new WebSocket(wsUrl());
   ws.onopen = () => ws.send(JSON.stringify({ type: "admin_hello", token: secret }));
@@ -92,6 +106,15 @@ function connect() {
     retry = setTimeout(connect, 1500);
   };
   ws.onerror = () => { if (ws) ws.close(); };
+}
+
+// Operator-initiated close: stop, kill any pending retry, drop the socket.
+function disconnect() {
+  stopped = true;
+  active = false; reflectBtn();
+  clearTimeout(retry);
+  teardown();
+  setStatus("disconnected");
 }
 
 function onMessage(msg) {
@@ -109,7 +132,7 @@ function onMessage(msg) {
       break;
     case "error":
       if (msg.code === "auth_failed") {
-        stopped = true; clearTimeout(retry); teardown();
+        stopped = true; active = false; reflectBtn(); clearTimeout(retry); teardown();
         setStatus("auth failed — check the secret", "err");
       } else {
         setStatus(`error: ${msg.code}`, "err");
@@ -145,6 +168,9 @@ function selectRoom(room) {
 }
 
 function ingest(e) {
+  // Only auto-scroll if already near the bottom, so reading back history isn't
+  // yanked away by the live event stream.
+  const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
   switch (e.type) {
     case "welcome": row("system", `session ${e.session_id}`); break;
     case "user_transcript": {
@@ -166,7 +192,7 @@ function ingest(e) {
     case "done": row("system", "— done —"); liveBubbles.delete(e.session_id); break;
     case "cancelled": row("system", "— cancelled —"); liveBubbles.delete(e.session_id); break;
   }
-  window.scrollTo(0, document.body.scrollHeight);
+  if (atBottom) logEl.scrollTop = logEl.scrollHeight;
 }
 
 function row(kind, text) {
@@ -180,7 +206,8 @@ function row(kind, text) {
   return r;
 }
 
-$("connect").onclick = connect;
+$("connect").onclick = () => { active ? disconnect() : connect(); };
+$("clear").onclick = () => { logEl.innerHTML = ""; liveBubbles.clear(); };
 $("secret").addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
 const saved = sessionStorage.getItem("glados-admin-secret");
 if (saved) { $("secret").value = saved; connect(); }
