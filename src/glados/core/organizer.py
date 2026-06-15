@@ -46,6 +46,12 @@ from .turn_outcome import TurnRecord, classify, is_action_request
 
 log = logging.getLogger(__name__)
 
+# A turn that beats the boot LLM warm-up waits up to this long for the model to
+# warm before proceeding anyway. Generous enough to cover a cold 10.5 GB load +
+# first inference (~10-20 s), bounded so a wedged warm-up can't hang a turn
+# forever (SESSION 2026-06-15: the cold first inference skips tools / fabricates).
+_WARM_GATE_TIMEOUT_S = 30.0
+
 SendFn = Callable[[str, BaseModel], Awaitable[None]]
 BindingLookup = Callable[[str], ClientBinding | None]
 RoomLookup = Callable[[str], list[str]]
@@ -154,6 +160,14 @@ class Organizer:
         system_prompt: str | None = None,
     ) -> None:
         self.llm = llm
+        # Gates the first turn behind the boot LLM warm-up (_await_llm_warm).
+        # Defaults to SET ("warm") so an Organizer built without a server
+        # lifespan — every direct-construction unit test — never blocks. The
+        # server, which DOES warm, calls expect_llm_warmup() to clear it before
+        # scheduling warm_up_llm; warm_up_llm sets it again when done (even on
+        # error), so the gate releases no matter what.
+        self._llm_warmed = asyncio.Event()
+        self._llm_warmed.set()
         # v2.6 local multi-model router. When `router` is None the organizer
         # behaves exactly as before — every turn runs on `self.llm` (the primary
         # brain) with no RouteNotice emitted. `specialist_llm` is the second
@@ -281,6 +295,60 @@ class Organizer:
         """Cancel all room workers. Server lifespan calls this on shutdown."""
         await self._queues.close()
 
+    def expect_llm_warmup(self) -> None:
+        """Mark the LLM cold so the first turn waits for warm_up_llm. Called
+        synchronously by the server lifespan before scheduling the warm-up and
+        before it yields (i.e. before any turn can arrive), so there is no window
+        where a turn slips past while the model is still cold."""
+        self._llm_warmed.clear()
+
+    async def warm_up_llm(self) -> None:
+        """Fire one throwaway primary-LLM inference at boot so the user's first
+        real turn isn't the cold first inference — which skips tools and
+        fabricates (SESSION 2026-06-15: cold model × full tool list → it answers
+        "What time is it?" from parametric knowledge instead of calling
+        time.now). Uses the FULL registered tool list + a tool-requiring prompt
+        so the cold shot exercises the exact tool-selection path, then drains and
+        discards. Must run AFTER stdio tools are registered so mcp.specs() is
+        complete. Always sets `_llm_warmed`, even on failure, so a warm-up error
+        degrades to a possibly-cold first turn rather than deadlocking every turn
+        behind _await_llm_warm."""
+        try:
+            messages = [
+                LLMMessage(role="system", content=self._system_prompt),
+                LLMMessage(role="user", content="What time is it?"),
+            ]
+            async with aclosing(self.llm.chat(messages, self.mcp.specs())) as stream:
+                async for _ in stream:
+                    pass
+        except Exception:
+            log.exception("LLM warm-up failed (continuing — first turn may be cold)")
+        finally:
+            self._llm_warmed.set()
+
+    async def _await_llm_warm(self, trace) -> None:
+        """Hold a turn until the boot LLM warm-up completes. Almost always a
+        no-op (the Event is already set by the time anyone speaks); only the rare
+        turn that beats warm-up waits, so it lands on a warm model. Warns + emits
+        an `llm_cold_turn` trace event so the race is observable if it ever bites
+        — proceeding cold after the timeout rather than hanging the turn."""
+        if self._llm_warmed.is_set():
+            return
+        log.warning(
+            "turn started before LLM warm-up finished; holding up to %.0fs for "
+            "the model to warm (a cold first inference skips tools / fabricates)",
+            _WARM_GATE_TIMEOUT_S,
+        )
+        trace.event("llm_cold_turn")
+        try:
+            await asyncio.wait_for(self._llm_warmed.wait(), _WARM_GATE_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            log.warning(
+                "LLM warm-up did not finish within %.0fs; proceeding on a cold "
+                "model (tool-skip / fabrication possible this turn)",
+                _WARM_GATE_TIMEOUT_S,
+            )
+
     async def _run_user_text(
         self, client_id: str, text: str, *, source: UserTextSource = "text"
     ) -> None:
@@ -311,6 +379,7 @@ class Organizer:
                 origin_client=client_id,
             )
             trace.event("user_text", text=text, source=source)
+            await self._await_llm_warm(trace)
             await self._broadcast(session.room_id, Welcome(session_id=session.session_id))
             await self._broadcast(
                 session.room_id,

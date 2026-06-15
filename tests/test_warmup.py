@@ -25,6 +25,120 @@ async def test_warmup_exercises_stt_and_tts() -> None:
     assert tts.calls == [_WARMUP_TEXT]
 
 
+# ---- LLM warm-up + first-turn gate (SESSION 2026-06-15) -----------------
+
+from pydantic import BaseModel
+
+from glados.brain.llm.fake import FakeLLM
+from glados.core.config import ClientBinding
+from glados.core.organizer import Organizer
+from glados.core.sessions import SessionRegistry
+from glados.core.traces import TraceStore
+from glados.mcp.registry import MCPRegistry
+from glados.servers.time_server import NowTool
+
+
+def _organizer(llm, tmp: Path, bindings=None):
+    bindings = bindings or []
+    by_id = {b.client_id: b for b in bindings}
+    sink: list[tuple[str, dict]] = []
+
+    async def send(client_id: str, msg: BaseModel) -> None:
+        sink.append((client_id, msg.model_dump()))
+
+    mcp = MCPRegistry()
+    mcp.register(NowTool())
+    org = Organizer(
+        llm=llm,
+        tts=None,
+        mcp=mcp,
+        traces=TraceStore(tmp),
+        sessions=SessionRegistry(),
+        send=send,
+        binding_for_client=by_id.get,
+        clients_in_room=lambda r: [b.client_id for b in bindings if b.room_id == r],
+    )
+    return org, sink
+
+
+@pytest.mark.asyncio
+async def test_warm_up_llm_exercises_llm_with_full_tool_list(tmp_path: Path) -> None:
+    """The boot warm-up fires one inference with the FULL registered tool list
+    (so it primes the exact tool-selection path) and flips the readiness gate."""
+
+    class RecordingLLM:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list, list]] = []
+
+        async def chat(self, messages, tools):
+            self.calls.append((messages, tools))
+            if False:  # make this an async generator that yields nothing
+                yield
+
+    llm = RecordingLLM()
+    org, _ = _organizer(llm, tmp_path)
+    org.expect_llm_warmup()  # the server marks it cold before warming
+    assert not org._llm_warmed.is_set()
+
+    await org.warm_up_llm()
+
+    assert org._llm_warmed.is_set()
+    assert len(llm.calls) == 1
+    messages, tools = llm.calls[0]
+    assert messages[-1].role == "user" and "time" in messages[-1].content.lower()
+    assert any(t.qualified == "time.now" for t in tools)
+
+
+@pytest.mark.asyncio
+async def test_warm_up_llm_sets_gate_even_on_failure(tmp_path: Path, caplog) -> None:
+    """A warm-up that blows up must still release the gate — otherwise every
+    real turn would deadlock behind a model that never warmed."""
+
+    class BrokenLLM:
+        async def chat(self, messages, tools):
+            raise RuntimeError("ollama unreachable")
+            yield  # pragma: no cover
+
+    org, _ = _organizer(BrokenLLM(), tmp_path)
+    org.expect_llm_warmup()
+    with caplog.at_level(logging.ERROR, logger="glados.core.organizer"):
+        await org.warm_up_llm()
+    assert "LLM warm-up failed" in caplog.text
+    assert org._llm_warmed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_first_turn_waits_for_warm_up_then_proceeds(tmp_path: Path, caplog) -> None:
+    """A turn that arrives while the model is cold is held until warm_up_llm
+    completes (not dropped), and the race is recorded as an llm_cold_turn trace
+    event for observability."""
+    binding = ClientBinding(
+        client_id="desk-ui", room_id="desk", role="ui", default_user="qcko"
+    )
+    org, sink = _organizer(FakeLLM(), tmp_path, [binding])
+    org.expect_llm_warmup()  # cold
+
+    with caplog.at_level(logging.WARNING, logger="glados.core.organizer"):
+        await org.handle_user_text("desk-ui", "hello there")
+        await asyncio.sleep(0.05)  # let the worker dequeue and hit the gate
+        # Gated: nothing broadcast yet (the gate sits before Welcome).
+        assert [m["type"] for _, m in sink] == []
+
+        await org.warm_up_llm()  # releases the gate
+        await org.flush()
+
+    types = [m["type"] for _, m in sink]
+    assert "welcome" in types and "done" in types
+    assert "before LLM warm-up finished" in caplog.text
+    cold = [
+        line
+        for f in tmp_path.glob("*.jsonl")
+        for line in f.read_text(encoding="utf-8").splitlines()
+        if "llm_cold_turn" in line
+    ]
+    assert cold, "expected an llm_cold_turn trace event"
+
+
 @pytest.mark.asyncio
 async def test_warmup_swallows_stt_failure(caplog) -> None:
     class BrokenSTT:

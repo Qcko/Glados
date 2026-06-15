@@ -585,6 +585,17 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
                 lazy_servers.append((server, entry.idle_timeout_s))
         _app.state.organizer.set_memory_notes(memory_notes)
         _app.state.memory_blocks = memory_blocks
+        # Warm the primary LLM in the background, now that the full tool list is
+        # registered (must run after the spawn loop so mcp.specs() is complete).
+        # Background, like the STT/TTS warm-up: /healthz stays responsive and a
+        # client can connect while it runs. The cold first inference skips tools
+        # and fabricates (SESSION 2026-06-15); a turn that beats this is held by
+        # the organizer's _await_llm_warm until the model is warm. Mark cold
+        # synchronously BEFORE yield so no turn can slip past while it's loading.
+        _app.state.organizer.expect_llm_warmup()
+        llm_warm_task = asyncio.create_task(
+            _app.state.organizer.warm_up_llm(), name="llm-warmup"
+        )
         # One sweeper for all lazy servers — sleeps any that woke for a
         # dispatch and have since gone idle past their timeout.
         reaper_task: asyncio.Task | None = (
@@ -605,6 +616,12 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
                 task.cancel()
                 try:
                     await task
+                except asyncio.CancelledError:
+                    pass
+            if not llm_warm_task.done():
+                llm_warm_task.cancel()
+                try:
+                    await llm_warm_task
                 except asyncio.CancelledError:
                     pass
             # Stop room workers cleanly. In-flight turns receive CancelledError
