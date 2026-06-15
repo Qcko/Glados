@@ -19,10 +19,15 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/ws/v1": {
-        target: "ws://127.0.0.1:8765",
+        target: "wss://127.0.0.1:8765",
         ws: true,
+        // Backend uses a self-signed dev cert; don't reject it.
+        secure: false,
       },
-      "/healthz": "http://127.0.0.1:8765",
+      "/healthz": {
+        target: "https://127.0.0.1:8765",
+        secure: false,
+      },
     },
   },
 });
