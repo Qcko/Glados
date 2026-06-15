@@ -789,6 +789,49 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   AEC angle (Set B) buys little over letting the adaptive filter self-
   calibrate, and is not worth a custom-AEC build for GLaDOS's "one phone +
   maybe a speaker per room" reality.
+- **Streaming / sentence-level TTS (start speaking before the turn ends).**
+  Today TTS fires once: `_drive` returns the whole `final_text` and the caller
+  calls `_speak(final_text)` (one `PiperTTS.synthesize(text)` per turn), so the
+  first audio waits for the last LLM token. The LLM *already* streams `LLMText`
+  deltas to the chat surface (`_run_one_llm_pass` broadcasts `assistant_delta`);
+  only the audio path batches. Worse, in a multi-tool turn only the **final
+  no-tool-call pass** becomes `final_text`, so the running commentary emitted
+  *before* each tool call ("Added onions. Next, paprika.") is **never spoken** —
+  observed live on a venison-goulash add-to-cart turn: six narration lines on
+  screen, only the last sentence read aloud.
+  **Goal:** segment the streamed text into sentences and synthesize each as it
+  completes, and speak intermediate-pass prose too — the live observation
+  resolved that UX question (the user wanted the commentary, not just the last
+  line).
+  **Shapes considered:**
+    (a) *Sentence-buffer in the Organizer turn loop* — accumulate `LLMText`
+        deltas, flush on a sentence boundary into the existing per-call
+        `synthesize`. Smallest blast radius; no Protocol change. Con: sentence
+        segmentation on a token stream (abbreviations, decimals, "Mr."), plus the
+        gate accounting below.
+    (b) *New `TTS.synthesize_stream(text_iter)` adapter method* (§6 contract
+        change) — TTS consumes an async text iterator and yields audio as
+        sentences complete. Cleaner streaming contract but a **public-protocol
+        change**: FakeTTS + every test + the warm-up path move with it.
+  Lean: (a) first (no contract churn); promote to (b) only if a second streaming
+  backend (Kokoro/XTTS) wants native text-streaming.
+  **Catches that make this design-duck-worthy, not a wire-up:**
+    - *Mic-gate / echo-path accounting* (§3, and the multi-speaker item above).
+      `_speak` sets one `_TtsGate` per turn and `_arm_gate_after_send` sizes the
+      mic-mute window from a single synth's sample count. N sentence-synths per
+      turn break that single-shot accounting — get it wrong and GLaDOS hears
+      itself. The gate must accumulate across the whole streamed utterance and
+      open only after the **last** chunk drains.
+    - *Ordering & cancellation* (§6). `tts_chunk` seq is per-`_speak` today;
+      multiple synths must keep global order, and barge-in must cancel both the
+      in-flight sentence synth and the sentence producer together.
+    - *Per-sentence markdown stripping.* `_strip_markdown_for_tts` runs on whole
+      text now; per-sentence risks splitting `**bold across a boundary**`. Strip
+      the accumulated buffer before segmenting, not each raw delta.
+  **Gate:** crosses the echo-path invariant and adds a concurrency/ordering
+  interaction → **high-risk design; needs a design-duck panel (Architect /
+  Concurrency-QA / UX) before code**, per CLAUDE.md. Couple to whichever version
+  does TTS-latency / echo work; independent of the multi-speaker item.
 
 ---
 
