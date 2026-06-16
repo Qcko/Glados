@@ -139,11 +139,16 @@ class TurnOutcome(BaseModel):
     `core/turn_outcome.py`), never from the model's self-report. The UI can
     surface a failed/needs-user turn that the model narrated as success, and
     the v2.6 router consumes it as an escalation input ("did the local model
-    actually finish?")."""
+    actually finish?").
+
+    `confabulated` is the special case where the model claimed an *action* was
+    done while dispatching no tools at all — a fabricated completion, the
+    signature of a poisoned history. The organizer suppresses the false claim
+    from the spoken reply and never commits it to the hot buffer."""
 
     type: Literal["turn_outcome"] = "turn_outcome"
     session_id: str
-    outcome: Literal["done", "needs-user", "failed"]
+    outcome: Literal["done", "needs-user", "failed", "confabulated"]
 
 
 class RouteNotice(BaseModel):

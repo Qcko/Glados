@@ -31,7 +31,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Literal
 
-TurnOutcomeKind = Literal["done", "needs-user", "failed"]
+TurnOutcomeKind = Literal["done", "needs-user", "failed", "confabulated"]
 
 # Imperative verbs that imply the user wants the assistant to *change* external
 # state this turn, not just look something up. Matched at the start of the
@@ -71,6 +71,40 @@ def is_action_request(text: str) -> bool:
     in my cart?"). Used by the goal-check to demand a successful mutating tool
     call before calling such a turn ``done``."""
     return bool(text) and _ACTION_INTENT_RE.match(text.strip()) is not None
+
+
+# Asking the current time reads as a *question*, not an imperative, so the local
+# model answers from its prior and fabricates a plausible-but-wrong time instead
+# of calling time.now (SESSION 2026-06-15 Finding 2: "What time is it?" → 0 calls,
+# wrong; "run time.now" → real call). A sibling to is_action_request: detect the
+# intent deterministically so the organizer can force the dispatch rather than
+# trusting the model to. Anchored to phrasings that clearly ask for the current
+# time — bare "what time does the shop close" / "set a timer" must NOT match.
+_TIME_REQUEST_RE = re.compile(
+    r"(?:"
+    r"what(?:'s| is)\s+(?:the\s+)?time\b"  # what's the time / what is the time
+    r"|what\s+time\s+is\s+it\b"  # what time is it (now)
+    r"|\btime\s+is\s+it\b"  # ASR drops the lead-in: "Time is it."
+    r"|do\s+you\s+(?:have|know)\s+(?:the\s+)?time\b"  # do you have/know the time
+    r"|(?:tell|give)\s+me\s+the\s+time\b"  # tell/give me the time
+    r"|(?:got|have)\s+the\s+time\b"  # got/have the time
+    r"|\bcurrent\s+time\b"  # the current time
+    r"|\bthe\s+time\s+(?:right\s+)?now\b"  # the time (right) now
+    r")"
+    # The time-phrase must sit at the END of the clause (modulo trailing fillers
+    # and punctuation). Without this, "what's the time the train leaves" matches
+    # the loose first branch — a planning question, not "what's the clock".
+    r"(?=(?:\s+(?:now|right|currently|please|exactly|today|then))*[\s?.!,]*$)",
+    re.IGNORECASE,
+)
+
+
+def is_time_request(text: str) -> bool:
+    """True if the utterance asks for the current time ("what time is it?",
+    "do you have the time?"). Drives the organizer's deterministic time
+    intercept (force time.now), so it errs tight: it must not fire on
+    timer-setting or "what time does X open" planning questions."""
+    return bool(text) and _TIME_REQUEST_RE.search(text.strip()) is not None
 
 
 @dataclass(frozen=True)
@@ -124,17 +158,36 @@ def classify(turn: TurnRecord) -> TurnOutcomeKind:
         # ending on a statement is silent drift (bake-off T2: searched,
         # narrated the JSON, never added). Both mean the action didn't happen.
         return "needs-user" if _ends_on_question(turn.final_text) else "failed"
+    if _confabulated(turn):
+        return "confabulated"
     if _ends_on_question(turn.final_text) and not _has_successful_call(turn.tools):
         return "needs-user"
     return "done"
 
 
+def _confabulated(turn: TurnRecord) -> bool:
+    """The user asked to mutate state, the turn dispatched *no tools at all*,
+    yet the reply declares the action done ("Sure, adding that now.", "Added
+    milk to your cart."). That is a fabricated completion — the signature of a
+    poisoned history steering the model away from tool-calls (SESSION 2026-06-15:
+    six consecutive zero-dispatch turns all narrating success). It is the
+    zero-tool case `_action_drifted` deliberately leaves alone: there, a
+    *declarative* ending is the discriminator from an honest hand-back. Ending on
+    a question is a clarification ("which milk?") and stays `needs-user`."""
+    return (
+        turn.action_intent
+        and not turn.tools
+        and bool(turn.final_text.strip())
+        and not _ends_on_question(turn.final_text)
+    )
+
+
 def _action_drifted(turn: TurnRecord) -> bool:
     """The user asked to mutate state, the turn ran at least one tool, yet no
     successful mutating call landed. A pure read/search can't satisfy an action
-    request. Turns with no tool calls are left alone — the search-and-narrate
-    drift this targets always shows tool activity, and a no-tool reply is too
-    ambiguous to fail deterministically."""
+    request. Turns with no tool calls are out of scope here — the search-and-
+    narrate drift this targets always shows tool activity; the zero-tool
+    fabricated-completion case is handled by `_confabulated`."""
     return (
         turn.action_intent
         and bool(turn.tools)

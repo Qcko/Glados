@@ -246,18 +246,206 @@ async def test_organizer_replays_history_in_same_session(tmp_path: Path) -> None
         tmp_path,
         llm=llm,
     ) as (org, _sink):
-        await org.handle_user_text("desk-ui", "add bananas")
+        # A read (not an action request) so the no-tool "acknowledged" reply
+        # stays `done` and is committed verbatim — this test is about replay,
+        # not the confabulation rewrite (covered in test_turn_outcome).
+        await org.handle_user_text("desk-ui", "what's in my cart")
         await org.flush()
-        await org.handle_user_text("desk-ui", "actually eggs instead")
+        await org.handle_user_text("desk-ui", "what about eggs")
         await org.flush()
 
     first_seen, second_seen = llm.seen
     # First turn: just system + the user message, no prior history.
-    assert first_seen == [("system", org._system_prompt), ("user", "add bananas")]
+    assert first_seen == [("system", org._system_prompt), ("user", "what's in my cart")]
     # Second turn: the first exchange is replayed before the new user message.
-    assert ("user", "add bananas") in second_seen
+    assert ("user", "what's in my cart") in second_seen
     assert ("assistant", "acknowledged") in second_seen
-    assert second_seen[-1] == ("user", "actually eggs instead")
+    assert second_seen[-1] == ("user", "what about eggs")
+
+
+@pytest.mark.asyncio
+async def test_organizer_suppresses_confabulated_action(tmp_path: Path) -> None:
+    """An action request answered with a declarative claim but zero tool
+    dispatches is a fabricated completion: the outcome is `confabulated`, the
+    spoken/correction text is the honest failure line, and the false claim is
+    never committed to the hot history buffer (so it can't poison later turns)."""
+    from glados.core.adapters import LLMText
+    from glados.core.organizer import _CONFABULATION_REPLIES
+
+    class ConfabLLM:
+        async def chat(self, messages, tools):
+            yield LLMText(text="Done — I've added the milk to your cart.")
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=ConfabLLM(),
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "add milk")
+        await org.flush()
+
+        outcomes = [m["outcome"] for _, m in sink if m["type"] == "turn_outcome"]
+        assert outcomes == ["confabulated"]
+        deltas = [m["text"] for _, m in sink if m["type"] == "assistant_delta"]
+        # The false claim still streamed live, followed by the honest correction.
+        assert "Done — I've added the milk to your cart." in deltas
+        assert any(_CONFABULATION_REPLIES[0] in d for d in deltas)
+
+        session_id = next(iter(org._history))
+        committed = org._history[session_id]
+        assert committed[-1].role == "assistant"
+        assert committed[-1].content == _CONFABULATION_REPLIES[0]
+        assert "added the milk" not in (committed[-1].content or "")
+
+
+@pytest.mark.asyncio
+async def test_organizer_forces_time_tool_on_time_question(tmp_path: Path) -> None:
+    """A time question forces a deterministic `time.now` dispatch and seeds the
+    real time into the turn before the model generates — even when the model
+    never asks for a tool (the fabrication bug, SESSION 2026-06-15 Finding 2)."""
+    from glados.core.adapters import LLMText
+
+    class NoToolLLM:
+        """Answers from prior, never calls a tool — the fabricating model."""
+
+        def __init__(self) -> None:
+            self.seen: list[list[tuple[str, str | None]]] = []
+
+        async def chat(self, messages, tools):
+            self.seen.append([(m.role, m.content) for m in messages])
+            yield LLMText(text="It's twenty past three.")
+
+    llm = NoToolLLM()
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=llm,
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "what time is it?")
+        await org.flush()
+
+        tool_calls = [m for _, m in sink if m["type"] == "tool_call"]
+        assert any(m["server"] == "time" and m["name"] == "now" for m in tool_calls)
+        results = [m for _, m in sink if m["type"] == "tool_result"]
+        assert any(m["ok"] for m in results)
+        # The model's first (and only) pass already saw the forced tool result,
+        # so it renders ground truth instead of inventing a time.
+        assert any(role == "tool" for role, _ in llm.seen[0])
+        outcomes = [m["outcome"] for _, m in sink if m["type"] == "turn_outcome"]
+        assert outcomes == ["done"]
+
+
+@pytest.mark.asyncio
+async def test_organizer_does_not_force_time_on_non_time_turn(tmp_path: Path) -> None:
+    """A non-time turn never triggers the forced time dispatch."""
+    from glados.core.adapters import LLMText
+
+    class NoToolLLM:
+        async def chat(self, messages, tools):
+            yield LLMText(text="You have milk.")
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=NoToolLLM(),
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "what's in my cart")
+        await org.flush()
+
+        assert not any(m["type"] == "tool_call" for _, m in sink)
+
+
+def test_escape_kind_detection() -> None:
+    from glados.core.organizer import _escape_kind
+
+    assert _escape_kind("start over") == "start_over"
+    assert _escape_kind("Let's start fresh.") == "start_over"
+    assert _escape_kind("clear the chat") == "start_over"
+    assert _escape_kind("reset the conversation") == "start_over"
+    assert _escape_kind("did that actually work?") == "recheck"
+    assert _escape_kind("did it work") == "recheck"
+    assert _escape_kind("did that go through?") == "recheck"
+    assert _escape_kind("has it actually gone through") == "recheck"
+    # Normal turns and mid-sentence mentions must NOT trip an escape hatch.
+    assert _escape_kind("add milk") is None
+    assert _escape_kind("can you start over from step 2") is None
+    assert _escape_kind("what's in my cart") is None
+    assert _escape_kind("") is None
+
+
+@pytest.mark.asyncio
+async def test_organizer_start_over_clears_history(tmp_path: Path) -> None:
+    """"start over" is a consented history clear: the next turn sees no prior
+    exchange, and the clear turn never reaches the LLM."""
+    from glados.core.adapters import LLMText
+
+    class RecordingLLM:
+        def __init__(self) -> None:
+            self.seen: list[list[tuple[str, str | None]]] = []
+
+        async def chat(self, messages, tools):
+            self.seen.append([(m.role, m.content) for m in messages])
+            yield LLMText(text="ok")
+
+    llm = RecordingLLM()
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=llm,
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "what's in my cart")
+        await org.flush()
+        await org.handle_user_text("desk-ui", "start over")
+        await org.flush()
+        await org.handle_user_text("desk-ui", "what's on sale")
+        await org.flush()
+
+    # The clear turn short-circuits the LLM, so only two real turns reached it.
+    assert len(llm.seen) == 2
+    assert llm.seen[1] == [("system", org._system_prompt), ("user", "what's on sale")]
+    deltas = [m["text"] for _, m in sink if m["type"] == "assistant_delta"]
+    assert any("cleared" in d.lower() for d in deltas)
+
+
+@pytest.mark.asyncio
+async def test_organizer_recheck_reports_no_after_confabulation(tmp_path: Path) -> None:
+    """"did that actually work?" reports the dispatch-grounded truth — after a
+    confabulated (zero-tool) action turn, the honest answer is No."""
+    from glados.core.adapters import LLMText
+
+    class ConfabLLM:
+        async def chat(self, messages, tools):
+            yield LLMText(text="Done — I've added the milk to your cart.")
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=ConfabLLM(),
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "add milk")
+        await org.flush()
+        await org.handle_user_text("desk-ui", "did that actually work?")
+        await org.flush()
+
+    deltas = [m["text"] for _, m in sink if m["type"] == "assistant_delta"]
+    assert any(d.strip().lower().startswith("no") for d in deltas)
+
+
+@pytest.mark.asyncio
+async def test_recheck_reports_yes_after_real_mutation(tmp_path: Path) -> None:
+    """The truth report says Yes when a mutating call actually landed, and
+    reports nothing-to-check for an unknown session."""
+    from glados.core.turn_outcome import TurnRecord
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+    ) as (org, _sink):
+        rec = TurnRecord()
+        rec.record_tool("dunnes.add_to_cart_by_name", ok=True, mutating=True)
+        org._record_last_turn("s1", rec, "done")
+        assert org._describe_last_turn("s1").lower().startswith("yes")
+        assert org._describe_last_turn("unknown").startswith("I don't have")
 
 
 @pytest.mark.asyncio

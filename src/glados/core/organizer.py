@@ -42,7 +42,7 @@ from .protocols import (
 from .room_queues import RoomQueueManager
 from .sessions import SessionRegistry
 from .traces import TraceStore
-from .turn_outcome import TurnRecord, classify, is_action_request
+from .turn_outcome import TurnRecord, classify, is_action_request, is_time_request
 
 log = logging.getLogger(__name__)
 
@@ -78,9 +78,35 @@ class _TtsGate:
     session_id: str
     closed_until: float = 0.0
     earliest_release: float = 0.0
+
+
+@dataclass
+class _LastTurn:
+    """Dispatch-grounded summary of a session's most recent real turn, so the
+    "did that actually work?" escape hatch can report the TRUTH (what the
+    harness observed) instead of re-asking the model — which would just
+    re-narrate its confabulation. Set only on real turns, never on an escape
+    turn, so a recheck always describes the action the user is asking about."""
+
+    kind: str  # the classified TurnOutcomeKind
+    mutations: tuple[str, ...]  # successful mutating tool names this turn
+    any_tool_ok: bool  # any successful tool call at all
+
+
 UserTextSource = Literal["voice", "text"]
 
 _MAX_TOOL_LOOP = 8
+
+# Spoken when a turn is classified `confabulated` (action claimed, zero tools
+# dispatched). Action-led and varied — never an apology-per-turn, which a
+# poisoned session would repeat into a litany. Rotated so a run of fabricated
+# turns doesn't read as a stuck recording. The false "I added X" is replaced by
+# one of these on the audio path and in the committed history.
+_CONFABULATION_REPLIES = (
+    "I don't have a record of actually doing that — say it again and I'll run it for real.",
+    "That didn't dispatch; nothing was logged. Tell me once more and I'll act on it.",
+    "I can't confirm that went through. Repeat it and I'll do it properly this time.",
+)
 
 # Upper bound on how many sessions' conversation buffers are held in RAM at
 # once. Far above any realistic concurrent-session count; exists only so a long
@@ -113,6 +139,42 @@ _BARGE_IN_RE = re.compile(
 
 def _is_barge_in(text: str) -> bool:
     return bool(text) and _BARGE_IN_RE.match(text.strip()) is not None
+
+
+# User-facing escape hatches against confabulation (SESSION 2026-06-15 v1 design,
+# item 3). Both short-circuit the LLM entirely — they are deterministic turns.
+# Matched as whole utterances (anchored, optional politeness lead-in) like
+# barge-in, so a mid-sentence mention ("can you start over from step 2") doesn't
+# trip them.
+_TRUTH_RECHECK_RE = re.compile(
+    r"^(?:(?:hey|ok(?:ay)?|so|wait|um|please|glados)[\s,]+)*"
+    r"(?:did|does|has)\s+(?:that|it|this)\s+(?:(?:actually|really)\s+)?"
+    r"(?:work(?:ed)?|go(?:ne)?\s+through|happen(?:ed)?|get\s+(?:added|done))"
+    r"[\s.!?]*$",
+    re.IGNORECASE,
+)
+_START_OVER_RE = re.compile(
+    r"^(?:(?:hey|ok(?:ay)?|let'?s|please|glados|can you|could you)[\s,]+)*"
+    r"(?:start\s+(?:over|fresh)|clear\s+(?:the\s+)?(?:chat|history|conversation)|"
+    r"reset\s+(?:the\s+)?(?:chat|conversation|session))"
+    r"[\s.!?]*$",
+    re.IGNORECASE,
+)
+
+EscapeKind = Literal["recheck", "start_over"]
+
+
+def _escape_kind(text: str) -> EscapeKind | None:
+    """Classify an utterance as a confabulation escape hatch, or None for a
+    normal turn. `start_over` wins ties — it is the explicit recovery."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    if _START_OVER_RE.match(stripped):
+        return "start_over"
+    if _TRUTH_RECHECK_RE.match(stripped):
+        return "recheck"
+    return None
 
 
 # Strip-for-TTS pass: kill the markdown punctuation Piper would otherwise
@@ -186,6 +248,13 @@ class Organizer:
         # `_MAX_TRACKED_SESSIONS` so dead sessions can't grow it without limit.
         self._history: dict[str, list[LLMMessage]] = {}
         self._history_max_turns = history_max_turns
+        # Rotates the honest-failure line spoken on a `confabulated` turn so a
+        # cascade of fabricated turns doesn't repeat one phrase verbatim.
+        self._confab_reply_idx = 0
+        # session_id -> dispatch-grounded summary of its last real turn, for the
+        # "did that actually work?" escape hatch. LRU-bounded by
+        # _MAX_TRACKED_SESSIONS like _history, so a long uptime can't grow it.
+        self._last_turn: dict[str, _LastTurn] = {}
         self.tts = tts
         self.mcp = mcp
         self.traces = traces
@@ -379,6 +448,8 @@ class Organizer:
                 origin_client=client_id,
             )
             trace.event("user_text", text=text, source=source)
+            if await self._maybe_handle_escape(session, text, source, trace):
+                return
             await self._await_llm_warm(trace)
             await self._broadcast(session.room_id, Welcome(session_id=session.session_id))
             await self._broadcast(
@@ -409,11 +480,17 @@ class Organizer:
                     session.session_id, session.room_id, envelope, text, trace,
                     history,
                 )
+            kind = classify(outcome)
+            if kind == "confabulated":
+                final_text = await self._handle_confabulation(
+                    session.session_id, session.room_id, new_history, trace
+                )
             self._commit_history(session.session_id, new_history, outcome, final_text)
             await self._speak(session.session_id, session.room_id, final_text, trace)
             await self._emit_turn_outcome(
-                session.session_id, session.room_id, outcome, trace
+                session.session_id, session.room_id, kind, trace
             )
+            self._record_last_turn(session.session_id, outcome, kind)
             await self._broadcast(session.room_id, Done(session_id=session.session_id))
             trace.event("done")
         except asyncio.CancelledError:
@@ -651,6 +728,9 @@ class Organizer:
         ]
         final_text = ""
         outcome = TurnRecord(action_intent=is_action_request(text))
+        await self._maybe_force_time(
+            session_id, room_id, envelope, text, messages, trace, outcome
+        )
         for _ in range(_MAX_TOOL_LOOP):
             pending_calls, assistant_text = await self._run_one_llm_pass(
                 llm, session_id, room_id, messages, trace
@@ -680,6 +760,38 @@ class Organizer:
         # messages[0] is the system prompt (rebuilt every turn); everything
         # after it is the replayable history extended with this turn.
         return final_text, outcome, messages[1:]
+
+    async def _maybe_force_time(
+        self,
+        session_id: str,
+        room_id: str,
+        envelope: CallEnvelope,
+        text: str,
+        messages: list[LLMMessage],
+        trace,
+        outcome: TurnRecord,
+    ) -> None:
+        """Force a `time.now` dispatch for a time question. Asking the time reads
+        as a question, not an imperative, so the model answers from its prior and
+        fabricates a wrong time instead of calling the tool (SESSION 2026-06-15
+        Finding 2). Detect the intent deterministically and seed the real time
+        into the turn as a tool exchange before the first LLM pass — the model
+        then renders ground truth rather than inventing it. Reuses the normal
+        tool path (broadcasts, trace, outcome record), so the dispatch is
+        observable and the turn classifies on a real call. No-op when the time
+        tool isn't registered. [[feedback-harness-over-prompts]]."""
+        if not is_time_request(text) or self.mcp.spec_for("time", "now") is None:
+            return
+        forced = LLMToolCall(
+            call_id=uuid.uuid4().hex, server="time", name="now", args={}
+        )
+        messages.append(
+            LLMMessage(role="assistant", content=None, tool_calls=[forced])
+        )
+        trace.event("time_intent_forced", call_id=forced.call_id)
+        await self._run_tool_calls(
+            session_id, room_id, envelope, [forced], messages, trace, outcome
+        )
 
     def _select_path(
         self, text: str
@@ -811,12 +923,113 @@ class Organizer:
         return msg
 
     async def _emit_turn_outcome(
-        self, session_id: str, room_id: str, outcome: TurnRecord, trace
+        self, session_id: str, room_id: str, kind: str, trace
     ) -> None:
-        kind = classify(outcome)
         trace.event("turn_outcome", outcome=kind)
         await self._broadcast(
             room_id, TurnOutcome(session_id=session_id, outcome=kind)
+        )
+
+    async def _handle_confabulation(
+        self, session_id: str, room_id: str, history: list[LLMMessage], trace
+    ) -> str:
+        """A turn claimed an action while dispatching no tools. Replace the
+        fabricated reply with an honest, varied failure line on BOTH egress
+        paths that still carry it: the audio path (the returned text, which
+        `_speak` will voice) and the hot history buffer (so the false "I added
+        X" is never committed — committing it is exactly what poisons later
+        turns away from tool-calls). The chat surface already streamed the false
+        deltas live, so push a correction delta after them rather than trying to
+        unsay them; the UI also receives the `confabulated` outcome to flag it.
+        v1 stops here — no recovery/replay (deferred slice)."""
+        reply = _CONFABULATION_REPLIES[
+            self._confab_reply_idx % len(_CONFABULATION_REPLIES)
+        ]
+        self._confab_reply_idx += 1
+        # Rewrite history in-place BEFORE the await below: if a cancel lands on
+        # the broadcast, the turn is discarded without commit (prior history
+        # untouched) — but should it ever commit, it commits the cleaned reply,
+        # never the false claim. For a zero-tool turn `_drive` always appends
+        # exactly one trailing assistant message, so this targets it.
+        if history and history[-1].role == "assistant":
+            history[-1] = LLMMessage(role="assistant", content=reply)
+        trace.event("confabulation_suppressed", replacement=reply)
+        await self._broadcast(
+            room_id, AssistantDelta(session_id=session_id, text=" " + reply)
+        )
+        return reply
+
+    def _record_last_turn(
+        self, session_id: str, outcome: TurnRecord, kind: str
+    ) -> None:
+        """Snapshot what the harness actually observed this turn, for a later
+        "did that actually work?" — the truth, not the model's self-report."""
+        mutations = tuple(
+            t.tool for t in outcome.tools if t.ok and t.mutating
+        )
+        any_tool_ok = any(t.ok for t in outcome.tools)
+        # Re-insert at the MRU end and evict the oldest over the cap — same LRU
+        # discipline as `_commit_history` keeps on `_history`.
+        self._last_turn.pop(session_id, None)
+        if len(self._last_turn) >= _MAX_TRACKED_SESSIONS:
+            del self._last_turn[next(iter(self._last_turn))]
+        self._last_turn[session_id] = _LastTurn(
+            kind=kind, mutations=mutations, any_tool_ok=any_tool_ok
+        )
+
+    async def _maybe_handle_escape(
+        self, session, text: str, source: UserTextSource, trace
+    ) -> bool:
+        """Deterministically handle a confabulation escape hatch, short-circuiting
+        the LLM. Returns True if the utterance was an escape phrase (the turn is
+        fully emitted here — Welcome through Done — and `_run_user_text` returns).
+
+        `start over` is a *consented* history clear — the safe sibling of the
+        deferred destructive auto-clear: user-initiated, and it drops history
+        rather than replaying it, so there is no double-mutation risk. `did that
+        actually work?` reports the dispatch-grounded truth of the last real
+        turn (`_last_turn`), never re-asking the model (which would re-narrate
+        the confabulation)."""
+        kind = _escape_kind(text)
+        if kind is None:
+            return False
+        sid, room = session.session_id, session.room_id
+        await self._broadcast(room, Welcome(session_id=sid))
+        await self._broadcast(
+            room, UserTranscript(session_id=sid, text=text, source=source)
+        )
+        if kind == "start_over":
+            self._history.pop(sid, None)
+            self._last_turn.pop(sid, None)
+            trace.event("history_cleared", reason="user start-over")
+            reply = "Done — I've cleared our conversation. Starting fresh."
+        else:
+            trace.event("truth_recheck")
+            reply = self._describe_last_turn(sid)
+        await self._broadcast(room, AssistantDelta(session_id=sid, text=reply))
+        await self._speak(sid, room, reply, trace)
+        await self._emit_turn_outcome(sid, room, "done", trace)
+        await self._broadcast(room, Done(session_id=sid))
+        trace.event("done")
+        return True
+
+    def _describe_last_turn(self, session_id: str) -> str:
+        """Honest, dispatch-grounded answer to "did that actually work?". Names
+        no raw tool ids (they're spoken aloud) — just whether a real change
+        landed."""
+        rec = self._last_turn.get(session_id)
+        if rec is None:
+            return (
+                "I don't have a recent action to check — ask me to do "
+                "something first."
+            )
+        if rec.mutations:
+            n = len(rec.mutations)
+            change = "change" if n == 1 else "changes"
+            return f"Yes — that went through. I made {n} {change} for real."
+        return (
+            "No — my last turn made no successful change. Nothing actually "
+            "happened, whatever I may have said."
         )
 
     async def _speak(

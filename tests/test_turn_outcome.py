@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from glados.core.turn_outcome import TurnRecord, classify, is_action_request
+from glados.core.turn_outcome import (
+    TurnRecord,
+    classify,
+    is_action_request,
+    is_time_request,
+)
 
 
 def _turn(
@@ -130,9 +135,31 @@ def test_read_request_search_only_is_done() -> None:
     assert classify(turn) == "done"
 
 
-def test_action_request_no_tools_is_left_alone() -> None:
-    # No tool activity: too ambiguous to fail deterministically.
+def test_action_request_no_tools_declarative_is_confabulated() -> None:
+    # Asked to act, dispatched nothing, yet declares it done. Fabricated
+    # completion — the poisoned-history signature (SESSION 2026-06-15).
     turn = _turn(final_text="Sure, adding that now.", action_intent=True)
+    assert classify(turn) == "confabulated"
+
+
+def test_action_request_no_tools_question_is_needs_user() -> None:
+    # Same zero-tool turn, but ends on a question — an honest hand-back
+    # (clarification), not a fabricated completion.
+    turn = _turn(final_text="Which milk did you mean?", action_intent=True)
+    assert classify(turn) == "needs-user"
+
+
+def test_action_request_no_tools_empty_reply_is_done() -> None:
+    # Nothing said, nothing claimed — no fabrication to flag. (A no-op turn
+    # like this is not committed to history anyway.)
+    turn = _turn(final_text="", action_intent=True)
+    assert classify(turn) == "done"
+
+
+def test_read_request_no_tools_declarative_is_not_confabulated() -> None:
+    # A read/question, not an action request, never trips confabulation even
+    # with zero tools — only side-effecting claims are flagged.
+    turn = _turn(final_text="It is Friday afternoon.", action_intent=False)
     assert classify(turn) == "done"
 
 
@@ -148,3 +175,29 @@ def test_is_action_request_rejects_reads_and_questions() -> None:
     assert not is_action_request("Which of my favorites are on sale?")
     assert not is_action_request("Show me the milk options")
     assert not is_action_request("Tell me what to add")
+
+
+def test_is_time_request_detects_time_questions() -> None:
+    assert is_time_request("What time is it?")
+    assert is_time_request("what time is it right now")
+    assert is_time_request("What's the time?")
+    assert is_time_request("What is the time")
+    assert is_time_request("Time is it.")  # ASR drops the lead-in
+    assert is_time_request("Do you have the time?")
+    assert is_time_request("do you know the time")
+    assert is_time_request("Tell me the time")
+    assert is_time_request("give me the time")
+    assert is_time_request("What's the current time?")
+    assert is_time_request("the time right now please")
+
+
+def test_is_time_request_rejects_non_time_questions() -> None:
+    # Bare "what time does X" is a planning question, not "what's the clock".
+    assert not is_time_request("What time does the shop open?")
+    assert not is_time_request("What time should I leave?")
+    assert not is_time_request("Set a timer for five minutes")
+    assert not is_time_request("Add a bottle of thyme to the cart")
+    assert not is_time_request("Is it a good time to buy milk?")
+    # A trailing clause means it's a planning question, not "what's the clock".
+    assert not is_time_request("What's the time the train leaves?")
+    assert not is_time_request("What is the time of the next bus")
