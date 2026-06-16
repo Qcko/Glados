@@ -660,14 +660,63 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   Note vs the original sketch: tools are listed at boot (not "on first
   dispatch") because the LLM must see a server's tools before it can call
   one — the child is then slept, not kept resident.
-- **Dynamic tool exposure.** Today ~25 tools ship in every system prompt
+- **Dynamic tool exposure / tiered tool-scoping. NEEDED NOW (no longer
+  "cheap to add later").** Today ~25 tools ship in every system prompt
   (1 NowTool + toy + 22 Dunnes). Small models start degrading around
-  30–50, and one more big MCP doubles us. Add a `ToolRouter` in `brain/`
-  that, per turn, picks a subset of `MCPRegistry.specs()` from: the
-  active skill's `tools` allowlist (free wiring from the Skills item),
-  else a keyword/embedding match against tool descriptions, plus a
-  "core tools always on" allowlist. Becomes essential past ~35 tools;
-  cheap to add earlier.
+  30–50, and one more big MCP doubles us — and production is expected to
+  run **10+ MCP servers**, which blows straight past the ceiling. We are
+  already hitting the wall at TWO servers. Add a `ToolRouter` in `brain/`
+  that, per turn, picks a subset of `MCPRegistry.specs()`.
+  **Design (decided 2026-06-16): hierarchical, deterministic-first, keyed
+  to the existing `Router`.** Extend routing from "which brain" to "which
+  brain + which tool-scope":
+    1. *Server-level scope first (coarse).* Deterministic intent rules pick
+       the relevant server(s) for the turn (`cart/buy/shop/add → dunnes`,
+       `remind/calendar → calendar`, …) — same keyword style as
+       `brain/router/rules.py`. The model is then offered only that
+       server's ~5–10 tools, never the full 100.
+    2. *Fine tier (optional).* Within a scoped server, narrow further when
+       intent is clear (add-vs-find). This is also what makes a forced
+       `add_recipe_ingredients` (below) reliable: once scoped to
+       "dunnes-add", the tool space is tiny so selection is deterministic.
+    3. *Sources, in priority:* the active skill's `tools` allowlist (free
+       wiring from the Skills item), else server-intent rules, else a
+       keyword/embedding match against tool descriptions, plus a
+       "core tools always on" allowlist (time, etc.).
+    4. *Fallback:* ambiguous / low-confidence → a small default scope (or a
+       cheap classifier LLM pass), never the whole registry.
+  **Invariant preserved:** scope is decided at turn *start*, so §7's
+  "per-turn frozen registry" still holds (no mid-turn tool-list churn).
+  This is a substantial new component + this doc's keystone scaling fix;
+  build it as its own slice with a design pass. [[feedback-harness-over-prompts]].
+
+- **Per-server tool concurrency + async (deferred) tool jobs.** Today the
+  per-room queue serialises a whole turn, and a turn blocks inline on each
+  tool result. A long external action (a Dunnes Selenium batch can be
+  ~35 s/item → **~10 min** for a big shop) therefore freezes the entire
+  room — no other turn, no other server, no conversation — for the whole
+  duration. Two distinct capabilities, very different cost:
+    1. *Per-server lock/queue (tractable; do first).* A lock/queue **per MCP
+       server** in the manager so two calls to the same single-resource
+       server (Dunnes drives ONE Selenium browser) can't collide, while
+       calls to *different* servers run in parallel. Natural fit, modest
+       change; decouples "Dunnes is busy" from "the room is busy".
+    2. *Non-blocking long actions / deferred tool jobs (own epic).* "Keep
+       talking to GLaDOS (or use another server) while Dunnes works" means
+       the conversation turn cannot stay blocked awaiting a 10-min tool. So:
+       acknowledge ("adding your 18 items — I'll tell you when it's done"),
+       run the action as a background job, and emit a **follow-up turn on
+       REAL completion**. This breaks the synchronous tool-loop and needs a
+       progress/notification protocol on the wire, cancellation semantics
+       (a dispatched cart write can't be un-fired — §6), and per-job vs
+       new-turn concurrency on the same cart. Critically it **re-introduces
+       the claim-before-done risk**: the completion report MUST be
+       dispatch-grounded (the harness's observed result, never the model's
+       self-report) — straight back to the confabulation work (the
+       `confabulated` outcome + `_last_turn` truth-record). **Requires its
+       own design-duck panel (architect + reliability/concurrency) before
+       any code.** Park 4.2 until the per-server lock (4.1) and tiered
+       scoping land.
 - **Multi-agent / subagent processes.** Considered and deferred. The
   per-MCP-plugin and per-Ollama-orchestrator splits don't pay off:
   MCP already gives the process boundary, and an orchestrator split
