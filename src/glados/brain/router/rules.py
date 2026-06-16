@@ -61,13 +61,18 @@ class Router:
             return RouteDecision(
                 "specialist", "reasoning/comparison markers", "high"
             )
+        # An imperative to mutate state is a tool-trigger the primary handles
+        # well — check it BEFORE the length gate. Otherwise a long multi-item
+        # add ("add: <18 ingredients>") routes to the specialist purely on word
+        # count, where the small model truncates the list and over-claims
+        # "done" — the history-poisoning seed (SESSION 2026-06-16).
+        if is_action_request(stripped):
+            return RouteDecision("primary", "tool-trigger imperative", "high")
         words = stripped.split()
         if len(words) > self.max_words_local:
             return RouteDecision(
                 "specialist", f"long request ({len(words)} words)", "high"
             )
-        if is_action_request(stripped):
-            return RouteDecision("primary", "tool-trigger imperative", "high")
         if len(words) <= 6:
             return RouteDecision("primary", "short utterance", "high")
         # Mid-length, no clear markers — the primary brain is the cheap default,

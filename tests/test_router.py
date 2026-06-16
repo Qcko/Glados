@@ -44,6 +44,25 @@ def test_long_request_routes_specialist() -> None:
     assert r.decide(long).target == "specialist"
 
 
+def test_long_action_request_stays_primary() -> None:
+    # The poison seed: a long multi-item add must NOT route to the specialist by
+    # word count — the imperative check now precedes the length gate so it stays
+    # on the primary (which doesn't truncate the list). SESSION 2026-06-16.
+    r = Router(max_words_local=10)
+    long_add = (
+        "add two carrots an onion some thyme a bay leaf and a litre of milk "
+        "to the cart please"
+    )
+    d = r.decide(long_add)
+    assert d.target == "primary" and d.reason == "tool-trigger imperative"
+
+
+def test_specialist_markers_beat_action_lead() -> None:
+    # Reasoning markers are still checked first, so an action-led request that
+    # also asks for open-ended reasoning routes to the specialist.
+    assert Router().decide("Add milk but explain why oat is better").target == "specialist"
+
+
 def test_ambiguous_midlength_is_primary_low_confidence() -> None:
     d = Router().decide("the milk situation in the fridge is getting complicated lately")
     assert d.target == "primary" and d.confidence == "low"
