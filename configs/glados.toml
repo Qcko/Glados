@@ -23,6 +23,17 @@ host = "http://localhost:11434"
 # code-switching without hurting tool-call selection.
 temperature = 0.0
 timeout = 60.0
+# Keep the model resident in VRAM so it never evicts mid-session. A re-cold
+# model drifts language (replies in Thai) and skips tools on its next free-form
+# turn; the boot warm-up only covers GLaDOS start, not an Ollama eviction. "-1"
+# = forever (sent as int); a unit duration ("30m", "1h") or "0" (evict at once)
+# also work. Passed through to the /api/chat keep_alive field.
+keep_alive = "-1"
+# Language GLaDOS must reply in. The deterministic language guard rewrites any
+# free-form reply whose dominant script is not this language's -- the backstop
+# for cold-model drift the prompt rule alone does not stop. Only mapped
+# languages (currently "en") are guarded; others fail open (no guard).
+reply_language = "en"
 # Persona/verbosity override. Empty (default) uses the built-in SYSTEM_PROMPT
 # from brain/prompts/system.py. Set a full replacement string to retune persona
 # per demo without editing code — restart GLaDOS to pick it up. The ARCH §7

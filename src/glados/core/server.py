@@ -255,6 +255,7 @@ def _build_llm(cfg: LLMConfig) -> LLM:
             model=cfg.model,
             temperature=cfg.temperature,
             timeout=cfg.timeout,
+            keep_alive=cfg.keep_alive,
         )
     return FakeLLM()
 
@@ -288,6 +289,7 @@ def _build_specialist_llm(
             model=cfg.local_smart_model,
             temperature=llm_cfg.temperature,
             timeout=llm_cfg.timeout,
+            keep_alive=llm_cfg.keep_alive,
         )
     if not cfg.cloud_enabled:
         return None
@@ -449,6 +451,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         escalate_on_failed=glados_cfg.router.escalate_on_failed,
         history_max_turns=glados_cfg.session.history_max_turns,
         system_prompt=glados_cfg.llm.system_prompt or None,
+        reply_language=glados_cfg.llm.reply_language,
     )
 
     @asynccontextmanager

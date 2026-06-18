@@ -30,12 +30,20 @@ class OllamaLLM:
         model: str = "qwen2.5:7b-instruct",
         temperature: float = 0.2,
         timeout: float = 60.0,
+        keep_alive: str = "-1",
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._host = host.rstrip("/")
         self._model = model
         self._temperature = temperature
         self._timeout = timeout
+        # Ollama's /api/chat `keep_alive`: a number is SECONDS (with -1 the
+        # "resident forever" sentinel), a string must be a unit duration
+        # ("30m", "1h"). A bare-number string like "-1" is rejected (400), so
+        # coerce a numeric config value to int and leave unit strings as-is.
+        # Resident-forever keeps the model from evicting mid-session (a re-cold
+        # model drifts language / skips tools on the next free-form turn).
+        self._keep_alive: int | str = self._coerce_keep_alive(keep_alive)
         self._transport = transport
         # Lazily constructed on first `chat()` so we bind to the running
         # event loop rather than whichever loop happened to be current at
@@ -43,6 +51,19 @@ class OllamaLLM:
         # internally, so streaming requests reuse keep-alive sockets to
         # Ollama instead of doing TCP+HTTP setup per turn.
         self._client: httpx.AsyncClient | None = None
+
+    @staticmethod
+    def _coerce_keep_alive(value: str) -> int | str:
+        # A bare number ("-1", "300") rides as int seconds (-1 = resident
+        # forever); a unit duration ("30m") stays a string. bool is an int
+        # subclass and int(True)==1 silently, so reject it explicitly; a blank
+        # value falls through to Ollama's own default rather than int("")=error.
+        if isinstance(value, bool) or not str(value).strip():
+            return value
+        try:
+            return int(value)
+        except ValueError:
+            return value
 
     def _ensure_client(self) -> httpx.AsyncClient:
         # Intentionally sync: the None-check and assignment cannot interleave
@@ -82,6 +103,7 @@ class OllamaLLM:
             "model": self._model,
             "messages": [self._to_ollama_msg(m) for m in messages],
             "stream": True,
+            "keep_alive": self._keep_alive,
             "options": {"temperature": self._temperature},
         }
         if name_map:

@@ -56,6 +56,26 @@ async def test_streams_text_chunks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_keep_alive_numeric_coerced_to_int() -> None:
+    """A numeric keep_alive ("-1") must ride as an int -- Ollama rejects the
+    bare-number STRING "-1" with 400 but accepts the int sentinel for resident-
+    forever. A unit-duration string ("30m") passes through unchanged."""
+    body = _ndjson({"message": {"role": "assistant", "content": "ok"}, "done": True})
+    captured: list[dict] = []
+    adapter = OllamaLLM(
+        keep_alive="-1", transport=_mock_transport(body, captured=captured)
+    )
+    await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+    assert captured[0]["keep_alive"] == -1
+
+    captured.clear()
+    adapter = OllamaLLM(
+        keep_alive="30m", transport=_mock_transport(body, captured=captured)
+    )
+    await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+    assert captured[0]["keep_alive"] == "30m"
+
+
 async def test_emits_tool_call() -> None:
     body = _ndjson(
         {

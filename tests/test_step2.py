@@ -298,6 +298,99 @@ async def test_organizer_suppresses_confabulated_action(tmp_path: Path) -> None:
         assert "added the milk" not in (committed[-1].content or "")
 
 
+_THAI = "บริการสภาพอากาศไม่พร้อมใช้งานในขณะนี้"
+
+
+@pytest.mark.asyncio
+async def test_organizer_repairs_language_drift(tmp_path: Path) -> None:
+    """A free-form reply that drifts to another language is repaired into the
+    configured language by one local re-inference; the repaired text is what
+    streams as a correction and what commits to history (the drift never does)."""
+    from glados.core.adapters import LLMText
+
+    class DriftLLM:
+        """Drifts to Thai on the turn; the repair pass (system says 'translate')
+        returns English."""
+
+        async def chat(self, messages, tools):
+            if "translate" in (messages[0].content or "").lower():
+                yield LLMText(text="The weather service is unavailable right now.")
+            else:
+                yield LLMText(text=_THAI)
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=DriftLLM(),
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "what is the weather")
+        await org.flush()
+
+        deltas = [m["text"] for _, m in sink if m["type"] == "assistant_delta"]
+        assert _THAI in deltas  # the drift streamed live...
+        assert any("weather service is unavailable" in d for d in deltas)  # ...then the fix
+
+        session_id = next(iter(org._history))
+        committed = org._history[session_id]
+        assert committed[-1].role == "assistant"
+        assert committed[-1].content == "The weather service is unavailable right now."
+        assert _THAI not in (committed[-1].content or "")
+
+
+@pytest.mark.asyncio
+async def test_organizer_falls_back_when_repair_still_drifts(tmp_path: Path) -> None:
+    """If the one repair pass still drifts, a deterministic in-language fallback
+    line is spoken/committed -- never the drifted text."""
+    from glados.core.adapters import LLMText
+    from glados.core.language_guard import detect_drift, fallback_line
+
+    class AlwaysDriftLLM:
+        async def chat(self, messages, tools):
+            yield LLMText(text=_THAI)  # both the turn and the repair drift
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=AlwaysDriftLLM(),
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "what is the weather")
+        await org.flush()
+
+        session_id = next(iter(org._history))
+        committed = org._history[session_id]
+        assert committed[-1].content == fallback_line("en")
+        assert detect_drift(committed[-1].content or "", "en") is False
+
+
+@pytest.mark.asyncio
+async def test_confabulation_wins_over_language_guard(tmp_path: Path) -> None:
+    """A turn that is BOTH a confabulated action AND drifted is handled by the
+    confabulation path only -- the language guard does not also fire (one
+    correction, one history rewrite)."""
+    from glados.core.adapters import LLMText
+    from glados.core.organizer import _CONFABULATION_REPLIES
+
+    class ConfabDriftLLM:
+        """An action claim, in Thai, with zero tool calls."""
+
+        async def chat(self, messages, tools):
+            yield LLMText(text=_THAI)
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=ConfabDriftLLM(),
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "add milk to the cart")
+        await org.flush()
+
+        outcomes = [m["outcome"] for _, m in sink if m["type"] == "turn_outcome"]
+        assert outcomes == ["confabulated"]
+        session_id = next(iter(org._history))
+        committed = org._history[session_id]
+        assert committed[-1].content in _CONFABULATION_REPLIES
+
+
 @pytest.mark.asyncio
 async def test_organizer_forces_time_tool_on_time_question(tmp_path: Path) -> None:
     """A time question forces a deterministic `time.now` dispatch and seeds the

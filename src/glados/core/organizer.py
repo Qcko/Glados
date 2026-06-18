@@ -25,6 +25,7 @@ from ..brain.router import Router
 from ..mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
 from .adapters import LLM, TTS, LLMMessage, LLMText, LLMToolCall
 from .config import ClientBinding
+from .language_guard import build_repair_messages, detect_drift, fallback_line
 from .protocols import (
     AssistantDelta,
     Cancelled,
@@ -220,6 +221,7 @@ class Organizer:
         escalate_on_failed: bool = True,
         history_max_turns: int = 8,
         system_prompt: str | None = None,
+        reply_language: str = "en",
     ) -> None:
         self.llm = llm
         # Gates the first turn behind the boot LLM warm-up (_await_llm_warm).
@@ -320,6 +322,8 @@ class Organizer:
         else:
             self._base_system_prompt = SYSTEM_PROMPT
         self._system_prompt = self._base_system_prompt
+        # Configured reply language for the drift guard (core/language_guard).
+        self._reply_language = reply_language
 
     def set_memory_notes(self, notes: list[str]) -> None:
         """Install guard-wrapped server memory into the system prompt.
@@ -383,11 +387,22 @@ class Organizer:
         degrades to a possibly-cold first turn rather than deadlocking every turn
         behind _await_llm_warm."""
         try:
-            messages = [
+            # Shot 1 exercises tool-selection (the cold model skips tools and
+            # fabricates — 2026-06-15). Shot 2 exercises FREE-FORM generation
+            # with no tools — the surface where a cold model drifts language
+            # (2026-06-18). One shot of each warms both failure modes.
+            tool_warm = [
                 LLMMessage(role="system", content=self._system_prompt),
                 LLMMessage(role="user", content="What time is it?"),
             ]
-            async with aclosing(self.llm.chat(messages, self.mcp.specs())) as stream:
+            async with aclosing(self.llm.chat(tool_warm, self.mcp.specs())) as stream:
+                async for _ in stream:
+                    pass
+            free_warm = [
+                LLMMessage(role="system", content=self._system_prompt),
+                LLMMessage(role="user", content="Say hello in one short sentence."),
+            ]
+            async with aclosing(self.llm.chat(free_warm, [])) as stream:
                 async for _ in stream:
                     pass
         except Exception:
@@ -482,8 +497,16 @@ class Organizer:
                 )
             kind = classify(outcome)
             if kind == "confabulated":
+                # Confabulation wins and short-circuits: the fabricated reply is
+                # replaced by a canned in-language line, so a language check on
+                # it would be moot (and would re-rewrite the same slot).
                 final_text = await self._handle_confabulation(
                     session.session_id, session.room_id, new_history, trace
+                )
+            elif final_text:
+                final_text = await self._handle_language_drift(
+                    session.session_id, session.room_id, new_history,
+                    final_text, trace,
                 )
             self._commit_history(session.session_id, new_history, outcome, final_text)
             await self._speak(session.session_id, session.room_id, final_text, trace)
@@ -958,6 +981,63 @@ class Organizer:
             room_id, AssistantDelta(session_id=session_id, text=" " + reply)
         )
         return reply
+
+    async def _handle_language_drift(
+        self,
+        session_id: str,
+        room_id: str,
+        history: list[LLMMessage],
+        final_text: str,
+        trace,
+    ) -> str:
+        """Backstop the cold-model language drift the prompt rule cannot stop:
+        if the final free-form reply's dominant script is not the configured
+        reply language, repair it into that language with ONE local inference;
+        if repair still drifts, fall back to a deterministic in-language line.
+
+        Returns the text to speak/commit. The repair runs on the PRIMARY (local)
+        brain regardless of which brain produced the turn -- never a cloud
+        specialist -- so the drifted text (which can embed tool args/results)
+        does not cross the trust boundary a second time (ARCH §9). The repair
+        prompt replays no tool history (ARCH §7): only the drifted text, wrapped
+        <external>, so untrusted tool content cannot re-enter or steer it."""
+        if not detect_drift(final_text, self._reply_language):
+            return final_text
+        repaired = await self._repair_language(final_text)
+        # The repair is the one awaited point; do the history rewrite + broadcast
+        # AFTER it (synchronously, before the broadcast await) so a cancel during
+        # repair discards the turn with prior history untouched -- and should the
+        # turn ever commit, it commits the repaired text, never the drift (mirror
+        # of _handle_confabulation's ordering).
+        if history and history[-1].role == "assistant" and history[-1].tool_calls is None:
+            history[-1] = LLMMessage(role="assistant", content=repaired)
+        trace.event("language_drift_repaired", replacement=repaired)
+        # Chat clients already streamed the drifted deltas live; push a
+        # correction delta after them. TTS (_speak) voices the returned repaired
+        # text, so the spoken output is in-language even though the streamed
+        # text briefly was not.
+        await self._broadcast(
+            room_id, AssistantDelta(session_id=session_id, text=" " + repaired)
+        )
+        return repaired
+
+    async def _repair_language(self, drifted_text: str) -> str:
+        """One local repair inference; fall back to a safe line if it still
+        drifts or yields nothing. Tool-free, history-free (ARCH §7)."""
+        messages = build_repair_messages(drifted_text, self._reply_language)
+        repaired = await self._collect_text(self.llm, messages)
+        if not repaired or detect_drift(repaired, self._reply_language):
+            return fallback_line(self._reply_language)
+        return repaired
+
+    async def _collect_text(self, llm: LLM, messages: list[LLMMessage]) -> str:
+        """Drain a tool-free chat stream into its concatenated text."""
+        parts: list[str] = []
+        async with aclosing(llm.chat(messages, [])) as stream:
+            async for event in stream:
+                if isinstance(event, LLMText):
+                    parts.append(event.text)
+        return "".join(parts).strip()
 
     def _record_last_turn(
         self, session_id: str, outcome: TurnRecord, kind: str

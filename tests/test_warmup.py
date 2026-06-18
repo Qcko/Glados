@@ -62,9 +62,11 @@ def _organizer(llm, tmp: Path, bindings=None):
 
 
 @pytest.mark.asyncio
-async def test_warm_up_llm_exercises_llm_with_full_tool_list(tmp_path: Path) -> None:
-    """The boot warm-up fires one inference with the FULL registered tool list
-    (so it primes the exact tool-selection path) and flips the readiness gate."""
+async def test_warm_up_llm_exercises_tool_and_freeform_paths(tmp_path: Path) -> None:
+    """The boot warm-up fires TWO inferences: one with the FULL registered tool
+    list (primes tool-selection — the cold-model fabrication bug) and one
+    tool-free (primes free-form generation — the cold-model language-drift bug),
+    then flips the readiness gate."""
 
     class RecordingLLM:
         def __init__(self) -> None:
@@ -83,10 +85,14 @@ async def test_warm_up_llm_exercises_llm_with_full_tool_list(tmp_path: Path) -> 
     await org.warm_up_llm()
 
     assert org._llm_warmed.is_set()
-    assert len(llm.calls) == 1
-    messages, tools = llm.calls[0]
-    assert messages[-1].role == "user" and "time" in messages[-1].content.lower()
-    assert any(t.qualified == "time.now" for t in tools)
+    assert len(llm.calls) == 2
+    tool_messages, tool_specs = llm.calls[0]
+    assert tool_messages[-1].role == "user" and "time" in tool_messages[-1].content.lower()
+    assert any(t.qualified == "time.now" for t in tool_specs)
+    # Second shot is free-form: no tools offered, so it primes plain generation.
+    free_messages, free_specs = llm.calls[1]
+    assert free_specs == []
+    assert free_messages[-1].role == "user"
 
 
 @pytest.mark.asyncio

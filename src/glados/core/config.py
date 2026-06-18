@@ -64,6 +64,18 @@ class LLMConfig(BaseModel):
     host: str = "http://localhost:11434"
     temperature: float = 0.2
     timeout: float = 60.0
+    # How long Ollama keeps the model resident after a request. "-1" pins it
+    # in VRAM indefinitely so it never evicts mid-session -- an evicted model
+    # re-colds, and a cold model drifts language / skips tools on the next
+    # free-form turn (the boot warm-up only covers GLaDOS start). A duration
+    # string ("30m", "1h") or "0" (evict immediately) are also accepted; passed
+    # through verbatim to the /api/chat `keep_alive` field.
+    keep_alive: str = "-1"
+    # Language GLaDOS must reply in. The language guard (core/language_guard.py)
+    # rewrites a free-form reply whose dominant script is not this language's --
+    # a deterministic backstop for the cold-model drift the prompt rule alone
+    # does not stop. Only mapped languages are guarded; others fail open.
+    reply_language: str = "en"
     # Persona/verbosity override for the static system prompt. Empty (default)
     # uses the built-in SYSTEM_PROMPT shipped in brain/prompts/system.py; set a
     # full replacement here to retune persona per demo without editing code.
