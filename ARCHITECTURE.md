@@ -877,6 +877,20 @@ Each version is its own session-sized chunk. Heavy work is deferred.
     - *Per-sentence markdown stripping.* `_strip_markdown_for_tts` runs on whole
       text now; per-sentence risks splitting `**bold across a boundary**`. Strip
       the accumulated buffer before segmenting, not each raw delta.
+    - *Language guard moves from post-turn to per-sentence.* The cold-model
+      language-drift guard (`core/language_guard.py`, wired in the turn dispatch
+      as `_handle_language_drift`, commit 842432c) works **only** because TTS is
+      post-turn today: `_speak` receives the already-repaired `final_text`, so
+      Piper never voices the drifted text — the wrong-language tokens reach the
+      chat surface as `assistant_delta` but never the audio path. Sentence-level
+      streaming TTS **breaks that guarantee**: Piper would start speaking a
+      drifted sentence before the post-turn guard runs. So this slice must move
+      the guard into the same sentence-buffer seam — detect drift per sentence,
+      repair that sentence (one local inference; word-by-word is impossible,
+      translation is not word-aligned), and only then hand the in-language
+      sentence to `synthesize`. Build the per-sentence guard **together with**
+      the streaming-TTS slice, not after. (Until then, the post-turn guard is
+      correct.)
   **Gate:** crosses the echo-path invariant and adds a concurrency/ordering
   interaction → **high-risk design; needs a design-duck panel (Architect /
   Concurrency-QA / UX) before code**, per CLAUDE.md. Couple to whichever version
