@@ -689,6 +689,35 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   "per-turn frozen registry" still holds (no mid-turn tool-list churn).
   This is a substantial new component + this doc's keystone scaling fix;
   build it as its own slice with a design pass. [[feedback-harness-over-prompts]].
+  **IMPLEMENTING 2026-06-18 (v1), after a design-duck panel.** A live
+  experiment confirmed the root cause: with ~30 tools the 14B hallucinates
+  `Call<PascalCase>` pseudo-tool-calls (the project-callcheck-tooltext leak);
+  with a minimal tool list it calls tools correctly. Panel must-fixes folded
+  into the v1 build:
+    - *Decouple from the difficulty router.* The user flagged the v2.6
+      primary/specialist router as a likely-dead path that may be removed.
+      So tool-scope is built as its own DETERMINISTIC decision on the user
+      text (a `ToolRouter` in `brain/`), composed with — but NOT nested under
+      — the primary/specialist verdict, so removing that router later is clean.
+    - *Server ids out of core (§5).* Route off `intent_keywords` declared per
+      server in `servers.toml`, never literals in `brain/`; a new MCP is a
+      config row. A `core` flag marks always-on servers/tools (time).
+    - *One prompt-assembly path.* A scope must not get its own prompt builder
+      that could drop the force-appended §7 rule / §14 memory framing.
+    - *Mis-route must be recoverable.* A scoped turn that comes back
+      `failed`/`confabulated` with no successful mutation re-drives ONCE with
+      the FULL tool set (bounded; composes with escalate-on-failed). Tension
+      noted: the fallback reintroduces the >30-tool degeneration, but only on
+      the rare recovery path — accepted for v1.
+    - *History (§8) — known v1 limitation.* The deterministic router classifies
+      on the user text, so it cannot be poisoned by stale tool framing. But a
+      later scoped turn still replays prior turns' tool-call records for
+      out-of-scope tools; keeping core tools (time) always-on reduces the
+      confusion. Committing a SUMMARIZED result instead of the raw scoped
+      transcript is the proper fix — deferred to a follow-up, not v1.
+    - *Multi-server per turn* deferred: v1 picks the matching server(s) by
+      keyword (may be >1 if several match); true decomposition of mixed intent
+      is later.
 
 - **Per-server tool concurrency + async (deferred) tool jobs.** Today the
   per-room queue serialises a whole turn, and a turn blocks inline on each
@@ -717,6 +746,33 @@ Each version is its own session-sized chunk. Heavy work is deferred.
        own design-duck panel (architect + reliability/concurrency) before
        any code.** Park 4.2 until the per-server lock (4.1) and tiered
        scoping land.
+  **Panel findings folded in 2026-06-18** (the per-server-subagent idea
+  resolved here — it IS this item, not a new architecture; "subagent
+  processes" stays deferred, see below):
+    - *The non-blocking win is largely illusory under ONE Ollama / ONE model.*
+      Every background sub-inference occupies the single model, so a
+      "concurrent" foreground turn just queues behind it — only the Selenium
+      I/O-WAIT windows (model idle) actually overlap. 4.2 must therefore either
+      enable Ollama `num_parallel`>=2 (VRAM cost) / a second model, OR ship an
+      explicit job queue that admits generation serializes and PRIORITIZES
+      foreground passes over background ones. This is why 4.1 (per-server lock,
+      which decouples "Dunnes busy" from "room busy" for the I/O case) is the
+      realistic first step.
+    - *History single-writer.* `_history` is mutated only by the room worker
+      today. A backgrounded job + a new same-room turn = two writers / lost
+      updates. Reintegrate the job result as an action RE-ENQUEUED on the room
+      worker (or a per-session lock with defined merge order), never a detached
+      writer.
+    - *Structured cancellation ownership.* A backgrounded job is no longer the
+      room's `_inflight` task, so barge-in/`handle_interrupt` won't cancel it
+      and would orphan a half-done Selenium cart. Register jobs in a parallel
+      map; interrupt + `close()`/shutdown must enumerate and cancel them; the
+      child must catch `CancelledError` and report partial state.
+    - *Warm re-gate + TTS gate across the gap.* Re-assert `_llm_warmed` before
+      each background sub-inference (a job can outlive an eviction/restart). The
+      delayed result `_speak` is a separate `_TtsGate` episode minutes later —
+      re-check room-busy/barge at speak time and deliver it AS a room-worker
+      action so the FIFO + gate accounting apply uniformly.
 - **Multi-agent / subagent processes.** Considered and deferred. The
   per-MCP-plugin and per-Ollama-orchestrator splits don't pay off:
   MCP already gives the process boundary, and an orchestrator split
