@@ -152,7 +152,10 @@ async def test_mcp_dispatch_per_tool_timeout_override() -> None:
 
 
 @asynccontextmanager
-async def _make_organizer(bindings: list[ClientBinding], tmp: Path, llm=None):
+async def _make_organizer(
+    bindings: list[ClientBinding], tmp: Path, llm=None, *, extra_tools=(),
+    tool_router=None,
+):
     sink: list[tuple[str, dict]] = []
 
     async def send(client_id: str, msg: BaseModel) -> None:
@@ -168,6 +171,8 @@ async def _make_organizer(bindings: list[ClientBinding], tmp: Path, llm=None):
 
     reg = MCPRegistry()
     reg.register(NowTool())
+    for tool in extra_tools:
+        reg.register(tool)
     organizer = Organizer(
         llm=llm if llm is not None else FakeLLM(),
         mcp=reg,
@@ -176,6 +181,7 @@ async def _make_organizer(bindings: list[ClientBinding], tmp: Path, llm=None):
         send=send,
         binding_for_client=binding_for,
         clients_in_room=in_room,
+        tool_router=tool_router,
     )
     try:
         yield organizer, sink
@@ -389,6 +395,190 @@ async def test_confabulation_wins_over_language_guard(tmp_path: Path) -> None:
         session_id = next(iter(org._history))
         committed = org._history[session_id]
         assert committed[-1].content in _CONFABULATION_REPLIES
+
+
+class _FakeTool:
+    """Minimal always-ok registry tool for tool-scoping tests."""
+
+    def __init__(self, server: str, name: str, *, mutating: bool = False) -> None:
+        from glados.core.adapters import ToolSpec
+
+        self.spec = ToolSpec(
+            server=server, name=name, description=f"{server}.{name}",
+            parameters={"type": "object", "properties": {}}, mutating=mutating,
+        )
+
+    async def call(self, args, envelope):
+        from glados.mcp.registry import MCPCallResult
+
+        return MCPCallResult(ok=True, content={"ok": True})
+
+
+def _weather_router():
+    from glados.brain.tool_router import ServerScope, ToolRouter
+
+    return ToolRouter(scopes={
+        "time": ServerScope("time", core=True),
+        "weather": ServerScope("weather", intent_keywords=("weather", "forecast")),
+    })
+
+
+@pytest.mark.asyncio
+async def test_tool_scope_hides_unmatched_server_from_model(tmp_path: Path) -> None:
+    """A turn that matches no server keyword is offered only the core tools --
+    the annotated server's tools never reach the model (the overload fix)."""
+    from glados.core.adapters import LLMText
+
+    class RecordingLLM:
+        def __init__(self) -> None:
+            self.offered: list[set[str]] = []
+
+        async def chat(self, messages, tools):
+            self.offered.append({t.qualified for t in tools})
+            yield LLMText(text="hi there")
+
+    llm = RecordingLLM()
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path, llm=llm, extra_tools=[_FakeTool("weather", "get")],
+        tool_router=_weather_router(),
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "say something nice")
+        await org.flush()
+
+    assert llm.offered  # the model was called
+    assert all("weather.get" not in offered for offered in llm.offered)
+    assert any("time.now" in offered for offered in llm.offered)  # core stays
+
+
+@pytest.mark.asyncio
+async def test_tool_scope_offers_matched_server(tmp_path: Path) -> None:
+    """A matching keyword brings the server's tools into scope."""
+    from glados.core.adapters import LLMText
+
+    class RecordingLLM:
+        def __init__(self) -> None:
+            self.offered: list[set[str]] = []
+
+        async def chat(self, messages, tools):
+            self.offered.append({t.qualified for t in tools})
+            yield LLMText(text="it is sunny")
+
+    llm = RecordingLLM()
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path, llm=llm, extra_tools=[_FakeTool("weather", "get")],
+        tool_router=_weather_router(),
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "what is the weather like")
+        await org.flush()
+
+    assert any("weather.get" in offered for offered in llm.offered)
+
+
+@pytest.mark.asyncio
+async def test_misroute_falls_back_to_full_tool_set(tmp_path: Path) -> None:
+    """A scoped turn that FAILS without mutating re-drives once on the full tool
+    set, so a mis-route (the right tool was scoped out) is recoverable."""
+    import uuid
+
+    from glados.core.adapters import LLMText, LLMToolCall
+
+    class MisrouteLLM:
+        async def chat(self, messages, tools):
+            names = {t.qualified for t in tools}
+            if messages[-1].role == "tool":
+                yield LLMText(text="done")
+                return
+            if "weather.get" in names:  # full-tool pass: real call
+                yield LLMToolCall(call_id=uuid.uuid4().hex[:8], server="weather",
+                                  name="get", args={})
+            else:  # scoped pass: weather hidden -> call a missing tool -> error
+                yield LLMToolCall(call_id=uuid.uuid4().hex[:8], server="ghost",
+                                  name="missing", args={})
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path, llm=MisrouteLLM(), extra_tools=[_FakeTool("weather", "get")],
+        tool_router=_weather_router(),
+    ) as (org, sink):
+        # "tell me about the climate" matches no weather keyword -> weather is
+        # scoped out -> scoped pass errors -> full-tool fallback recovers.
+        await org.handle_user_text("desk-ui", "tell me about the climate outside")
+        await org.flush()
+
+        outcomes = [m["outcome"] for _, m in sink if m["type"] == "turn_outcome"]
+        assert outcomes == ["done"]  # recovered via the fallback
+        results = [m for _, m in sink if m["type"] == "tool_result"]
+        assert any(m["ok"] for m in results)  # the real weather tool ran
+
+
+@pytest.mark.asyncio
+async def test_misroute_fallback_does_not_fire_after_mutation(tmp_path: Path) -> None:
+    """The full-tool fallback must NOT re-drive once a mutating call landed --
+    re-driving could double-fire the side effect. A scoped turn that mutated and
+    then errored stays `failed`, with no second top-level drive."""
+    import uuid
+
+    from glados.brain.tool_router import ServerScope, ToolRouter
+    from glados.core.adapters import LLMText, LLMToolCall
+
+    drives: list[set[str]] = []
+
+    class MutateThenErrorLLM:
+        async def chat(self, messages, tools):
+            tool_msgs = [m for m in messages if m.role == "tool"]
+            if not tool_msgs:  # first pass of a drive
+                drives.append({t.qualified for t in tools})
+                yield LLMToolCall(call_id=uuid.uuid4().hex[:8], server="weather",
+                                  name="get", args={})  # mutating, lands ok
+            elif len(tool_msgs) == 1:
+                yield LLMToolCall(call_id=uuid.uuid4().hex[:8], server="ghost",
+                                  name="missing", args={})  # unrecovered error
+            else:
+                yield LLMText(text="done")
+
+    # dunnes is annotated but won't match the prompt -> it's scoped OUT, so the
+    # scope is a strict subset and the fallback CONDITION's `scoped` is true;
+    # the mutation guard is what must suppress the re-drive.
+    router = ToolRouter(scopes={
+        "time": ServerScope("time", core=True),
+        "weather": ServerScope("weather", intent_keywords=("weather",)),
+        "dunnes": ServerScope("dunnes", intent_keywords=("cart",)),
+    })
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path, llm=MutateThenErrorLLM(),
+        extra_tools=[_FakeTool("weather", "get", mutating=True),
+                     _FakeTool("dunnes", "buy", mutating=True)],
+        tool_router=router,
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "weather please add it")
+        await org.flush()
+
+        outcomes = [m["outcome"] for _, m in sink if m["type"] == "turn_outcome"]
+        assert outcomes == ["failed"]  # stayed failed; fallback suppressed
+    # Exactly one top-level drive (no full-tool re-drive after the mutation).
+    assert sum("weather.get" in d for d in drives) == 1
+
+
+def test_build_tool_router_none_when_no_scoping(tmp_path: Path) -> None:
+    """Scoping is OFF by default: with no server declaring intent_keywords/core,
+    _build_tool_router returns None and the organizer offers every tool."""
+    from glados.core.config import ServerEntry, ServersConfig
+    from glados.core.server import _build_tool_router
+
+    cfg = ServersConfig(server=[
+        ServerEntry(id="toy", command="python", args=[]),
+        ServerEntry(id="dunnes", command="dotnet", args=[]),
+    ])
+    assert _build_tool_router(cfg) is None
+
+    scoped = ServersConfig(server=[
+        ServerEntry(id="dunnes", command="dotnet", args=[],
+                    intent_keywords=["cart"]),
+    ])
+    assert _build_tool_router(scoped) is not None
 
 
 @pytest.mark.asyncio

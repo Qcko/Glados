@@ -23,7 +23,8 @@ from pydantic import BaseModel
 from ..brain.prompts import EXTERNAL_CONTENT_RULE, SYSTEM_PROMPT
 from ..brain.router import Router
 from ..mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
-from .adapters import LLM, TTS, LLMMessage, LLMText, LLMToolCall
+from ..brain.tool_router import ToolRouter
+from .adapters import LLM, TTS, LLMMessage, LLMText, LLMToolCall, ToolSpec
 from .config import ClientBinding
 from .language_guard import build_repair_messages, detect_drift, fallback_line
 from .protocols import (
@@ -222,6 +223,7 @@ class Organizer:
         history_max_turns: int = 8,
         system_prompt: str | None = None,
         reply_language: str = "en",
+        tool_router: ToolRouter | None = None,
     ) -> None:
         self.llm = llm
         # Gates the first turn behind the boot LLM warm-up (_await_llm_warm).
@@ -324,6 +326,9 @@ class Organizer:
         self._system_prompt = self._base_system_prompt
         # Configured reply language for the drift guard (core/language_guard).
         self._reply_language = reply_language
+        # Per-turn tool-scoping (ARCH §13). None = no scoping (the model sees
+        # every registered tool, the pre-feature behaviour).
+        self._tool_router = tool_router
 
     def set_memory_notes(self, notes: list[str]) -> None:
         """Install guard-wrapped server memory into the system prompt.
@@ -484,16 +489,49 @@ class Organizer:
                     ),
                 )
             history = self._history.get(session.session_id, [])
+            all_specs = self.mcp.specs()
+            specs = (
+                self._tool_router.scope_for(text, all_specs)
+                if self._tool_router is not None
+                else all_specs
+            )
+            scoped = len(specs) < len(all_specs)
+            if self._tool_router is not None:
+                trace.event(
+                    "tool_scope",
+                    offered=[s.qualified for s in specs],
+                    full=len(all_specs),
+                )
             final_text, outcome, new_history = await self._drive(
                 llm, session.session_id, session.room_id, envelope, text, trace,
-                history,
+                history, specs,
             )
+            if (
+                scoped
+                and classify(outcome) == "failed"
+                and not outcome.made_successful_mutation()
+            ):
+                # Capability recovery (ARCH §13) runs BEFORE difficulty
+                # escalation: a scoped failure most likely hid the tool the turn
+                # needed, so re-drive ONCE on the FULL set (same cheap brain)
+                # from clean prior history. `scoped` means the scope was a strict
+                # subset — not necessarily that THE relevant tool was dropped.
+                # Bounded: only on `failed` with no mutation (so a real side
+                # effect can't double-fire). A later escalation then retries the
+                # full set, not the scoped one.
+                trace.event("tool_scope_fallback_full")
+                final_text, outcome, new_history = await self._drive(
+                    llm, session.session_id, session.room_id, envelope, text,
+                    trace, history, all_specs,
+                )
+                specs = all_specs
             if self._should_escalate(target, outcome):
-                # Re-drive cold from the SAME prior history, never the failed
-                # primary attempt's messages — the specialist gets a clean view.
+                # Difficulty retry: re-drive cold from the SAME prior history,
+                # never the failed attempt's messages — the specialist gets a
+                # clean view (on the full set if the fallback above widened it).
                 final_text, outcome, new_history = await self._escalate_to_specialist(
                     session.session_id, session.room_id, envelope, text, trace,
-                    history,
+                    history, specs,
                 )
             kind = classify(outcome)
             if kind == "confabulated":
@@ -738,12 +776,14 @@ class Organizer:
         text: str,
         trace,
         history: list[LLMMessage],
+        specs: list[ToolSpec],
     ) -> tuple[str, TurnRecord, list[LLMMessage]]:
         """Run one end-to-end turn (tool loop) on `llm` and return the final
         spoken text, the classified turn record, and the conversation history
         extended with this turn (everything after the system prompt). Pure of
-        routing — the caller decides which `llm` to hand in, whether to re-run
-        on the specialist, and whether to keep the returned history."""
+        routing — the caller decides which `llm` to hand in, the per-turn tool
+        `specs` to offer, whether to re-run on the specialist, and whether to
+        keep the returned history."""
         messages: list[LLMMessage] = [
             LLMMessage(role="system", content=self._system_prompt),
             *history,
@@ -756,7 +796,7 @@ class Organizer:
         )
         for _ in range(_MAX_TOOL_LOOP):
             pending_calls, assistant_text = await self._run_one_llm_pass(
-                llm, session_id, room_id, messages, trace
+                llm, session_id, room_id, messages, trace, specs
             )
             if not pending_calls:
                 final_text = assistant_text
@@ -860,6 +900,7 @@ class Organizer:
         text: str,
         trace,
         history: list[LLMMessage],
+        specs: list[ToolSpec],
     ) -> tuple[str, TurnRecord, list[LLMMessage]]:
         trace.event("escalate", reason="primary outcome failed")
         await self._broadcast(
@@ -871,8 +912,10 @@ class Organizer:
                 escalated=True,
             ),
         )
+        # Difficulty retry: same tool scope, smarter brain.
         return await self._drive(
-            self._specialist_llm, session_id, room_id, envelope, text, trace, history
+            self._specialist_llm, session_id, room_id, envelope, text, trace,
+            history, specs,
         )
 
     def _commit_history(
@@ -911,8 +954,8 @@ class Organizer:
         room_id: str,
         messages: list[LLMMessage],
         trace,
+        specs: list[ToolSpec],
     ) -> tuple[list[LLMToolCall], str]:
-        specs = self.mcp.specs()
         trace.event(
             "llm_request",
             tools=[s.qualified for s in specs],

@@ -34,6 +34,7 @@ from ..audio.vad.fake import FakeVAD
 from ..brain.llm.fake import FakeLLM
 from ..brain.llm.ollama import OllamaLLM
 from ..brain.router import Router
+from ..brain.tool_router import ServerScope, ToolRouter
 from ..mcp.registry import MCPRegistry
 from ..mcp.stdio_client import StdioServer, StdioToolProxy
 from ..servers.time_server import NowTool
@@ -109,6 +110,21 @@ async def _lazy_reaper(lazy_servers: list[tuple["StdioServer", float]]) -> None:
         now = asyncio.get_running_loop().time()
         for coro in _reap_idle_servers(lazy_servers, now):
             await coro
+
+
+def _build_tool_router(servers_cfg: ServersConfig) -> "ToolRouter | None":
+    """Build the per-turn tool-scoper from servers.toml (ARCH §13). Returns None
+    when no server declares scoping, so an unconfigured deployment keeps the
+    pre-feature behaviour (every tool offered every turn) with no scope overhead.
+    In-process tools (time, toy) aren't in servers.toml and so stay unscoped =
+    always offered, which is the intended 'core tools always on' behaviour."""
+    scopes = {
+        e.id: ServerScope(e.id, tuple(e.intent_keywords), e.core)
+        for e in servers_cfg.server
+    }
+    if not any(s.intent_keywords or s.core for s in scopes.values()):
+        return None
+    return ToolRouter(scopes=scopes)
 
 
 def _resolve_servers_toml(cfg_dir: Path) -> Path:
@@ -383,6 +399,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     glados_cfg = load_glados_config(cfg_dir / "glados.toml")
     rooms_cfg = load_rooms_config(cfg_dir / "rooms.toml")
     servers_cfg = load_servers_config(_resolve_servers_toml(cfg_dir))
+    tool_router = _build_tool_router(servers_cfg)
 
     traces = TraceStore(glados_cfg.server.traces_dir)
     mcp = MCPRegistry()
@@ -452,6 +469,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         history_max_turns=glados_cfg.session.history_max_turns,
         system_prompt=glados_cfg.llm.system_prompt or None,
         reply_language=glados_cfg.llm.reply_language,
+        tool_router=tool_router,
     )
 
     @asynccontextmanager

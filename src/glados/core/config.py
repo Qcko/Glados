@@ -263,6 +263,16 @@ class ServerEntry(BaseModel):
     # Per-tool overlays keyed by the tool's `name` (not qualified).
     # Missing tools fall back to wire defaults (all flags False / None).
     tool_overlays: dict[str, ToolOverlay] = {}
+    # Tiered tool-scoping (ARCH §13). Words that route a turn to THIS server's
+    # tools — same whole-word keyword style as brain/router/rules.py. When set,
+    # the server's tools are offered to the model ONLY on turns whose text
+    # matches (so a big server like Dunnes can't swamp the ~30-tool ceiling on
+    # unrelated turns — the project-callcheck-tooltext leak). Empty = unscoped:
+    # the server's tools are always offered (back-compat default).
+    intent_keywords: list[str] = []
+    # Always offer this server's tools regardless of intent (the "core tools
+    # always on" allowlist, e.g. a time server). Overrides intent_keywords.
+    core: bool = False
 
 
 class ServersConfig(BaseModel):
