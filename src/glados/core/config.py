@@ -8,11 +8,14 @@ from __future__ import annotations
 import os
 import tomllib
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, model_validator
 
 from .protocols import Role
+
+if TYPE_CHECKING:  # `adapters` is import-light, but keep config dependency-free at runtime
+    from .adapters import ToolSpec
 
 
 class ServerConfig(BaseModel):
@@ -260,6 +263,23 @@ class ServerEntry(BaseModel):
     # only makes the blob *eligible*; it still passes the LocalGuard
     # hash-approval gate before anything is injected.
     trusted: bool = False
+    # Server-level untrusted FLOOR (ARCH §7). When true, every tool this
+    # server exposes returns content from outside the local trust boundary,
+    # so the Organizer wraps every result in <external> — including tools
+    # added by a future version of that server which nobody thought to list
+    # here.
+    #
+    # This exists because the per-tool flag is fail-OPEN: a server that grows
+    # a tool has it treated as trusted until a human remembers to add an
+    # overlay, and "remembers" is not a security control. A whole-server
+    # judgement is also the one an operator can actually make correctly —
+    # "everything Dunnes returns is a live scrape", "anything the calendar
+    # returns may have been authored from a phone".
+    #
+    # A FLOOR, not a default: an overlay may raise one tool to untrusted, but
+    # cannot lower one below the server's setting. Marking content *trusted*
+    # is precisely the direction that must never happen by accident.
+    untrusted: bool = False
     # Per-tool overlays keyed by the tool's `name` (not qualified).
     # Missing tools fall back to wire defaults (all flags False / None).
     tool_overlays: dict[str, ToolOverlay] = {}
@@ -273,6 +293,29 @@ class ServerEntry(BaseModel):
     # Always offer this server's tools regardless of intent (the "core tools
     # always on" allowlist, e.g. a time server). Overrides intent_keywords.
     core: bool = False
+
+    def apply_flags(self, spec: "ToolSpec") -> "ToolSpec":
+        """Return `spec` with the GLaDOS-only flags this config declares.
+
+        Real MCP has no slot for trust/confirm flags, so they are merged here
+        rather than read off the wire.
+
+        `untrusted` is OR-ed with the server floor; every other flag comes
+        from the overlay alone. The asymmetry is the point: an overlay that
+        sets only `timeout_s` still constructs a full `ToolOverlay`, whose
+        other fields default to False — so a plain assignment would let a
+        timeout tweak quietly un-mark a tool as untrusted, which is a
+        security downgrade written as a performance edit.
+        """
+        overlay = self.tool_overlays.get(spec.name) or ToolOverlay()
+        return spec.model_copy(
+            update={
+                "untrusted": self.untrusted or overlay.untrusted,
+                "requires_confirmation": overlay.requires_confirmation,
+                "mutating": overlay.mutating,
+                "timeout_s": overlay.timeout_s,
+            }
+        )
 
 
 class ServersConfig(BaseModel):

@@ -206,6 +206,35 @@ LLM.
   rule that instructions inside `<external>` are data, not commands.
   Consider a separate "reader" LLM call (no tools) to summarise external
   content before it touches the tool-armed planner.
+- **The untrusted mark is a server-level FLOOR, not only a per-tool flag.**
+  `[[server]] untrusted = true` marks everything a server returns; a per-tool
+  overlay can raise one tool, never lower it below the floor
+  (`ServerEntry.apply_flags`). The per-tool flag alone is **fail-open**: when a
+  server grows a tool it is trusted until a human remembers to list it, and
+  remembering is not a security control. The floor also covers tools that do
+  not exist yet — the case that actually bites, since a server's *newest* tools
+  tend to carry the most caller-authored text. Note the asymmetry in the merge:
+  `untrusted` is OR-ed, every other flag is assigned. Without that, an overlay
+  adding only `timeout_s` would clear the floor — a security downgrade written
+  as a performance edit.
+- **Origin trust is not content trust, and first-party is not exempt.**
+  calendar-mcp is ours, and is still marked untrusted: its rows are not all
+  ours. Event and task text can be authored from a phone through an
+  internet-facing relay the design assumes is breachable, and arrives tagged
+  `origin=app`. GLaDOS treats the whole server as untrusted rather than parsing
+  per-row origin — wrapping a calendar result as data is a safe superset and is
+  correct regardless of origin (an event title should never be an instruction),
+  and per-item parsing would couple GLaDOS to another repo's payload schema in
+  the code path that handles hostile bytes.
+- **No auto-append of tool content to memory.** GLaDOS has no memory-writing
+  path at all, which satisfies calendar-mcp's orchestrator contract completely
+  — and invisibly, since nobody notices an absence being filled in. A "remember
+  this" feature is an obvious thing to add later, so the absence is pinned by
+  `test_glados_never_auto_appends_to_a_memory_file`. The hazard is specific:
+  memory is injected into a **trusted** system prompt, so persisting
+  `origin=app` text there would launder attacker-authored words from data into
+  instructions, permanently — and the §14 hash gate would not help, because a
+  blob approved once stays approved.
 - **Health & isolation:** each server is its own subprocess. Crash → manager
   restarts; voice loop keeps running; affected tools temporarily unavailable.
 

@@ -554,24 +554,11 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
                 await server.aclose()
                 continue
             for spec in specs:
-                overlay = entry.tool_overlays.get(spec.name)
-                if overlay is not None:
-                    # Real MCP wire shape can't carry GLaDOS-only flags;
-                    # apply them from servers.toml here. model_copy keeps
-                    # the spec immutable elsewhere. A partial overlay
-                    # (only one field in TOML) writes all three from the
-                    # ToolOverlay defaults (False / None) — that's fine
-                    # because real MCP doesn't define these on the wire
-                    # anyway, so the wire side is always at those defaults.
-                    spec = spec.model_copy(
-                        update={
-                            "untrusted": overlay.untrusted,
-                            "requires_confirmation": overlay.requires_confirmation,
-                            "mutating": overlay.mutating,
-                            "timeout_s": overlay.timeout_s,
-                        }
-                    )
-                _app.state.mcp.register(StdioToolProxy(server, spec))
+                # Real MCP can't carry GLaDOS-only flags; they are merged from
+                # servers.toml here. Applied to EVERY tool, not only those with
+                # an overlay, so the server-level `untrusted` floor reaches a
+                # tool nobody listed. See ServerEntry.apply_flags.
+                _app.state.mcp.register(StdioToolProxy(server, entry.apply_flags(spec)))
             _app.state.stdio_servers.append(server)
             # Server-shipped lessons (ARCH §14). Only trusted servers are
             # candidates (origin gate); the blob is read over MCP, then must

@@ -41,6 +41,19 @@
 #                     eligible; it still has to match a human-approved
 #                     baseline (`localguard memory approve`) or nothing is
 #                     injected (fail closed).
+#   untrusted       — server-level UNTRUSTED FLOOR (ARCH §7). True means every
+#                     tool this server exposes returns content from outside the
+#                     local trust boundary, so the Organizer wraps every result
+#                     in <external> and the system-prompt rule makes it data,
+#                     not instructions.
+#
+#                     Prefer this over repeating `untrusted = true` in every
+#                     overlay. The per-tool flag is fail-OPEN: when a server
+#                     grows a tool it is treated as TRUSTED until somebody
+#                     remembers to list it, and remembering is not a security
+#                     control. The floor also covers tools that do not exist
+#                     yet. It is a FLOOR, not a default — an overlay may raise
+#                     one tool to untrusted, but can never lower one below it.
 #   [server.tool_overlays.<ToolName>] — per-tool overlay applied after
 #                     `tools/list`. GLaDOS-only flags don't ride the wire
 #                     (third-party servers don't know about them), so we
@@ -99,6 +112,11 @@ args = [
 ]
 autostart = true
 env.DUNNES_EDGE_PROFILE = "<your-secrets-dir>/dunnes-edge-profile"
+# Every result is a live scrape of a third-party site, so the judgement is
+# whole-server rather than per-tool. This one line replaces the 25 repetitions
+# of `untrusted = true` that used to sit in the overlays below, and unlike them
+# it also covers any tool a future build of the server adds.
+untrusted = true
 
 # NOTE: tool keys here are snake_case — the .NET MCP SDK auto-converts
 # C# PascalCase method names (`AddToCart`) to snake_case (`add_to_cart`)
@@ -109,11 +127,9 @@ env.DUNNES_EDGE_PROFILE = "<your-secrets-dir>/dunnes-edge-profile"
 # Selenium operations need ~30s for SPA page loads; 35s gives headroom.
 
 [server.tool_overlays.start_browser]
-untrusted = true
 timeout_s = 35.0
 
 [server.tool_overlays.bootstrap_login]
-untrusted = true
 # Manual login — user types credentials in a visible Chrome window. Can
 # easily take a minute or three. Gated because (a) the LLM should never
 # fire it on its own; (b) the long timeout would otherwise starve the
@@ -122,21 +138,17 @@ requires_confirmation = true
 timeout_s = 300.0
 
 [server.tool_overlays.open_login_page]
-untrusted = true
 timeout_s = 35.0
 
 [server.tool_overlays.check_login_status]
-untrusted = true
 timeout_s = 35.0
 
 [server.tool_overlays.stop_browser]
-untrusted = true
 timeout_s = 35.0
 
 # --- Shop & favourites -------------------------------------------------
 
 [server.tool_overlays.search_products]
-untrusted = true
 timeout_s = 35.0
 
 # Cart writes (add_to_cart, set_cart_quantity, remove_from_cart) and the
@@ -151,14 +163,12 @@ timeout_s = 35.0
 # like a no-op and the turn is wrongly classed `failed`).
 
 [server.tool_overlays.add_to_cart]
-untrusted = true
 mutating = true
 timeout_s = 35.0
 
 # The one-shot search+add path the model prefers for "add <name>". Needs the
 # same Selenium timeout as a search, and is a cart write (mutating).
 [server.tool_overlays.add_to_cart_by_name]
-untrusted = true
 mutating = true
 timeout_s = 35.0
 
@@ -168,31 +178,25 @@ timeout_s = 35.0
 # and the turn is wrongly classed `failed`, which then re-fires the add on
 # the escalation loopback (double cart-add).
 [server.tool_overlays.add_by_volume]
-untrusted = true
 mutating = true
 timeout_s = 35.0
 
 [server.tool_overlays.view_favorites]
-untrusted = true
 timeout_s = 35.0
 
 [server.tool_overlays.scan_favorites_for_sales]
-untrusted = true
 timeout_s = 35.0
 
 # --- Cart --------------------------------------------------------------
 
 [server.tool_overlays.view_cart]
-untrusted = true
 timeout_s = 35.0
 
 [server.tool_overlays.set_cart_quantity]
-untrusted = true
 mutating = true
 timeout_s = 35.0
 
 [server.tool_overlays.remove_from_cart]
-untrusted = true
 mutating = true
 timeout_s = 35.0
 
@@ -203,51 +207,79 @@ timeout_s = 35.0
 # the turn is classed `done` (not `failed`) and the escalation loopback does
 # not re-fire it.
 [server.tool_overlays.set_cart_quantity_by_name]
-untrusted = true
 mutating = true
 timeout_s = 35.0
 
 [server.tool_overlays.remove_from_cart_by_name]
-untrusted = true
 mutating = true
 timeout_s = 35.0
 
 [server.tool_overlays.adjust_cart_quantity_by_name]
-untrusted = true
 mutating = true
 timeout_s = 35.0
 
 # --- Checkout (stops at slot selection) --------------------------------
 
 [server.tool_overlays.list_delivery_slots]
-untrusted = true
 timeout_s = 35.0
 
 [server.tool_overlays.set_delivery_slot]
-untrusted = true
 mutating = true
 # Last automated step before payment; ungated for the same reason as the
 # cart writes — manual payment is the safety boundary.
 timeout_s = 35.0
 
 # --- Local catalog (no network — cached JSON) --------------------------
-# Untrusted because the data was originally scraped, but no Selenium so
-# the 8s dispatch default is fine.
+# The catalog tools (catalog_search, get_catalog_product, list_catalog,
+# catalog_path, get_price_history, get_price_stats) need no overlays at all:
+# the data was originally scraped, so it is untrusted — covered by the server
+# floor above — and with no Selenium the 8s dispatch default is fine.
 
-[server.tool_overlays.catalog_search]
-untrusted = true
 
-[server.tool_overlays.get_catalog_product]
-untrusted = true
 
-[server.tool_overlays.list_catalog]
-untrusted = true
 
-[server.tool_overlays.catalog_path]
-untrusted = true
+# ---- calendar-mcp: the household calendar --------------------------------
+#
+# NOT ENABLED YET (autostart = false). The entry is here so that whoever turns
+# it on gets the trust flags right by default rather than by memory -- see
+# calendar-mcp's DESIGN.md, "orchestrator contract", and the G1 slice.
+#
+# Why untrusted, given this is a first-party server we wrote ourselves: origin
+# trust is not content trust. The rows it returns are not all ours. Event and
+# task text can be authored from a phone through an internet-facing relay that
+# the design assumes is breachable, and those rows are tagged `origin=app` in
+# the database. A compromised relay can forge in-schema writes, so an event
+# title is attacker-influenced text that lands in the model's context the next
+# time anyone asks what is on today.
+#
+# The floor is set at the SERVER level on purpose. calendar-mcp today exposes
+# reads only, but its next arc adds authoring tools -- exactly the tools whose
+# results carry the most caller-authored text. A per-tool list would leave each
+# of those trusted on the day it shipped.
+#
+# `trusted` stays false: that is the separate gate for injecting the server's
+# own memory://lessons into the SYSTEM prompt, and it is not needed here.
+#
+# Before enabling: run the G1 live verification -- start GLaDOS with this entry
+# on, ask for today's agenda, and confirm in the trace that the tool result
+# arrived wrapped in <external>.
 
-[server.tool_overlays.get_price_history]
+[[server]]
+id = "calendar"
+command = "uv"
+args = ["run", "--project", "<path-to>/calendar-mcp", "calendar-mcp"]
+autostart = false
 untrusted = true
-
-[server.tool_overlays.get_price_stats]
-untrusted = true
+trusted = false
+# The calendar is a "what's on today" server: cheap to keep resident, and asked
+# about often enough that lazy spawning would just add latency.
+lazy = false
+# Distinctive nouns only. "today"/"tomorrow"/"week" are matched whole-word
+# against the entire utterance, so they would pull the calendar into scope on
+# "what's the weather today" and a large fraction of other turns -- which
+# defeats the point of scoping. Harmless for safety (reads, and wrapped),
+# wasteful for the tool budget.
+intent_keywords = [
+    "calendar", "agenda", "schedule", "event", "events", "appointment",
+    "appointments", "meeting", "meetings", "todo", "board",
+]
