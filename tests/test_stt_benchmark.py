@@ -1,8 +1,8 @@
 """Harness logic for the STT benchmark (scripts/stt_benchmark.py).
 
-These tests exercise the benchmark *plumbing* — manifest reading, WAV
+These tests exercise the benchmark *plumbing* -- manifest reading, WAV
 loading + format validation, latency capture, summary statistics, JSON
-shape — without paying the faster-whisper download. A FakeSTT supplies
+shape -- without paying the faster-whisper download. A FakeSTT supplies
 canned hypotheses so the result is deterministic.
 """
 
@@ -124,7 +124,7 @@ async def test_benchmark_end_to_end(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_warmup_consumes_first_n_transcriptions(tmp_path: Path) -> None:
-    """`warmup=1` must consume the first scripted hypothesis silently —
+    """`warmup=1` must consume the first scripted hypothesis silently --
     recorded clips start from the second."""
     clip = tmp_path / "a.wav"
     _write_wav(clip, samples=16_000)
@@ -138,7 +138,7 @@ async def test_warmup_consumes_first_n_transcriptions(tmp_path: Path) -> None:
         "second",                    # recorded clip 1
     ])
     result = await bench.benchmark(stt, manifest, metadata={}, warmup=1)
-    # Both recorded clips transcribed correctly — proves warmup ate
+    # Both recorded clips transcribed correctly -- proves warmup ate
     # the bogus hypothesis without recording it.
     assert result["n_clips"] == 2
     assert [c["hypothesis"] for c in result["clips"]] == ["first", "second"]

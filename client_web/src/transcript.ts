@@ -28,7 +28,7 @@ function summariseResult(content: unknown): string {
 }
 
 function summariseValue(v: unknown): string {
-  if (typeof v === "string") return v.length > 80 ? JSON.stringify(v.slice(0, 77) + "…") : JSON.stringify(v);
+  if (typeof v === "string") return v.length > 80 ? JSON.stringify(v.slice(0, 77) + "...") : JSON.stringify(v);
   return JSON.stringify(v);
 }
 
@@ -71,15 +71,15 @@ export class Transcript {
       }
       case "tool_call":
         this.toolRow(
-          `→ ${msg.server}.${msg.name}(${summariseArgs(msg.args)})`,
+          `-> ${msg.server}.${msg.name}(${summariseArgs(msg.args)})`,
           msg.args,
           `call_id ${msg.call_id}`,
         );
         break;
       case "tool_result": {
         const headline = msg.ok
-          ? `← ${summariseResult(msg.content)}`
-          : `← error: ${msg.error}`;
+          ? `<- ${summariseResult(msg.content)}`
+          : `<- error: ${msg.error}`;
         this.toolRow(headline, msg.content ?? msg.error, `call_id ${msg.call_id}`);
         break;
       }
@@ -97,15 +97,15 @@ export class Transcript {
           // failed. Drop it so the specialist retry starts a clean bubble, and
           // mark the boundary.
           this.liveBubbles.delete(msg.session_id);
-          this.row("system", `↑ escalated to specialist — ${msg.reason}`);
+          this.row("system", `^ escalated to specialist -- ${msg.reason}`);
         } else if (msg.target === "specialist") {
-          this.row("system", `routed to specialist — ${msg.reason}`);
+          this.row("system", `routed to specialist -- ${msg.reason}`);
         }
         break;
       }
       case "turn_outcome":
         // Deterministic verdict on how the turn ended (see
-        // core/turn_outcome.py). A `done` turn is the silent default — no
+        // core/turn_outcome.py). A `done` turn is the silent default -- no
         // badge. `needs-user` / `failed` get a badge so a turn the model
         // narrated cheerfully but didn't finish is visible at a glance.
         if (msg.outcome !== "done") this.outcomeBadge(msg.session_id, msg.outcome);
@@ -136,7 +136,7 @@ export class Transcript {
     badge.textContent = label;
     // Prefer pinning the badge to the assistant bubble for this turn so it
     // reads as a verdict on that reply. If the turn produced no spoken text
-    // (tool-only), there's no bubble — fall back to a centred system row.
+    // (tool-only), there's no bubble -- fall back to a centred system row.
     const bubble = this.liveBubbles.get(sessionId);
     if (bubble) {
       bubble.appendChild(badge);

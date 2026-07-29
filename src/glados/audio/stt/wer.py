@@ -1,3 +1,4 @@
+# rule-guard:allow ascii-source - the curly apostrophe is the left-hand side of a normalisation replace(); rewriting it to ASCII turns the call into a silent no-op.
 """Word Error Rate (WER) — Levenshtein distance over word tokens.
 
 Standalone (no external deps). Used by `scripts/stt_benchmark.py` to make

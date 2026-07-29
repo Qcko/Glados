@@ -2,23 +2,23 @@
 
 This is the set-and-forget room device (a phone on a shelf): one process, one
 config, that captures audio up to GLaDOS and plays its replies back. A device
-running both roles needs TWO server identities — a `client_id` binds to exactly
+running both roles needs TWO server identities -- a `client_id` binds to exactly
 one (room, role), so the mic and speaker each have their own `client_id` (same
 `room_id`) and their own token. Both tokens are resolved before either client
 starts, so a missing secret fails before anything connects.
 
 Resilience is layered:
   - Each client already self-reconnects with capped+jittered backoff inside
-    `ReconnectingClient.run` — the supervisor adds NO second reconnect layer.
+    `ReconnectingClient.run` -- the supervisor adds NO second reconnect layer.
   - The supervisor owns the *process* lifecycle: it shuts both clients down
     cleanly on SIGINT/SIGTERM, and if one role hits a terminal handshake error
     (bad token / wrong binding) it logs loudly and keeps the *other* role
-    running — a degraded device survives a one-role misconfig rather than going
+    running -- a degraded device survives a one-role misconfig rather than going
     fully dark. It exits only on a signal or once both roles have exited.
 
 For a device that must also survive reboots or a both-roles-dead state, run this
 under an OS supervisor. On the Android/Termux target that's Termux:Boot +
-termux-services (runit) — Android has no systemd/init — wired up in
+termux-services (runit) -- Android has no systemd/init -- wired up in
 `client_room/deploy/termux/` (the runit `Restart=on-failure` analog). That is a
 phone-deploy concern, separate from this in-process supervision.
 

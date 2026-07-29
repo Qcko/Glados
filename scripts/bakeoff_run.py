@@ -1,14 +1,14 @@
-"""Model bake-off runner — drives MODEL_BAKE_OFF.md's prompts through a
+"""Model bake-off runner -- drives MODEL_BAKE_OFF.md's prompts through a
 running GLaDOS server and prints a structured per-test report.
 
-It does NOT score quality — that stays a human judgement (the whole point of
+It does NOT score quality -- that stays a human judgement (the whole point of
 the bake-off). What it automates is the tedious, error-prone part: sending each
-test prompt in the documented order, and capturing what came back —
+test prompt in the documented order, and capturing what came back --
 tool calls + args, tool results (ok/error), the spoken reply, and the
 deterministic `turn_outcome` (done / needs-user / failed). You read the report
 and fill in the 0/1/2 scorecard.
 
-The model under test is whatever the running server is configured for — swap
+The model under test is whatever the running server is configured for -- swap
 it the documented way (un/comment `[llm] model` in configs/glados.toml, then
 `glados-stop` + `uv run glados`) and re-run this with the matching `--slot`
 label. The `--slot` arg only tags the output; it does not change the model.
@@ -21,14 +21,14 @@ Auth: the token is read from the OS keyring (scope `glados.client-tokens`,
 username = client id), the same store the server uses. Override with --token
 for a dev fixture.
 
-Caveat — turn-to-turn memory: T4 ("actually add eggs instead") and T8 ("now
+Caveat -- turn-to-turn memory: T4 ("actually add eggs instead") and T8 ("now
 add it back") depend on conversational memory the v0 organizer does not yet
 have (single-turn sessions). They are sent anyway so you can observe the
 behaviour, but flagged in the report as memory-dependent.
 
 Stateful-cart pollution & --reset: the cart tests (T6/T8/T10/T11/T12) share one
 server-side cart with no reset between them, so an earlier test pollutes a later
-one — e.g. T3's add_by_volume can leave both a 3 L and a 1 L milk line, after
+one -- e.g. T3's add_by_volume can leave both a 3 L and a 1 L milk line, after
 which every later "milk" op hits the NameResolver non-unique guard and can't
 score a clean pass. Pass --reset to empty the cart and re-establish a known
 single-milk starting state before the stateful block (anchored to the test
@@ -38,7 +38,7 @@ LLM-mediated; it is logged under a distinct CART RESET banner so a run that
 reset state is visibly distinguishable from one that did not. Without --reset
 the suite behaves exactly as before. Note the Dunnes cart is persisted per
 logged-in account and survives GLaDOS restarts, so it must be cleared
-explicitly — restarting the server does not reset it.
+explicitly -- restarting the server does not reset it.
 """
 
 from __future__ import annotations
@@ -68,19 +68,19 @@ class BakeoffTest:
 
 # Prompts that drive the cart back to a known starting state through the same
 # ws/v1 user_text path the suite uses. There is no client-side direct-tool
-# frame, so the reset is itself LLM-mediated — phrased to remove *every* line
+# frame, so the reset is itself LLM-mediated -- phrased to remove *every* line
 # (by product id, unambiguous) rather than a per-name op that would trip the
 # non-unique guard, then seed a single milk line the stateful tests expect.
 RESET_PROMPTS: list[str] = [
     "Call view_cart to list the lines, then for each line call remove_from_cart "
     "using that line's real productId value copied verbatim from the view_cart "
-    "result — never a placeholder. Repeat until view_cart shows an empty cart.",
+    "result -- never a placeholder. Repeat until view_cart shows an empty cart.",
     "Add one carton of milk to the cart.",
 ]
 
 
 # Order follows MODEL_BAKE_OFF.md "Run order note": T9 first (authenticates the
-# browser session T2–T8 ride on), then T1 (independent), then T2–T8.
+# browser session T2-T8 ride on), then T1 (independent), then T2-T8.
 TESTS: list[BakeoffTest] = [
     BakeoffTest(
         "T9",
@@ -135,7 +135,7 @@ TESTS: list[BakeoffTest] = [
         "T11",
         ["Actually, just make it one milk."],
         "treats 'make it N' as an ABSOLUTE set: resolves the milk productId "
-        "(view_cart / search) then set_cart_quantity(id, 1) — NOT add_to_cart. "
+        "(view_cart / search) then set_cart_quantity(id, 1) -- NOT add_to_cart. "
         "Ends with milk quantity 1.",
         memory_dependent=True,
         stateful=True,
@@ -145,7 +145,7 @@ TESTS: list[BakeoffTest] = [
         ["Take one of the milks off."],
         "RELATIVE reduce: view_cart to read the current milk quantity, then "
         "set_cart_quantity(id, current-1) (or remove if it was 1). One user "
-        "turn, >=2 tool calls. Hardest — read-then-compute-then-act.",
+        "turn, >=2 tool calls. Hardest -- read-then-compute-then-act.",
         memory_dependent=True,
         stateful=True,
     ),
@@ -212,7 +212,7 @@ async def _reset_cart(ws) -> None:
     """Drive the cart back to a known single-milk state via RESET_PROMPTS.
     LLM-mediated (same user_text path as the suite); logged under a distinct
     banner so a reset run is visibly distinguishable from one that isn't."""
-    print("=== CART RESET (--reset) — empty + seed single milk ===")
+    print("=== CART RESET (--reset) -- empty + seed single milk ===")
     for prompt in RESET_PROMPTS:
         rep = await _run_turn(ws, prompt)
         _print_turn(rep)
@@ -243,10 +243,10 @@ async def run(args: argparse.Namespace) -> None:
         )
         sys.exit(2)
 
-    print(f"=== GLaDOS bake-off — slot {args.slot} ===")
+    print(f"=== GLaDOS bake-off -- slot {args.slot} ===")
     print(f"server: {args.url}   client: {args.client_id}/{args.room}")
-    print(f"cart reset: {'ON (--reset) — single-milk reseed before stateful block' if args.reset else 'OFF — stateful tests share an unreset cart'}")
-    print("Model under test is the server's configured [llm] model — confirm it "
+    print(f"cart reset: {'ON (--reset) -- single-milk reseed before stateful block' if args.reset else 'OFF -- stateful tests share an unreset cart'}")
+    print("Model under test is the server's configured [llm] model -- confirm it "
           "matches the slot.\n")
 
     # Dunnes search_results frames run >1 MB (30 full product records), past
@@ -268,7 +268,7 @@ async def run(args: argparse.Namespace) -> None:
             if reset_pending and test.stateful:
                 await _reset_cart(ws)
                 reset_pending = False
-            note = "  (memory-dependent — v0 single-turn may not honour this)" if test.memory_dependent else ""
+            note = "  (memory-dependent -- v0 single-turn may not honour this)" if test.memory_dependent else ""
             print(f"--- {test.id}{note}")
             print(f"    pass if: {test.criterion}")
             for prompt in test.prompts:
@@ -279,7 +279,7 @@ async def run(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    # Replies carry € and other non-cp1252 glyphs; the Windows console's
+    # Replies carry EUR and other non-cp1252 glyphs; the Windows console's
     # default codec raises UnicodeEncodeError on them. Force UTF-8 with
     # replacement so a stray glyph never aborts the run.
     for stream in (sys.stdout, sys.stderr):
@@ -287,12 +287,12 @@ def main() -> None:
         if reconfigure is not None:
             reconfigure(encoding="utf-8", errors="replace")
     p = argparse.ArgumentParser(description="GLaDOS model bake-off runner")
-    p.add_argument("--slot", default="?", help="label for this run (A/B/C) — does not change the model")
+    p.add_argument("--slot", default="?", help="label for this run (A/B/C) -- does not change the model")
     p.add_argument("--url", default="ws://127.0.0.1:8765/ws/v1")
     p.add_argument("--client-id", default="desk-ui")
     p.add_argument("--room", default="desk")
     p.add_argument("--token", default=None, help="override the keyring token (dev fixture)")
-    p.add_argument("--only", default=None, help="comma-separated test ids to run (e.g. T9,T1) — runs one at a time")
+    p.add_argument("--only", default=None, help="comma-separated test ids to run (e.g. T9,T1) -- runs one at a time")
     p.add_argument("--reset", action="store_true", help="empty + reseed a single-milk cart before the stateful block (LLM-mediated via user_text; clears the persisted server-side cart)")
     asyncio.run(run(p.parse_args()))
 

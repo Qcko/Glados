@@ -1,7 +1,7 @@
 """Shared spine for the room clients (mic, speaker).
 
 Both clients open the same `/ws/v1`, send a role `Hello` first, then run a
-role-specific session — mic uploads captured audio, speaker plays received TTS.
+role-specific session -- mic uploads captured audio, speaker plays received TTS.
 The connect + capped-jittered-backoff reconnect loop, the terminal-handshake
 error set, and the token/config loading are identical across roles and
 security-relevant (the terminal set gates whether a bad token retries forever;
@@ -27,7 +27,7 @@ log = logging.getLogger("client_room.client")
 def _with_tls(connect, url: str, tls_ca: str | None):
     """Wrap a websockets connect callable with a pinned-cert SSL context for
     `wss://` URLs. The server is a self-hosted appliance with a self-signed cert
-    (scripts/gen-tls-cert.sh); the client PINS it via `tls_ca` — trusting only
+    (scripts/gen-tls-cert.sh); the client PINS it via `tls_ca` -- trusting only
     that cert, not the public CA set. Plain `ws://` passes through unchanged so
     test fakes and cleartext-LAN setups are unaffected."""
     if not url.startswith("wss://"):
@@ -46,7 +46,7 @@ def _with_tls(connect, url: str, tls_ca: str | None):
         ctx.load_default_certs()  # wss:// against a public-CA server
     else:
         # Present-but-blank is a typo that would otherwise unpin silently
-        # (fall back to public CAs) — fail loudly instead.
+        # (fall back to public CAs) -- fail loudly instead.
         if not tls_ca:
             raise SystemExit(
                 "tls_ca is set to an empty string; give the server cert path "
@@ -58,7 +58,7 @@ def _with_tls(connect, url: str, tls_ca: str | None):
         ctx.load_verify_locations(cafile=str(ca_path))  # pin: trust only this
     return functools.partial(connect, ssl=ctx)
 
-# Terminal handshake errors — the server closes the socket after sending one,
+# Terminal handshake errors -- the server closes the socket after sending one,
 # and retrying with the same credentials/binding would just loop. The server
 # handshake (`server.py` `_handshake`) is role-agnostic, so every role shares
 # this set; `tests/test_client_room.py` drift-guards it against the server.
@@ -109,10 +109,10 @@ class ReconnectingClient(abc.ABC):
             self._terminal = False
             try:
                 await self._session()
-                backoff = self._backoff_min  # clean drop — reconnect promptly
+                backoff = self._backoff_min  # clean drop -- reconnect promptly
             except asyncio.CancelledError:
                 raise
-            except Exception as e:  # noqa: BLE001 - any transport error → retry
+            except Exception as e:  # noqa: BLE001 - any transport error -> retry
                 log.warning(
                     "%s session ended (%s: %s); will reconnect",
                     self._role, type(e).__name__, e,
@@ -130,7 +130,7 @@ class ReconnectingClient(abc.ABC):
         """True once `run` has exited because of a terminal handshake error (bad
         token / wrong room-role binding) rather than a graceful `stop`. A
         supervisor reads this to tell a misconfigured client apart from one it
-        shut down deliberately — the two otherwise both just return from `run`."""
+        shut down deliberately -- the two otherwise both just return from `run`."""
         return self._terminal
 
     async def _send_hello(self, ws) -> None:
@@ -152,7 +152,7 @@ class ReconnectingClient(abc.ABC):
         if msg.get("type") != "error":
             return False
         code = msg.get("code", "")
-        log.error("server error: %s — %s", code, msg.get("message", ""))
+        log.error("server error: %s -- %s", code, msg.get("message", ""))
         if code in TERMINAL_ERROR_CODES:
             self._terminal = True
             return True
@@ -177,7 +177,7 @@ def load_config(path: str) -> dict:
 
 
 def _check_token_file_perms(path: Path) -> None:
-    """Refuse a token file readable by group/other (SSH-style). POSIX only —
+    """Refuse a token file readable by group/other (SSH-style). POSIX only --
     the mode bits are meaningless on Windows, so skip the check there."""
     if os.name != "posix":
         return
@@ -195,7 +195,7 @@ def load_token(
     env_var: str | None = None,
     token_file: str | None = None,
 ) -> str:
-    """Resolve the client auth token. Precedence: keyring → env → file; the
+    """Resolve the client auth token. Precedence: keyring -> env -> file; the
     first present source wins and short-circuits. Logs WHICH source won (name
     only, never the value). Raises listing every source tried if none yields a
     token.

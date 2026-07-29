@@ -2,27 +2,27 @@
 
 Three pieces, each independently testable without hardware:
 
-- `Resampler` — pure DSP: native-rate float32 mono → 16 kHz PCM16-LE in
+- `Resampler` -- pure DSP: native-rate float32 mono -> 16 kHz PCM16-LE in
   800-sample frames, mirroring `client_web/src/audio/processor.js` (fractional
   cursor decimation with fractional carry-over across blocks) so the server's
   VAD/STT see exactly what the browser produces.
-- `BoundedAudioQueue` — a thread-safe, bounded hand-off from the PortAudio
+- `BoundedAudioQueue` -- a thread-safe, bounded hand-off from the PortAudio
   callback thread to the asyncio send loop. Drops the OLDEST block when full
   (the newest mic audio is what matters) and counts drops.
-- `InputDevice` — a tiny Protocol over a capture device, with a real
+- `InputDevice` -- a tiny Protocol over a capture device, with a real
   `sounddevice` implementation, a `SubprocessInput` (external `parec`/PulseAudio
   capture for boxes without PortAudio, e.g. Termux/Android), and a
   `NullInputDevice` for tests.
 
 Output side (the speaker client), mirror-imaged:
 
-- `JitterBuffer` — thread-safe PCM byte ring feeding a real-time playback
+- `JitterBuffer` -- thread-safe PCM byte ring feeding a real-time playback
   callback. Opposite contract to `BoundedAudioQueue`: it never drops mid-stream;
   on underrun it returns silence so playback degrades to a gap, never a stall.
-- `OutputDevice` — a tiny Protocol over a playback device that *pulls* PCM from
+- `OutputDevice` -- a tiny Protocol over a playback device that *pulls* PCM from
   a `JitterBuffer`, with a `sounddevice` implementation, a `SubprocessOutput`
   (external `pacat`/PulseAudio playback for boxes without PortAudio, e.g.
-  Termux/Android — the mirror of `SubprocessInput`), and a `NullOutputDevice`
+  Termux/Android -- the mirror of `SubprocessInput`), and a `NullOutputDevice`
   for tests.
 """
 
@@ -42,7 +42,7 @@ from .wire import AUDIO_SAMPLE_RATE, BATCH_SAMPLES
 
 log = logging.getLogger("client_room.audio")
 
-# int16 little-endian regardless of host byte order — the wire is LE and the
+# int16 little-endian regardless of host byte order -- the wire is LE and the
 # deploy target (phone/ARM) must agree with the dev box.
 _PCM_DTYPE = np.dtype("<i2")
 _INT16_MAX = 0x7FFF
@@ -55,7 +55,7 @@ class Resampler:
     800-sample frames. Stateful: the fractional read cursor carries across
     `process` calls so block boundaries don't drop or duplicate samples. This
     is a faithful port of the browser AudioWorklet, not a high-quality
-    resampler — matching the browser (which feeds the same VAD) beats adding an
+    resampler -- matching the browser (which feeds the same VAD) beats adding an
     anti-aliasing filter the server has never seen."""
 
     def __init__(self, native_rate: int) -> None:
@@ -121,7 +121,7 @@ class BoundedAudioQueue:
         """Deliver the `None` shutdown sentinel, evicting a block if the queue
         is full so the signal can never be the item that gets dropped (unlike
         `put`, which drops-oldest for audio). At shutdown the sole consumer is
-        blocked on `get`, so evict-then-retry always completes — this is the
+        blocked on `get`, so evict-then-retry always completes -- this is the
         guaranteed unblock for the send loop."""
         while True:
             try:
@@ -198,7 +198,7 @@ class NullInputDevice:
 
 class SoundDeviceInput:
     """Real capture via PortAudio (`sounddevice`). Imported lazily so the
-    package installs and the unit tests run on a box without PortAudio — only
+    package installs and the unit tests run on a box without PortAudio -- only
     live capture needs it. Captures at the device's native rate, mono float32;
     the `Resampler` downstream converts to the 16 kHz the wire wants."""
 
@@ -225,7 +225,7 @@ class SoundDeviceInput:
 
         def _cb(indata, _frames, _time, status) -> None:
             if status:
-                # Overflow/underflow flags — surface at debug to field-diagnose
+                # Overflow/underflow flags -- surface at debug to field-diagnose
                 # capture glitches on the phone, but never raise out of the
                 # audio callback.
                 log.debug("input stream status: %s", status)
@@ -259,7 +259,7 @@ class SubprocessInput:
     """Capture via an external `parec` (PulseAudio) process, for boxes that have
     PulseAudio but no PortAudio (Termux/Android). `parec` writes raw native-rate
     mono float32 to stdout; a daemon reader thread frames whole samples and hands
-    native-rate blocks to the callback — byte-for-byte the same downstream path
+    native-rate blocks to the callback -- byte-for-byte the same downstream path
     as `SoundDeviceInput`, so the existing `Resampler` runs unchanged (the server
     VAD/STT see exactly what the browser produces). PulseAudio is NOT asked to
     resample to 16 kHz; that would feed the VAD a differently anti-aliased signal.
@@ -279,10 +279,10 @@ class SubprocessInput:
         popen: Callable[..., subprocess.Popen] = subprocess.Popen,
     ) -> None:
         # `samplerate` should match the source's native rate so PulseAudio does
-        # no resampling on its side; the Resampler handles native → 16 kHz.
+        # no resampling on its side; the Resampler handles native -> 16 kHz.
         self.samplerate = samplerate
         self._source = source
-        # An argv LIST passed to Popen with shell=False — no shell, no string
+        # An argv LIST passed to Popen with shell=False -- no shell, no string
         # splitting, so a source name or extra arg can't inject a command.
         self._extra_args = list(extra_args or [])
         self._read_size = read_size
@@ -309,7 +309,7 @@ class SubprocessInput:
         callback: Callable[[AudioBlock], None],
         on_close: Optional[CloseCallback] = None,
     ) -> None:
-        # stderr → DEVNULL so a chatty parec can't fill an unread pipe and block
+        # stderr -> DEVNULL so a chatty parec can't fill an unread pipe and block
         # on write, silently stalling stdout (the audio path).
         self._proc = self._popen(
             self._argv(),
@@ -336,7 +336,7 @@ class SubprocessInput:
         try:
             while True:
                 chunk = stdout.read(self._read_size)
-                if not chunk:  # EOF — parec exited (cleanly or died)
+                if not chunk:  # EOF -- parec exited (cleanly or died)
                     break
                 buf += chunk
                 # Emit only whole float32 samples; carry an odd-byte remainder
@@ -373,7 +373,7 @@ class SubprocessInput:
         self._reader = None
         if reader is not None:
             # Abandon (it's a daemon) rather than block teardown if a read is
-            # still wedged after kill — never hang the caller.
+            # still wedged after kill -- never hang the caller.
             reader.join(timeout=self._stop_timeout_s)
 
 
@@ -384,7 +384,7 @@ class SubprocessInput:
 # Padding added to every device's drain tail (see OutputDevice.tail_s). The
 # tail is the load-bearing guard against signalling PlaybackDone while audio is
 # still audible; the device's own latency figure can under-report (scheduling
-# jitter, sink buffering), so we always add this cushion. Generous on purpose —
+# jitter, sink buffering), so we always add this cushion. Generous on purpose --
 # a late signal only loses the early-release benefit, an early one reopens the
 # mic mid-TTS.
 _DRAIN_TAIL_MARGIN_S = 0.05
@@ -395,7 +395,7 @@ class JitterBuffer:
 
     The recv loop (producer) `write`s decoded PCM bytes; the playback callback
     (consumer) `read`s exactly the bytes it needs. The contract is the *opposite*
-    of `BoundedAudioQueue`: continuity wins, so this never drops mid-stream — on
+    of `BoundedAudioQueue`: continuity wins, so this never drops mid-stream -- on
     underrun `read` returns silence (zeros), degrading to a gap rather than a
     stall or a click. Playback does not begin draining until `prebuffer_bytes`
     have accumulated, smoothing network jitter at the start of a reply; `flush`
@@ -405,22 +405,22 @@ class JitterBuffer:
 
     Storage is a single growing `bytearray` with a `_head` cursor: `read`
     advances `_head` instead of `del self._buf[:take]`, so a read costs only the
-    O(take) copy of the bytes it returns — never an O(backlog) memmove of the
+    O(take) copy of the bytes it returns -- never an O(backlog) memmove of the
     samples left behind (which the previous `del`-slice paid on every callback).
     The consumed prefix is reclaimed lazily by `_compact` once it has grown past
     both a small floor and the live backlog, which keeps the backing array within
     ~2x the live data while reads keep flowing and makes the reclaim amortized
     O(1) per consumed byte. Under a fully stalled consumer (no reads at all) the
-    backing array instead ceilings at ~`max_bytes + one write` — `max_bytes` caps
+    backing array instead ceilings at ~`max_bytes + one write` -- `max_bytes` caps
     the *live* backlog, and the drop path's own compaction trips once the consumed
-    prefix overtakes it — so `len(_buf)` is bounded either way.
+    prefix overtakes it -- so `len(_buf)` is bounded either way.
 
     The lock is held only for index math and the (rare, bounded) compaction
-    memmove — never across base64 decode, allocation of the incoming chunk, or
+    memmove -- never across base64 decode, allocation of the incoming chunk, or
     I/O (callers decode before `write`). So the real-time callback can never
     stall waiting on it."""
 
-    # Don't bother reclaiming a consumed prefix smaller than this — for a steady
+    # Don't bother reclaiming a consumed prefix smaller than this -- for a steady
     # ~50 ms backlog the prefix rarely reaches it, so compaction stays off the
     # hot path; below it the memmove would cost more than the wasted bytes.
     _COMPACT_FLOOR_BYTES = 4096
@@ -431,7 +431,7 @@ class JitterBuffer:
         self._lock = threading.Lock()
         self._prebuffer_bytes = prebuffer_bytes
         self._max_bytes = max_bytes
-        self._armed = prebuffer_bytes <= 0  # no prebuffer → drain immediately
+        self._armed = prebuffer_bytes <= 0  # no prebuffer -> drain immediately
         # GIL-reliant counters: bumped under the lock, read once after the
         # stream has stopped. Log lines, not live cross-thread readouts.
         self.underrun_bytes = 0
@@ -457,7 +457,7 @@ class JitterBuffer:
             if self._available() >= self._prebuffer_bytes:
                 self._armed = True
             if self._available() > self._max_bytes:
-                # Drop oldest by advancing the head, not by slicing — the same
+                # Drop oldest by advancing the head, not by slicing -- the same
                 # cursor move a read makes. Reclaimed later by `_compact`.
                 overflow = self._available() - self._max_bytes
                 self._head += overflow
@@ -492,10 +492,10 @@ class JitterBuffer:
             self._armed = self._prebuffer_bytes <= 0
 
     def bytes_remaining(self) -> int:
-        """Live (written-but-unconsumed) PCM bytes — what the playback callback
+        """Live (written-but-unconsumed) PCM bytes -- what the playback callback
         has yet to pull. The drain detector polls this after `done`: 0 means the
         device has pulled every byte of the reply (hardware/pipe tail still
-        pending — that's the OutputDevice's `tail_s`). Takes the lock; safe to
+        pending -- that's the OutputDevice's `tail_s`). Takes the lock; safe to
         call cross-thread."""
         with self._lock:
             return self._available()
@@ -505,7 +505,7 @@ class JitterBuffer:
         a reply shorter than `prebuffer_bytes` would otherwise never arm, so it
         would neither play nor ever reach `bytes_remaining() == 0` (the drain
         detector would hang). Once `done` is in, no more audio is coming, so the
-        prebuffer has nothing left to smooth — drain what we have."""
+        prebuffer has nothing left to smooth -- drain what we have."""
         with self._lock:
             self._armed = True
 
@@ -516,7 +516,7 @@ class OutputDevice(Protocol):
     # gap between "callback pulled the last bytes" and "the speaker went silent"
     # (PortAudio stream latency + DAC, or pacat's stdin pipe + --latency-msec).
     # The drain detector waits this out before signalling PlaybackDone, so the
-    # mic gate never reopens while the tail is still audible. Err generous — the
+    # mic gate never reopens while the tail is still audible. Err generous -- the
     # only cushion for an under-estimate is the server's short tail cooldown.
     tail_s: float
 
@@ -528,7 +528,7 @@ class OutputDevice(Protocol):
         """Begin playback, pulling PCM16-LE mono samples from `buffer` at this
         device's `samplerate`. `on_close`, if given, is invoked when the device
         stops unexpectedly (stream error/abort) so the caller can end the session
-        and reconnect rather than play silence forever — the playback analog of
+        and reconnect rather than play silence forever -- the playback analog of
         `InputDevice.on_close`."""
         ...
 
@@ -632,7 +632,7 @@ class SoundDeviceOutput:
             finished_callback=_finished,
         )
         # Now that PortAudio has opened the stream, its real output latency is
-        # known — use it (plus a margin) as the drain tail instead of the
+        # known -- use it (plus a margin) as the drain tail instead of the
         # construction-time guess.
         self.tail_s = float(self._stream.latency) + _DRAIN_TAIL_MARGIN_S
         self._stream.start()
@@ -648,7 +648,7 @@ class SoundDeviceOutput:
 
 class SubprocessOutput:
     """Playback via an external `pacat` (PulseAudio) process, for boxes that have
-    PulseAudio but no PortAudio (Termux/Android) — the mirror of `SubprocessInput`.
+    PulseAudio but no PortAudio (Termux/Android) -- the mirror of `SubprocessInput`.
 
     Where PortAudio is *pull*-clocked (its callback asks for exactly the frames
     the hardware just consumed), `pacat` is *push*: it reads raw PCM16-LE mono
@@ -660,22 +660,22 @@ class SubprocessOutput:
     pacat's sink starts draining, its stdin pipe (a ~64 KB OS buffer) accepts data
     without blocking, and because `JitterBuffer.read` zero-pads instantly on
     underrun, an unpaced writer would flood that pipe with silence that then plays
-    *ahead* of the first real audio — inflating latency by the pipe size, not by
+    *ahead* of the first real audio -- inflating latency by the pipe size, not by
     `--latency-msec`. A monotonic-clock pace caps how far ahead we can run to one
     chunk plus pacat's own (small) buffer, independent of the pipe size. pacat
     backpressure then only matters as a secondary bound if our clock drifts fast.
 
     On underrun the buffer returns silence, which we write at real-time rate
-    (correct: a gap, never a stall — same contract as `SoundDeviceOutput`).
+    (correct: a gap, never a stall -- same contract as `SoundDeviceOutput`).
 
-    Reliability: on writer-thread exit (pacat died → `BrokenPipeError`/EOF, or an
+    Reliability: on writer-thread exit (pacat died -> `BrokenPipeError`/EOF, or an
     intentional `stop`) `on_close` fires from the `finally`, exactly like
     `SubprocessInput`. Intentional-stop vs. real death is disambiguated upstream by
     `SpeakerClient`'s device-generation token (same as `SoundDeviceOutput`'s
     `finished_callback`), so the device always fires `on_close` on exit.
 
     Barge-in tail: a `flush()` clears the `JitterBuffer`, but pacat + its sink
-    still hold ~`--latency-msec` of already-pushed audio that cannot be recalled —
+    still hold ~`--latency-msec` of already-pushed audio that cannot be recalled --
     the push analog of `SoundDeviceOutput`'s PortAudio hardware tail. Keep
     `--latency-msec` small so barge-in stays snappy."""
 
@@ -705,7 +705,7 @@ class SubprocessOutput:
         # may have pushed up to one chunk ahead into the stdin pipe. Sum both,
         # plus the shared margin.
         self.tail_s = latency_msec / 1000.0 + self._chunk_s + _DRAIN_TAIL_MARGIN_S
-        # An argv LIST passed to Popen with shell=False — no shell, no string
+        # An argv LIST passed to Popen with shell=False -- no shell, no string
         # splitting, so a sink name or extra arg can't inject a command.
         self._extra_args = list(extra_args or [])
         self._stop_timeout_s = stop_timeout_s
@@ -736,7 +736,7 @@ class SubprocessOutput:
         on_close: Optional[CloseCallback] = None,
     ) -> None:
         self._stop_evt.clear()
-        # stderr → DEVNULL so a chatty pacat can't fill an unread pipe and block.
+        # stderr -> DEVNULL so a chatty pacat can't fill an unread pipe and block.
         self._proc = self._popen(
             self._argv(),
             stdin=subprocess.PIPE,
@@ -764,7 +764,7 @@ class SubprocessOutput:
             while not self._stop_evt.is_set():
                 data = buffer.read(self._chunk_bytes)
                 # BrokenPipe/ValueError (write on a closed handle) means pacat is
-                # gone or stop() closed us — a normal exit, not a crash.
+                # gone or stop() closed us -- a normal exit, not a crash.
                 stdin.write(data)
                 stdin.flush()
                 next_write += self._chunk_s
@@ -788,7 +788,7 @@ class SubprocessOutput:
             return
         self._proc = None
         # Signal the writer to leave its loop, then terminate pacat. We do NOT
-        # close stdin ourselves — a concurrent close + the writer's in-flight
+        # close stdin ourselves -- a concurrent close + the writer's in-flight
         # write on the same handle is the one real race; terminate() makes pacat
         # exit, which breaks the pipe and unblocks any write instead.
         self._stop_evt.set()
@@ -805,5 +805,5 @@ class SubprocessOutput:
         self._writer = None
         if writer is not None:
             # Abandon (it's a daemon) rather than block teardown if a write is
-            # still wedged after kill — never hang the caller.
+            # still wedged after kill -- never hang the caller.
             writer.join(timeout=self._stop_timeout_s)

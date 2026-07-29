@@ -1,7 +1,7 @@
 """Organizer: the only place sessions, queueing, and egress routing live.
 
 Scope: ingress tagging via `ClientBinding`, idle-window session continuation
-with a per-session hot history buffer (ARCH §3/§8), per-session tool-calling
+with a per-session hot history buffer (ARCH section 3/section 8), per-session tool-calling
 loop, egress fan-out by `room_id`. Dedup and fingerprinting land when audio
 arrives in v1.
 """
@@ -67,11 +67,11 @@ class _TtsGate:
     """Per-room feedback-gate state. `closed_until` is the authoritative
     suppression horizon (loop time): a mic utterance *captured* before it is
     GLaDOS's own voice and is dropped. It includes the post-playback cooldown
-    tail and is the single source of truth for the gate decision — the entry
+    tail and is the single source of truth for the gate decision -- the entry
     outlives the phase machine (it is overwritten by the next turn, not deleted
     when it opens) so a transcript that arrives long after the audio was
     captured (STT latency) is still judged against capture time, not arrival
-    time. `phase` (sending → draining → cooldown) is only the write-guard
+    time. `phase` (sending -> draining -> cooldown) is only the write-guard
     deciding who may move `closed_until`. `earliest_release` is the soonest a
     PlaybackDone is believed for this turn (an implausibly early one is a
     buggy/forged client and is ignored)."""
@@ -86,7 +86,7 @@ class _TtsGate:
 class _LastTurn:
     """Dispatch-grounded summary of a session's most recent real turn, so the
     "did that actually work?" escape hatch can report the TRUTH (what the
-    harness observed) instead of re-asking the model — which would just
+    harness observed) instead of re-asking the model -- which would just
     re-narrate its confabulation. Set only on real turns, never on an escape
     turn, so a recheck always describes the action the user is asking about."""
 
@@ -100,12 +100,12 @@ UserTextSource = Literal["voice", "text"]
 _MAX_TOOL_LOOP = 8
 
 # Spoken when a turn is classified `confabulated` (action claimed, zero tools
-# dispatched). Action-led and varied — never an apology-per-turn, which a
+# dispatched). Action-led and varied -- never an apology-per-turn, which a
 # poisoned session would repeat into a litany. Rotated so a run of fabricated
 # turns doesn't read as a stuck recording. The false "I added X" is replaced by
 # one of these on the audio path and in the committed history.
 _CONFABULATION_REPLIES = (
-    "I don't have a record of actually doing that — say it again and I'll run it for real.",
+    "I don't have a record of actually doing that -- say it again and I'll run it for real.",
     "That didn't dispatch; nothing was logged. Tell me once more and I'll act on it.",
     "I can't confirm that went through. Repeat it and I'll do it properly this time.",
 )
@@ -116,7 +116,7 @@ _CONFABULATION_REPLIES = (
 _MAX_TRACKED_SESSIONS = 64
 
 # Framing for hash-approved server memory injected into the system prompt
-# (ARCH §14 layer 4). The blocks are reference data, not commands — the §7
+# (ARCH section 14 layer 4). The blocks are reference data, not commands -- the section 7
 # <external> discipline applied to memory.
 _MEMORY_PREAMBLE = (
     "The following <memory-notes> blocks are durable lessons shipped by the "
@@ -144,7 +144,7 @@ def _is_barge_in(text: str) -> bool:
 
 
 # User-facing escape hatches against confabulation (SESSION 2026-06-15 v1 design,
-# item 3). Both short-circuit the LLM entirely — they are deterministic turns.
+# item 3). Both short-circuit the LLM entirely -- they are deterministic turns.
 # Matched as whole utterances (anchored, optional politeness lead-in) like
 # barge-in, so a mid-sentence mention ("can you start over from step 2") doesn't
 # trip them.
@@ -168,7 +168,7 @@ EscapeKind = Literal["recheck", "start_over"]
 
 def _escape_kind(text: str) -> EscapeKind | None:
     """Classify an utterance as a confabulation escape hatch, or None for a
-    normal turn. `start_over` wins ties — it is the explicit recovery."""
+    normal turn. `start_over` wins ties -- it is the explicit recovery."""
     stripped = (text or "").strip()
     if not stripped:
         return None
@@ -180,7 +180,7 @@ def _escape_kind(text: str) -> EscapeKind | None:
 
 
 # Strip-for-TTS pass: kill the markdown punctuation Piper would otherwise
-# read aloud ("asterisk asterisk milk asterisk asterisk"). Whitelisted —
+# read aloud ("asterisk asterisk milk asterisk asterisk"). Whitelisted --
 # we only undo formatting tokens, not real punctuation. Chat surface keeps
 # the original text via assistant_delta; only audio synthesis sees this.
 _MD_BOLD_ITALIC_RE = re.compile(r"\*{1,3}([^*\n]+?)\*{1,3}")
@@ -228,14 +228,14 @@ class Organizer:
         self.llm = llm
         # Gates the first turn behind the boot LLM warm-up (_await_llm_warm).
         # Defaults to SET ("warm") so an Organizer built without a server
-        # lifespan — every direct-construction unit test — never blocks. The
+        # lifespan -- every direct-construction unit test -- never blocks. The
         # server, which DOES warm, calls expect_llm_warmup() to clear it before
         # scheduling warm_up_llm; warm_up_llm sets it again when done (even on
         # error), so the gate releases no matter what.
         self._llm_warmed = asyncio.Event()
         self._llm_warmed.set()
         # v2.6 local multi-model router. When `router` is None the organizer
-        # behaves exactly as before — every turn runs on `self.llm` (the primary
+        # behaves exactly as before -- every turn runs on `self.llm` (the primary
         # brain) with no RouteNotice emitted. `specialist_llm` is the second
         # brain (a resident local model, or the dormant cloud escape hatch); the
         # server only wires it when the router is enabled, so
@@ -243,11 +243,11 @@ class Organizer:
         self._router = router
         self._specialist_llm = specialist_llm
         self._escalate_on_failed = escalate_on_failed
-        # Hot conversation buffer (ARCH §8), keyed by the stable session_id the
+        # Hot conversation buffer (ARCH section 8), keyed by the stable session_id the
         # SessionRegistry hands back. Within a session's idle window the same id
         # recurs, so a follow-up turn replays the prior turns and "add it back"
-        # / "do that instead" resolve. A new session starts empty — no context
-        # bleed across sessions (ARCH §3). Capped per session by
+        # / "do that instead" resolve. A new session starts empty -- no context
+        # bleed across sessions (ARCH section 3). Capped per session by
         # `_history_max_turns`; the dict itself is bounded by
         # `_MAX_TRACKED_SESSIONS` so dead sessions can't grow it without limit.
         self._history: dict[str, list[LLMMessage]] = {}
@@ -277,7 +277,7 @@ class Organizer:
         self._inflight: dict[str, tuple[asyncio.Task, str]] = {}
         # TTS feedback gate (server-side mic-mute layer). One `_TtsGate` per
         # room. Its `closed_until` horizon is the single suppression deadline;
-        # a mic utterance *captured* before it is dropped (non-barge-in only —
+        # a mic utterance *captured* before it is dropped (non-barge-in only --
         # barge-in regex still passes so voice interrupt always works). The
         # decision is judged against the audio's capture time, not the
         # transcript's arrival time, so STT latency (~2s) can't let GLaDOS's
@@ -285,9 +285,9 @@ class Organizer:
         #
         # `closed_until` is the *estimated playback end* (send start + audio
         # duration + margin) plus the cooldown tail, so the gate scales with
-        # reply length — a fixed cooldown reopened the gate while a long reply
-        # was still playing, and the room heard itself. `phase` (sending →
-        # draining → cooldown) is only the write-guard for who may move the
+        # reply length -- a fixed cooldown reopened the gate while a long reply
+        # was still playing, and the room heard itself. `phase` (sending ->
+        # draining -> cooldown) is only the write-guard for who may move the
         # horizon. A speaker client may shorten the estimate by reporting
         # PlaybackDone once its buffer drains (it can only LOWER the horizon);
         # the estimate is the load-bearing fallback when no signal arrives (no
@@ -305,15 +305,15 @@ class Organizer:
         # `handle_tool_confirm_response` (called from server.py on the
         # client's reply) sets the Future, OR when the timeout fires.
         # The room map enforces "only clients in the originating room
-        # can answer" — responses from other rooms are dropped silently.
+        # can answer" -- responses from other rooms are dropped silently.
         self._confirm_timeout_s = confirm_timeout_s
         self._pending_confirms: dict[str, asyncio.Future[bool]] = {}
         self._confirm_room: dict[str, str] = {}
         # Assembled system prompt: the base persona prompt plus any
-        # hash-approved, guard-wrapped server memory (ARCH §14). The base is
+        # hash-approved, guard-wrapped server memory (ARCH section 14). The base is
         # the built-in SYSTEM_PROMPT unless the operator supplies a
-        # `system_prompt` override via config. An override gets the ARCH §7
-        # EXTERNAL_CONTENT_RULE force-appended — the built-in already carries
+        # `system_prompt` override via config. An override gets the ARCH section 7
+        # EXTERNAL_CONTENT_RULE force-appended -- the built-in already carries
         # it, so an operator override can swap persona/verbosity but can never
         # silently drop the untrusted-content defense. Memory is collected in
         # the server lifespan *after* this constructor runs (servers spawn
@@ -326,17 +326,17 @@ class Organizer:
         self._system_prompt = self._base_system_prompt
         # Configured reply language for the drift guard (core/language_guard).
         self._reply_language = reply_language
-        # Per-turn tool-scoping (ARCH §13). None = no scoping (the model sees
+        # Per-turn tool-scoping (ARCH section 13). None = no scoping (the model sees
         # every registered tool, the pre-feature behaviour).
         self._tool_router = tool_router
 
     def set_memory_notes(self, notes: list[str]) -> None:
         """Install guard-wrapped server memory into the system prompt.
 
-        Each note is a `<memory-notes source="…">…</memory-notes>` block
+        Each note is a `<memory-notes source="...">...</memory-notes>` block
         already vetted + wrapped by `memory_gate.vet`. A short framing
         preamble (once, ahead of all blocks) tells the model the blocks are
-        reference data, not instructions — the §7 untrusted-content rule,
+        reference data, not instructions -- the section 7 untrusted-content rule,
         applied to memory. Empty list leaves the prompt as the plain base
         prompt. Idempotent: always rebuilt from the base prompt, so a
         re-call replaces rather than appends."""
@@ -382,8 +382,8 @@ class Organizer:
 
     async def warm_up_llm(self) -> None:
         """Fire one throwaway primary-LLM inference at boot so the user's first
-        real turn isn't the cold first inference — which skips tools and
-        fabricates (SESSION 2026-06-15: cold model × full tool list → it answers
+        real turn isn't the cold first inference -- which skips tools and
+        fabricates (SESSION 2026-06-15: cold model x full tool list -> it answers
         "What time is it?" from parametric knowledge instead of calling
         time.now). Uses the FULL registered tool list + a tool-requiring prompt
         so the cold shot exercises the exact tool-selection path, then drains and
@@ -393,8 +393,8 @@ class Organizer:
         behind _await_llm_warm."""
         try:
             # Shot 1 exercises tool-selection (the cold model skips tools and
-            # fabricates — 2026-06-15). Shot 2 exercises FREE-FORM generation
-            # with no tools — the surface where a cold model drifts language
+            # fabricates -- 2026-06-15). Shot 2 exercises FREE-FORM generation
+            # with no tools -- the surface where a cold model drifts language
             # (2026-06-18). One shot of each warms both failure modes.
             tool_warm = [
                 LLMMessage(role="system", content=self._system_prompt),
@@ -411,7 +411,7 @@ class Organizer:
                 async for _ in stream:
                     pass
         except Exception:
-            log.exception("LLM warm-up failed (continuing — first turn may be cold)")
+            log.exception("LLM warm-up failed (continuing -- first turn may be cold)")
         finally:
             self._llm_warmed.set()
 
@@ -420,7 +420,7 @@ class Organizer:
         no-op (the Event is already set by the time anyone speaks); only the rare
         turn that beats warm-up waits, so it lands on a warm model. Warns + emits
         an `llm_cold_turn` trace event so the race is observable if it ever bites
-        — proceeding cold after the timeout rather than hanging the turn."""
+        -- proceeding cold after the timeout rather than hanging the turn."""
         if self._llm_warmed.is_set():
             return
         log.warning(
@@ -511,11 +511,11 @@ class Organizer:
                 and classify(outcome) == "failed"
                 and not outcome.made_successful_mutation()
             ):
-                # Capability recovery (ARCH §13) runs BEFORE difficulty
+                # Capability recovery (ARCH section 13) runs BEFORE difficulty
                 # escalation: a scoped failure most likely hid the tool the turn
                 # needed, so re-drive ONCE on the FULL set (same cheap brain)
                 # from clean prior history. `scoped` means the scope was a strict
-                # subset — not necessarily that THE relevant tool was dropped.
+                # subset -- not necessarily that THE relevant tool was dropped.
                 # Bounded: only on `failed` with no mutation (so a real side
                 # effect can't double-fire). A later escalation then retries the
                 # full set, not the scoped one.
@@ -527,7 +527,7 @@ class Organizer:
                 specs = all_specs
             if self._should_escalate(target, outcome):
                 # Difficulty retry: re-drive cold from the SAME prior history,
-                # never the failed attempt's messages — the specialist gets a
+                # never the failed attempt's messages -- the specialist gets a
                 # clean view (on the full set if the fallback above widened it).
                 final_text, outcome, new_history = await self._escalate_to_specialist(
                     session.session_id, session.room_id, envelope, text, trace,
@@ -563,7 +563,7 @@ class Organizer:
                 del self._inflight[session.session_id]
             # Close the trace before any further await so a re-cancel during
             # shutdown can't strand the file handle. Broadcast is shielded
-            # for the same reason — without it a second cancel would
+            # for the same reason -- without it a second cancel would
             # suppress Cancelled and leave the room hanging.
             trace.close()
             if cancelled:
@@ -579,13 +579,13 @@ class Organizer:
     ) -> None:
         """Audio-ingress entry. A short barge-in utterance (`stop`, `cancel`,
         ...) cancels the speaker's room's in-flight turn AND drops anything
-        else queued for that room — voice "stop" means "shut up", not
+        else queued for that room -- voice "stop" means "shut up", not
         "shut up only about this one thing." Everything else falls through
         to `handle_user_text`, except when the TTS feedback gate
         suppresses it (room is mid-TTS or in post-Done cooldown).
 
         `captured_at` is the loop time the utterance BEGAN (from the audio
-        pipeline at the VadStart boundary) — the gate is judged against it, not
+        pipeline at the VadStart boundary) -- the gate is judged against it, not
         `now`, so neither STT latency nor the VAD silence-hangover between
         capture and this call can let GLaDOS's own voice slip past a gate that
         has since opened. Anchoring on the start (not the end) is what makes a
@@ -595,12 +595,12 @@ class Organizer:
         "stop" always survives regardless of timing.
 
         UI Interrupt (via `handle_interrupt`) is finer-grained and does
-        NOT clear the queue — typed cancellation targets one session."""
+        NOT clear the queue -- typed cancellation targets one session."""
         binding = self.binding_for_client(client_id)
         if binding is None:
             return
         if _is_barge_in(text):
-            # Barge-in always passes through the gate — that's the whole
+            # Barge-in always passes through the gate -- that's the whole
             # point of voice-driven interrupt. The user is allowed to say
             # "stop" while GLaDOS is talking.
             pending = self._queues.clear(binding.room_id)
@@ -616,13 +616,13 @@ class Organizer:
             # is genuinely idle. Fall through to a normal turn rather than
             # silently swallowing user input.
         elif self._room_mic_gated(binding.room_id, captured_at):
-            # Speaker→mic feedback loop guard. The browser already runs
+            # Speaker->mic feedback loop guard. The browser already runs
             # `echoCancellation: true`, but the gate is a second layer
             # for Pi clients without `webrtc-audio-processing` and for
-            # external speakers where browser AEC is weak (ARCH §3
+            # external speakers where browser AEC is weak (ARCH section 3
             # concurrency consequences).
             # INFO (not DEBUG) so the silent-drop is visible in glados.log
-            # — otherwise an entire demo's worth of voice turns can vanish
+            # -- otherwise an entire demo's worth of voice turns can vanish
             # without a trace in production logs.
             log.info(
                 "tts gate: dropped audio from %s in %s (text=%r)",
@@ -637,8 +637,8 @@ class Organizer:
     _MIN_RELEASE_FRACTION = 0.5
     # Tolerance on the early-release clamp: a PlaybackDone within this of the
     # earliest plausible time is accepted (absorbs coarse-clock / near-zero
-    # estimates). Only a signal earlier than this — which only happens for a
-    # genuinely long reply — is treated as implausible and ignored.
+    # estimates). Only a signal earlier than this -- which only happens for a
+    # genuinely long reply -- is treated as implausible and ignored.
     _CLAMP_GRACE_S = 0.05
 
     def _room_mic_gated(self, room_id: str, at: float | None = None) -> bool:
@@ -649,8 +649,8 @@ class Organizer:
         closes the feedback loop: STT latency means a transcript can arrive
         ~2s after its audio was captured, by which point a `now`-based check
         would see the gate already open and wrongly admit GLaDOS's own voice.
-        The entry is left in place once its horizon passes — the next turn
-        overwrites it — so a late transcript can still see the horizon it was
+        The entry is left in place once its horizon passes -- the next turn
+        overwrites it -- so a late transcript can still see the horizon it was
         captured under."""
         gate = self._tts_gate.get(room_id)
         if gate is None:
@@ -667,7 +667,7 @@ class Organizer:
 
     async def handle_playback_done(self, client_id: str, session_id: str) -> None:
         """A speaker client reports its audio for `session_id` finished playing
-        — shorten that room's gate from the duration estimate to the short tail
+        -- shorten that room's gate from the duration estimate to the short tail
         cooldown. Role-scoped (only a speaker may drive the gate), turn-
         correlated, and clamped against an implausibly early signal."""
         binding = self.binding_for_client(client_id)
@@ -678,11 +678,11 @@ class Organizer:
             return  # not draining this turn (mid next turn, stale, or cooled)
         now = asyncio.get_running_loop().time()
         if now < gate.earliest_release - self._CLAMP_GRACE_S:
-            return  # implausibly early (only fires for a long reply) — ignore.
+            return  # implausibly early (only fires for a long reply) -- ignore.
             # The grace keeps a near-zero estimate + coarse clock from falsely
             # rejecting a legitimately-timed signal on a short reply.
         gate.phase = "cooldown"
-        # Early-release only ever SHORTENS the horizon — `min` makes a stale or
+        # Early-release only ever SHORTENS the horizon -- `min` makes a stale or
         # duplicate PlaybackDone (arriving after the horizon has already passed)
         # unable to re-raise it and deafen the mic to a fresh user utterance.
         gate.closed_until = min(gate.closed_until, now + self._tts_cooldown_s)
@@ -698,12 +698,12 @@ class Organizer:
     ) -> None:
         """Transition a room out of SENDING once the reply has been streamed.
         A cancelled turn was flushed on the client, so it gets only the short
-        tail cooldown — never the full unplayed duration (which would deafen the
+        tail cooldown -- never the full unplayed duration (which would deafen the
         mic to the user's follow-up). A room with no connected speaker played
         nothing, so the gate just opens."""
         # A cancelled _speak's finally runs on a later tick (handle_interrupt
         # only .cancel()s the task), by which point the *next* turn may already
-        # own the gate in SENDING. Only arm if this turn still owns it — same
+        # own the gate in SENDING. Only arm if this turn still owns it -- same
         # successor-clobber guard as `_inflight` (entry[0] is task).
         gate = self._tts_gate.get(room_id)
         if gate is None or gate.session_id != session_id or gate.phase != "sending":
@@ -724,7 +724,7 @@ class Organizer:
             phase="draining",
             session_id=session_id,
             # The horizon bakes in the cooldown tail up front (the old lazy
-            # draining→cooldown bump is gone — there is one number now).
+            # draining->cooldown bump is gone -- there is one number now).
             closed_until=playback_end + self._tts_cooldown_s,
             earliest_release=send_start + audio_dur * self._MIN_RELEASE_FRACTION,
         )
@@ -732,7 +732,7 @@ class Organizer:
     def _active_session_in_room(self, room_id: str) -> str | None:
         # v1 invariant: at most one in-flight session per room (one speaker,
         # one turn at a time). v2 multi-speaker rooms will need a policy
-        # choice — most-recent, or per-speaker fan-out.
+        # choice -- most-recent, or per-speaker fan-out.
         for sid, (_task, rid) in self._inflight.items():
             if rid == room_id:
                 return sid
@@ -743,7 +743,7 @@ class Organizer:
         a sub-millisecond window between the worker dequeueing an action
         and the action registering. A voice barge-in arriving in that
         window would otherwise see `_inflight` empty + queue empty and
-        fall through to a regular turn — i.e. "stop" becomes "say stop".
+        fall through to a regular turn -- i.e. "stop" becomes "say stop".
 
         `_queues._active_actions` is populated by the worker *before* it
         awaits the action, so it closes that window."""
@@ -757,7 +757,7 @@ class Organizer:
             return
         entry = self._inflight.get(session_id)
         if entry is None:
-            return  # turn already finished or never existed — no-op
+            return  # turn already finished or never existed -- no-op
         task, room_id = entry
         if room_id != binding.room_id:
             log.warning(
@@ -781,7 +781,7 @@ class Organizer:
         """Run one end-to-end turn (tool loop) on `llm` and return the final
         spoken text, the classified turn record, and the conversation history
         extended with this turn (everything after the system prompt). Pure of
-        routing — the caller decides which `llm` to hand in, the per-turn tool
+        routing -- the caller decides which `llm` to hand in, the per-turn tool
         `specs` to offer, whether to re-run on the specialist, and whether to
         keep the returned history."""
         messages: list[LLMMessage] = [
@@ -801,7 +801,7 @@ class Organizer:
             if not pending_calls:
                 final_text = assistant_text
                 # Record the final reply so the next turn's history shows what
-                # GLaDOS said (and, via the tool messages above, did) — that is
+                # GLaDOS said (and, via the tool messages above, did) -- that is
                 # what lets "add it back" resolve the prior action.
                 messages.append(LLMMessage(role="assistant", content=assistant_text or None))
                 break
@@ -838,7 +838,7 @@ class Organizer:
         as a question, not an imperative, so the model answers from its prior and
         fabricates a wrong time instead of calling the tool (SESSION 2026-06-15
         Finding 2). Detect the intent deterministically and seed the real time
-        into the turn as a tool exchange before the first LLM pass — the model
+        into the turn as a tool exchange before the first LLM pass -- the model
         then renders ground truth rather than inventing it. Reuses the normal
         tool path (broadcasts, trace, outcome record), so the dispatch is
         observable and the turn classifies on a real call. No-op when the time
@@ -861,7 +861,7 @@ class Organizer:
     ) -> tuple[LLM, Literal["primary", "specialist"], str]:
         """Pick the brain for this turn. Falls back to the primary whenever the
         router is absent, or routes to the specialist but no specialist brain is
-        wired (router disabled / no opt-in) — fails closed, toward the primary."""
+        wired (router disabled / no opt-in) -- fails closed, toward the primary."""
         if self._router is None:
             return self.llm, "primary", "router disabled"
         decision = self._router.decide(text)
@@ -874,7 +874,7 @@ class Organizer:
     def _should_escalate(
         self, target: Literal["primary", "specialist"], outcome: TurnRecord
     ) -> bool:
-        """A primary turn that came back `failed` is the escalation trigger —
+        """A primary turn that came back `failed` is the escalation trigger --
         the deterministic outcome says the primary brain didn't finish.
         Specialist turns never escalate (there's nowhere further to go), and
         escalation needs the specialist brain wired and the feature enabled.
@@ -908,7 +908,7 @@ class Organizer:
             RouteNotice(
                 session_id=session_id,
                 target="specialist",
-                reason="primary turn failed — retrying on specialist",
+                reason="primary turn failed -- retrying on specialist",
                 escalated=True,
             ),
         )
@@ -922,9 +922,9 @@ class Organizer:
         self, session_id: str, new_history: list[LLMMessage], outcome: TurnRecord,
         final_text: str,
     ) -> None:
-        """Persist the extended history for this session — but only when the
+        """Persist the extended history for this session -- but only when the
         turn actually produced something (a tool ran or a non-empty reply).
-        A no-op turn (empty reply, no tools — e.g. a dropped/garbled utterance)
+        A no-op turn (empty reply, no tools -- e.g. a dropped/garbled utterance)
         leaves the prior history untouched rather than logging an empty
         exchange that would just dilute the buffer."""
         produced = bool(outcome.tools) or bool(final_text.strip())
@@ -940,7 +940,7 @@ class Organizer:
 
     def _cap_history(self, messages: list[LLMMessage]) -> list[LLMMessage]:
         """Keep only the last `_history_max_turns` turns. A turn starts at a
-        user message, so slice from the Nth-from-last user message — that keeps
+        user message, so slice from the Nth-from-last user message -- that keeps
         each kept turn whole (its assistant + tool messages travel with it)."""
         user_idxs = [i for i, m in enumerate(messages) if m.role == "user"]
         if len(user_idxs) <= self._history_max_turns:
@@ -964,8 +964,8 @@ class Organizer:
         pending: list[LLMToolCall] = []
         text_chunks: list[str] = []
         # aclosing guarantees the upstream HTTP stream gets aclose()'d on
-        # CancelledError — otherwise the model keeps generating tokens we'll
-        # never read (ARCH §6: cancellation must propagate end-to-end).
+        # CancelledError -- otherwise the model keeps generating tokens we'll
+        # never read (ARCH section 6: cancellation must propagate end-to-end).
         async with aclosing(llm.chat(messages, specs)) as stream:
             async for event in stream:
                 if isinstance(event, LLMText):
@@ -1003,18 +1003,18 @@ class Organizer:
         fabricated reply with an honest, varied failure line on BOTH egress
         paths that still carry it: the audio path (the returned text, which
         `_speak` will voice) and the hot history buffer (so the false "I added
-        X" is never committed — committing it is exactly what poisons later
+        X" is never committed -- committing it is exactly what poisons later
         turns away from tool-calls). The chat surface already streamed the false
         deltas live, so push a correction delta after them rather than trying to
         unsay them; the UI also receives the `confabulated` outcome to flag it.
-        v1 stops here — no recovery/replay (deferred slice)."""
+        v1 stops here -- no recovery/replay (deferred slice)."""
         reply = _CONFABULATION_REPLIES[
             self._confab_reply_idx % len(_CONFABULATION_REPLIES)
         ]
         self._confab_reply_idx += 1
         # Rewrite history in-place BEFORE the await below: if a cancel lands on
         # the broadcast, the turn is discarded without commit (prior history
-        # untouched) — but should it ever commit, it commits the cleaned reply,
+        # untouched) -- but should it ever commit, it commits the cleaned reply,
         # never the false claim. For a zero-tool turn `_drive` always appends
         # exactly one trailing assistant message, so this targets it.
         if history and history[-1].role == "assistant":
@@ -1041,8 +1041,8 @@ class Organizer:
         Returns the text to speak/commit. The repair runs on the PRIMARY (local)
         brain regardless of which brain produced the turn -- never a cloud
         specialist -- so the drifted text (which can embed tool args/results)
-        does not cross the trust boundary a second time (ARCH §9). The repair
-        prompt replays no tool history (ARCH §7): only the drifted text, wrapped
+        does not cross the trust boundary a second time (ARCH section 9). The repair
+        prompt replays no tool history (ARCH section 7): only the drifted text, wrapped
         <external>, so untrusted tool content cannot re-enter or steer it."""
         if not detect_drift(final_text, self._reply_language):
             return final_text
@@ -1066,7 +1066,7 @@ class Organizer:
 
     async def _repair_language(self, drifted_text: str) -> str:
         """One local repair inference; fall back to a safe line if it still
-        drifts or yields nothing. Tool-free, history-free (ARCH §7)."""
+        drifts or yields nothing. Tool-free, history-free (ARCH section 7)."""
         messages = build_repair_messages(drifted_text, self._reply_language)
         repaired = await self._collect_text(self.llm, messages)
         if not repaired or detect_drift(repaired, self._reply_language):
@@ -1086,12 +1086,12 @@ class Organizer:
         self, session_id: str, outcome: TurnRecord, kind: str
     ) -> None:
         """Snapshot what the harness actually observed this turn, for a later
-        "did that actually work?" — the truth, not the model's self-report."""
+        "did that actually work?" -- the truth, not the model's self-report."""
         mutations = tuple(
             t.tool for t in outcome.tools if t.ok and t.mutating
         )
         any_tool_ok = any(t.ok for t in outcome.tools)
-        # Re-insert at the MRU end and evict the oldest over the cap — same LRU
+        # Re-insert at the MRU end and evict the oldest over the cap -- same LRU
         # discipline as `_commit_history` keeps on `_history`.
         self._last_turn.pop(session_id, None)
         if len(self._last_turn) >= _MAX_TRACKED_SESSIONS:
@@ -1105,9 +1105,9 @@ class Organizer:
     ) -> bool:
         """Deterministically handle a confabulation escape hatch, short-circuiting
         the LLM. Returns True if the utterance was an escape phrase (the turn is
-        fully emitted here — Welcome through Done — and `_run_user_text` returns).
+        fully emitted here -- Welcome through Done -- and `_run_user_text` returns).
 
-        `start over` is a *consented* history clear — the safe sibling of the
+        `start over` is a *consented* history clear -- the safe sibling of the
         deferred destructive auto-clear: user-initiated, and it drops history
         rather than replaying it, so there is no double-mutation risk. `did that
         actually work?` reports the dispatch-grounded truth of the last real
@@ -1125,7 +1125,7 @@ class Organizer:
             self._history.pop(sid, None)
             self._last_turn.pop(sid, None)
             trace.event("history_cleared", reason="user start-over")
-            reply = "Done — I've cleared our conversation. Starting fresh."
+            reply = "Done -- I've cleared our conversation. Starting fresh."
         else:
             trace.event("truth_recheck")
             reply = self._describe_last_turn(sid)
@@ -1138,20 +1138,20 @@ class Organizer:
 
     def _describe_last_turn(self, session_id: str) -> str:
         """Honest, dispatch-grounded answer to "did that actually work?". Names
-        no raw tool ids (they're spoken aloud) — just whether a real change
+        no raw tool ids (they're spoken aloud) -- just whether a real change
         landed."""
         rec = self._last_turn.get(session_id)
         if rec is None:
             return (
-                "I don't have a recent action to check — ask me to do "
+                "I don't have a recent action to check -- ask me to do "
                 "something first."
             )
         if rec.mutations:
             n = len(rec.mutations)
             change = "change" if n == 1 else "changes"
-            return f"Yes — that went through. I made {n} {change} for real."
+            return f"Yes -- that went through. I made {n} {change} for real."
         return (
-            "No — my last turn made no successful change. Nothing actually "
+            "No -- my last turn made no successful change. Nothing actually "
             "happened, whatever I may have said."
         )
 
@@ -1161,8 +1161,8 @@ class Organizer:
         if self.tts is None or not text.strip():
             return
         # The LLM emits markdown for the chat surface (bold via **, bullets
-        # via "- "). Piper reads those characters literally — "asterisk
-        # asterisk Item asterisk asterisk" — so strip them for the audio
+        # via "- "). Piper reads those characters literally -- "asterisk
+        # asterisk Item asterisk asterisk" -- so strip them for the audio
         # path only. The chat surface still receives the original text via
         # assistant_delta upstream.
         text = _strip_markdown_for_tts(text)
@@ -1171,7 +1171,7 @@ class Organizer:
         # Gate the room SENDING before any chunk goes out, so the mic is muted
         # the instant TTS audio could reach it. The finally arms the rest of the
         # gate (DRAINING for the estimated playback, or a short cooldown) from
-        # the audio actually streamed — counting samples to size the estimate.
+        # the audio actually streamed -- counting samples to size the estimate.
         send_start = asyncio.get_running_loop().time()
         # SENDING gets a provisional far-future horizon so the mic is suppressed
         # from the first chunk; the finally's `_arm_gate_after_send` refines it
@@ -1211,7 +1211,7 @@ class Organizer:
             cancelled = True
             raise
         except Exception:
-            # TTS is a side-channel — don't break the turn if synth blows up.
+            # TTS is a side-channel -- don't break the turn if synth blows up.
             log.exception("tts synthesize failed")
             trace.event("tts_error")
         finally:
@@ -1284,13 +1284,13 @@ class Organizer:
                 error=result.error,
             )
             # A user-denied confirmation is a deliberate boundary, not a tool
-            # failure — don't let it poison the turn outcome as `failed` (and
+            # failure -- don't let it poison the turn outcome as `failed` (and
             # so spuriously escalate to the v2.6 specialist router). Skip recording
             # it entirely; the model still sees `user denied` in the transcript.
             #
             # A tool mutates external state if it's explicitly flagged
             # `mutating` OR it's confirmation-gated (gated tools always mutate).
-            # Confirmation alone is NOT sufficient — Dunnes cart writes are
+            # Confirmation alone is NOT sufficient -- Dunnes cart writes are
             # un-gated side effects, so they carry `mutating=True` directly;
             # without this an un-gated add would look like a read and the
             # goal-check would wrongly fail a turn that actually added.
@@ -1299,7 +1299,7 @@ class Organizer:
                 outcome.record_tool(f"{tc.server}.{tc.name}", result.ok, mutating=mutating)
             raw = json.dumps(result.content) if result.ok else (result.error or "error")
             # `spec` already fetched above for the requires_confirmation
-            # check — reuse rather than another registry lookup.
+            # check -- reuse rather than another registry lookup.
             if spec is not None and spec.untrusted:
                 # Defang any literal `</external>` inside the payload so an
                 # attacker-controlled page can't close the wrapper early and
@@ -1400,7 +1400,7 @@ class Organizer:
         self, client_id: str, response: ToolConfirmResponse
     ) -> None:
         """Route a `tool_confirm_response` from a WS client to the waiting
-        Future. Enforces that the responder is in the originating room —
+        Future. Enforces that the responder is in the originating room --
         a client in another room replying to the wrong request_id is
         silently ignored (logged at debug). The first valid response
         wins; subsequent replies are no-ops."""

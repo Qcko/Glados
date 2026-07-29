@@ -1,15 +1,15 @@
 """Per-room FIFO queue manager.
 
-ARCH §3.4: "Per-session FIFO so one room's commands stay ordered.
+ARCH section 3.4: "Per-session FIFO so one room's commands stay ordered.
 Cross-session: parallel if the LLM backend supports it (vLLM, llama.cpp
 parallel slots); fair round-robin if not."
 
-A "room" here is the unit of speaker-output coherence — two simultaneous
+A "room" here is the unit of speaker-output coherence -- two simultaneous
 TTS streams to one room are incoherent regardless of who spoke, so the
 queue key is `room_id`, not `(room_id, speaker_id)`. Cross-room
 parallelism falls out for free: each room owns its own worker task, and
 the LLM backend serialises (Ollama) or parallelises (vLLM) on its own
-terms — the manager doesn't impose extra serialisation.
+terms -- the manager doesn't impose extra serialisation.
 
 Each action runs as a child task of the worker. Two cancellation paths
 matter and they must not be confused:
@@ -45,12 +45,12 @@ class RoomQueueManager:
         # Each worker publishes its currently-running action task here so
         # `close()` can cancel it directly (more reliable than cancelling
         # the worker and relying on the worker's own cancel-handler to
-        # forward the signal — see close() for the rationale).
+        # forward the signal -- see close() for the rationale).
         self._active_actions: dict[str, asyncio.Task] = {}
 
     def enqueue(self, room_id: str, action: Action) -> None:
         """Append `action` to `room_id`'s FIFO. Spawns the room's worker
-        on first enqueue. Synchronous — returns once the item is queued,
+        on first enqueue. Synchronous -- returns once the item is queued,
         not once it completes."""
         queue = self._queues.get(room_id)
         if queue is None:
@@ -64,7 +64,7 @@ class RoomQueueManager:
 
     def clear(self, room_id: str) -> int:
         """Drop pending actions from a room's queue. Returns the number
-        dropped. The currently-running action is unaffected — use
+        dropped. The currently-running action is unaffected -- use
         `Organizer.handle_interrupt` for that. Called by voice barge-in
         to prevent queued utterances from running after a "stop"."""
         queue = self._queues.get(room_id)
@@ -85,7 +85,7 @@ class RoomQueueManager:
         return queue.qsize() if queue is not None else 0
 
     async def flush(self) -> None:
-        """Wait until every room's queue is fully drained. Test hook —
+        """Wait until every room's queue is fully drained. Test hook --
         production callers should not need this because in-flight turns
         broadcast their own Done/Cancelled and observers wait on the wire."""
         for queue in list(self._queues.values()):
@@ -96,7 +96,7 @@ class RoomQueueManager:
         Pending queue items are dropped. Bounded by a per-worker timeout so
         a misbehaving action handler cannot block server shutdown."""
         # Cancel actions first so each worker's `await action_task` resolves
-        # via a completed (cancelled) child rather than via its own cancel —
+        # via a completed (cancelled) child rather than via its own cancel --
         # avoids the Python 3.11+ "double cancel" path where a worker that
         # catches its own CancelledError finds every subsequent await
         # raising CancelledError again before action_task can finish its
@@ -115,8 +115,8 @@ class RoomQueueManager:
     async def _cancel_active_action(self, room_id: str) -> None:
         """If the worker for `room_id` is mid-action, cancel that action and
         wait for it to finish. The action's own handler (today:
-        `_run_user_text`) catches CancelledError and runs its finally —
-        including the shielded Cancelled broadcast — before returning."""
+        `_run_user_text`) catches CancelledError and runs its finally --
+        including the shielded Cancelled broadcast -- before returning."""
         active = self._active_actions.get(room_id)
         if active is None or active.done():
             return
@@ -143,7 +143,7 @@ class RoomQueueManager:
                 #      WE are still flagged cancelled. Re-raise to end
                 #      the worker.
                 #   2. Some upstream cancelled the worker directly. Forward
-                #      to the action, but don't block on it — its cleanup
+                #      to the action, but don't block on it -- its cleanup
                 #      will run on the loop after we exit.
                 if not action_task.done():
                     action_task.cancel()

@@ -1,4 +1,4 @@
-// Wire-protocol shapes — mirror src/glados/core/protocols.py exactly.
+// Wire-protocol shapes -- mirror src/glados/core/protocols.py exactly.
 
 export type Role = "mic" | "speaker" | "ui";
 

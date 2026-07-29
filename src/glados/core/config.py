@@ -1,6 +1,6 @@
 """Config loader for `glados.toml` and `rooms.toml`.
 
-Schema is intentionally tiny in v0 — fields will accrete as adapters land.
+Schema is intentionally tiny in v0 -- fields will accrete as adapters land.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ class ServerConfig(BaseModel):
     tls_certfile: str = ""
     tls_keyfile: str = ""
     # Loopback-only admin room-viewer port (observe any room's conversation as
-    # text — see ARCHITECTURE §9). 0 = disabled. ALWAYS bound to 127.0.0.1 so
+    # text -- see ARCHITECTURE section 9). 0 = disabled. ALWAYS bound to 127.0.0.1 so
     # the house-wide capability never reaches the LAN, regardless of `host`.
     admin_port: int = 0
 
@@ -36,7 +36,7 @@ class HandshakeConfig(BaseModel):
     """Admission control for the /ws/v1 handshake (DoS + probe hardening;
     see client_room/deploy/DESIGN-ws-handshake-rate-limit.md).
 
-    All controls key on the transport peer address — no reverse proxy is
+    All controls key on the transport peer address -- no reverse proxy is
     assumed in front of GLaDOS. Behind one, every client would share the
     proxy's IP and the per-IP cap/lockout would misfire."""
 
@@ -82,38 +82,38 @@ class LLMConfig(BaseModel):
     # Persona/verbosity override for the static system prompt. Empty (default)
     # uses the built-in SYSTEM_PROMPT shipped in brain/prompts/system.py; set a
     # full replacement here to retune persona per demo without editing code.
-    # Hash-approved server memory (ARCH §14) is still appended on top of
+    # Hash-approved server memory (ARCH section 14) is still appended on top of
     # whichever base wins.
     system_prompt: str = ""
 
 
 class RouterConfig(BaseModel):
-    """v2.6 local multi-model router. Disabled by default — GLaDOS runs every
+    """v2.6 local multi-model router. Disabled by default -- GLaDOS runs every
     turn on the single primary brain until the operator opts in. `enabled` turns
     on per-turn routing between the primary brain and a specialist. The
     specialist is local by default (`provider="local"`); the `cloud_*` knobs
     gate the dormant cloud escape hatch and stay off unless explicitly opted in
-    (ARCH §12)."""
+    (ARCH section 12)."""
 
     enabled: bool = False
     # The cloud escape hatch is off by default and gated separately from
     # `enabled`: it is the explicit opt-in that permits tool args/results to
-    # cross to the external provider (ARCH §9). `provider="anthropic"` engages
+    # cross to the external provider (ARCH section 9). `provider="anthropic"` engages
     # only when this is true AND an API key is present.
     cloud_enabled: bool = False
-    # "local": the default all-local specialist — runs on a local Ollama model,
+    # "local": the default all-local specialist -- runs on a local Ollama model,
     # nothing leaves the box, needs neither cloud_enabled nor a key.
     # "anthropic": the dormant cloud escape hatch (needs cloud_enabled + an API
-    # key). Endpoint hardcoded to api.anthropic.com; see ARCH §12.
+    # key). Endpoint hardcoded to api.anthropic.com; see ARCH section 12.
     provider: Literal["anthropic", "local"] = "local"
     cloud_model: str = "claude-haiku-4-5-20251001"
     # provider="local" only: the Ollama tag for the specialist. Empty reuses the
-    # same model as the primary brain (alias — identical behaviour, useful purely
+    # same model as the primary brain (alias -- identical behaviour, useful purely
     # to see routing/escalation fire). Point it at a larger local model (e.g. a
     # 14b while the primary runs a 7b) for a realistic split.
     local_smart_model: str = ""
     # API key handle: read from this env var at boot. Never stored in TOML
-    # (ARCH §9 — TOML holds handles, not secrets). Absent key => cloud off.
+    # (ARCH section 9 -- TOML holds handles, not secrets). Absent key => cloud off.
     api_key_env: str = "ANTHROPIC_API_KEY"
     # Retry a `failed` primary turn on the specialist (router escalation input).
     escalate_on_failed: bool = True
@@ -123,10 +123,10 @@ class RouterConfig(BaseModel):
 
 
 class SessionConfig(BaseModel):
-    """Conversation continuity (ARCH §3 idle-window, §8 hot ring buffer).
+    """Conversation continuity (ARCH section 3 idle-window, section 8 hot ring buffer).
 
     A follow-up utterance in the same `(room_id, speaker_id)` reuses the live
-    session — and its replayed history — when it arrives within
+    session -- and its replayed history -- when it arrives within
     `idle_window_s` of the last activity; after that gap a fresh session opens
     with empty history. `history_max_turns` bounds how many prior turns (a turn
     = the user message plus the assistant/tool messages it produced) are
@@ -172,11 +172,11 @@ class STTConfig(BaseModel):
     # auto-detect (paired with a multilingual model like `small`);
     # see configs/glados.toml for the full recipe.
     whisper_language: str | None = "en"
-    # Vocabulary biasing — no model retraining. Nudges decoding toward domain
+    # Vocabulary biasing -- no model retraining. Nudges decoding toward domain
     # words/names Whisper otherwise mangles. `whisper_hotwords` is a
     # space-separated boost list; `whisper_initial_prompt` is freeform context
     # that can also fix spelling. Both empty = no biasing (unchanged behaviour).
-    # Grow them from logged mis-transcriptions — the pragmatic "make STT learn"
+    # Grow them from logged mis-transcriptions -- the pragmatic "make STT learn"
     # path short of fine-tuning (which only pays off once v5 speaker-ID yields
     # labelled per-speaker audio).
     whisper_hotwords: str = ""
@@ -195,11 +195,11 @@ class TTSConfig(BaseModel):
     )
     # Pronunciation fixes applied to the TTS text only (the chat surface keeps
     # the original wording). Piper is phoneme-based and mangles proper
-    # nouns/acronyms; map the written form → a phonetic spelling. Whole-word,
+    # nouns/acronyms; map the written form -> a phonetic spelling. Whole-word,
     # case-insensitive. Add a row per mispronounced name.
     pronunciations: dict[str, str] = {"GLaDOS": "Gladoss"}
     # Feedback-gate timing (server-side mic-mute that stops a room's speaker
-    # output from self-triggering a turn via its own mic — see Organizer). The
+    # output from self-triggering a turn via its own mic -- see Organizer). The
     # gate holds a room's mic for the *estimated playback duration* of the reply
     # (so it scales with reply length, unlike a fixed cooldown), then a short
     # tail cooldown. A speaker client may shorten the estimate by reporting
@@ -226,7 +226,7 @@ class GladosConfig(BaseModel):
 class ToolOverlay(BaseModel):
     """GLaDOS-only flags applied on top of a tool spec fetched via real
     MCP `tools/list`. The MCP wire schema has no slot for trust/confirm
-    flags — third-party servers don't know about them. We carry the
+    flags -- third-party servers don't know about them. We carry the
     flags in `servers.toml`, keyed by the tool's `name`, and overlay
     them after listing."""
 
@@ -246,33 +246,33 @@ class ServerEntry(BaseModel):
     args: list[str] = []
     env: dict[str, str] = {}
     autostart: bool = True
-    # Lazy spawn + idle reap (ARCH §13). When True the server is still
+    # Lazy spawn + idle reap (ARCH section 13). When True the server is still
     # spawned at startup to list its tools (so the LLM sees them), then put
     # dormant immediately; the first tool dispatch wakes it, and the reaper
     # sleeps it again after `idle_timeout_s` of no calls. Default False keeps
-    # the eager behaviour — the child stays resident for the whole session.
+    # the eager behaviour -- the child stays resident for the whole session.
     # Flip Dunnes to lazy once stable so Selenium/Chrome isn't held when no
     # one is shopping. Ignored when `autostart` is False (nothing to spawn).
     lazy: bool = False
     idle_timeout_s: float = 300.0
-    # Origin gate for server-shipped memory (ARCH §14 layer 1). Only a
+    # Origin gate for server-shipped memory (ARCH section 14 layer 1). Only a
     # first-party server we vouch for is a candidate for trusted-prompt
     # injection of its `memory://lessons` resource. False (default) means
     # the lessons resource is never read into the system prompt, even if
-    # the server exposes one. Origin trust ≠ content trust: a true flag
+    # the server exposes one. Origin trust != content trust: a true flag
     # only makes the blob *eligible*; it still passes the LocalGuard
     # hash-approval gate before anything is injected.
     trusted: bool = False
-    # Server-level untrusted FLOOR (ARCH §7). When true, every tool this
+    # Server-level untrusted FLOOR (ARCH section 7). When true, every tool this
     # server exposes returns content from outside the local trust boundary,
-    # so the Organizer wraps every result in <external> — including tools
+    # so the Organizer wraps every result in <external> -- including tools
     # added by a future version of that server which nobody thought to list
     # here.
     #
     # This exists because the per-tool flag is fail-OPEN: a server that grows
     # a tool has it treated as trusted until a human remembers to add an
     # overlay, and "remembers" is not a security control. A whole-server
-    # judgement is also the one an operator can actually make correctly —
+    # judgement is also the one an operator can actually make correctly --
     # "everything Dunnes returns is a live scrape", "anything the calendar
     # returns may have been authored from a phone".
     #
@@ -283,11 +283,11 @@ class ServerEntry(BaseModel):
     # Per-tool overlays keyed by the tool's `name` (not qualified).
     # Missing tools fall back to wire defaults (all flags False / None).
     tool_overlays: dict[str, ToolOverlay] = {}
-    # Tiered tool-scoping (ARCH §13). Words that route a turn to THIS server's
-    # tools — same whole-word keyword style as brain/router/rules.py. When set,
+    # Tiered tool-scoping (ARCH section 13). Words that route a turn to THIS server's
+    # tools -- same whole-word keyword style as brain/router/rules.py. When set,
     # the server's tools are offered to the model ONLY on turns whose text
     # matches (so a big server like Dunnes can't swamp the ~30-tool ceiling on
-    # unrelated turns — the project-callcheck-tooltext leak). Empty = unscoped:
+    # unrelated turns -- the project-callcheck-tooltext leak). Empty = unscoped:
     # the server's tools are always offered (back-compat default).
     intent_keywords: list[str] = []
     # Always offer this server's tools regardless of intent (the "core tools
@@ -303,7 +303,7 @@ class ServerEntry(BaseModel):
         `untrusted` is OR-ed with the server floor; every other flag comes
         from the overlay alone. The asymmetry is the point: an overlay that
         sets only `timeout_s` still constructs a full `ToolOverlay`, whose
-        other fields default to False — so a plain assignment would let a
+        other fields default to False -- so a plain assignment would let a
         timeout tweak quietly un-mark a tool as untrusted, which is a
         security downgrade written as a performance edit.
         """

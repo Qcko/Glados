@@ -2,16 +2,16 @@
 
 Lifecycle of one session:
   1. open the socket, send `hello` as the first (JSON-text) message, then begin
-     streaming immediately — a good handshake is silent (no `welcome` ack).
+     streaming immediately -- a good handshake is silent (no `welcome` ack).
   2. the capture device delivers native-rate blocks on its own thread; they
      land in a bounded queue (drop-oldest on overflow). An async send loop
      drains the queue, resamples to 16 kHz, frames, and sends binary.
   3. a recv loop reads server text leniently (dispatch on `type`, default
-     ignore); an `error` frame is terminal (bad token / binding) — stop, don't
+     ignore); an `error` frame is terminal (bad token / binding) -- stop, don't
      reconnect.
 
-Shutdown order on session end: stop the device → unblock the send loop →
-cancel tasks → close the socket (the `async with` does the last step).
+Shutdown order on session end: stop the device -> unblock the send loop ->
+cancel tasks -> close the socket (the `async with` does the last step).
 
 The connect/reconnect loop, hello, terminal-error set, and token/config loading
 are shared with the speaker client in `_client.py`.
@@ -95,7 +95,7 @@ class MicClient(ReconnectingClient):
     def _on_audio(self, block) -> None:
         """Capture-thread callback. Cheap and non-blocking: just hand the raw
         native-rate block to the bounded queue (resample/frame happen async).
-        Only ever a real audio block — `None` is reserved as the send-loop
+        Only ever a real audio block -- `None` is reserved as the send-loop
         shutdown sentinel that `_session` puts after the device is stopped."""
         self._audio_q.put(block)
 
@@ -103,7 +103,7 @@ class MicClient(ReconnectingClient):
         """Capture-thread error channel. The device calls this when its source
         ends unexpectedly (e.g. `parec` dies). Push the shutdown sentinel so the
         blocked send loop returns, the `asyncio.wait` in `_session` completes,
-        and `run` reconnects — instead of the send loop waiting forever on a
+        and `run` reconnects -- instead of the send loop waiting forever on a
         queue that will never fill again. Thread-safe via the bounded queue;
         `put_sentinel` guarantees the signal is delivered, never drop-oldest'd."""
         self._audio_q.put_sentinel()
@@ -125,7 +125,7 @@ class MicClient(ReconnectingClient):
             try:
                 msg = json.loads(raw)
             except (ValueError, TypeError):
-                continue  # garbage frame — ignore, don't crash a dumb client
+                continue  # garbage frame -- ignore, don't crash a dumb client
             if not isinstance(msg, dict):
                 continue
             # An `error` may be terminal; every other type is irrelevant to a

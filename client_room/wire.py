@@ -26,7 +26,7 @@ AUDIO_HEADER_LEN = 4
 # server's VAD sees the same chunking the browser produces.
 BATCH_SAMPLES = 800
 
-# uint32 wrap mask — mirrors the browser's `(seq + 1) >>> 0`.
+# uint32 wrap mask -- mirrors the browser's `(seq + 1) >>> 0`.
 _SEQ_MASK = 0xFFFFFFFF
 
 
@@ -34,8 +34,8 @@ def hello(client_id: str, room_id: str, role: str, token: str) -> dict:
     """Build the handshake message. Sent as the FIRST message over the socket,
     as JSON text, before any binary audio (the server's `_handshake` calls
     `receive_json()` and rejects a binary first frame). A successful handshake
-    is answered with silence — `welcome` is a per-turn broadcast, not a connect
-    ack — so the client must NOT wait for a reply before streaming."""
+    is answered with silence -- `welcome` is a per-turn broadcast, not a connect
+    ack -- so the client must NOT wait for a reply before streaming."""
     return {
         "type": "hello",
         "client_id": client_id,

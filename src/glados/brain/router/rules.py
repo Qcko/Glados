@@ -1,7 +1,7 @@
 """Deterministic routing rules: text in, a primary/specialist verdict out.
 
-Per ARCHITECTURE.md §12 (v2.6) the router picks which **local** brain handles a
-turn — the primary model, or a resident specialist kept for the open-ended
+Per ARCHITECTURE.md section 12 (v2.6) the router picks which **local** brain handles a
+turn -- the primary model, or a resident specialist kept for the open-ended
 reasoning the primary fumbles. Both run on the home server, so routing crosses
 no privacy boundary; the rules simply err toward the cheap *primary* path and
 only send a turn to the specialist when it clearly wants open-ended reasoning.
@@ -27,7 +27,7 @@ RouteConfidence = Literal["high", "low"]
 
 # Markers of open-ended reasoning the primary model is known to fumble:
 # explanation, comparison, justification, recommendation. Matched as whole
-# words anywhere in the request — unlike action verbs these aren't
+# words anywhere in the request -- unlike action verbs these aren't
 # position-sensitive ("milk or oat, which is better?" should still route out).
 _SPECIALIST_MARKERS = re.compile(
     r"\b(?:why|explain|compare|comparison|difference|differences|versus|vs|"
@@ -62,10 +62,10 @@ class Router:
                 "specialist", "reasoning/comparison markers", "high"
             )
         # An imperative to mutate state is a tool-trigger the primary handles
-        # well — check it BEFORE the length gate. Otherwise a long multi-item
+        # well -- check it BEFORE the length gate. Otherwise a long multi-item
         # add ("add: <18 ingredients>") routes to the specialist purely on word
         # count, where the small model truncates the list and over-claims
-        # "done" — the history-poisoning seed (SESSION 2026-06-16).
+        # "done" -- the history-poisoning seed (SESSION 2026-06-16).
         if is_action_request(stripped):
             return RouteDecision("primary", "tool-trigger imperative", "high")
         words = stripped.split()
@@ -75,8 +75,8 @@ class Router:
             )
         if len(words) <= 6:
             return RouteDecision("primary", "short utterance", "high")
-        # Mid-length, no clear markers — the primary brain is the cheap default,
+        # Mid-length, no clear markers -- the primary brain is the cheap default,
         # but the rules aren't sure. Flagged low so a `failed` outcome can
         # escalate to the specialist rather than the user just getting a bad
         # primary answer.
-        return RouteDecision("primary", "ambiguous — default primary", "low")
+        return RouteDecision("primary", "ambiguous -- default primary", "low")

@@ -1,4 +1,4 @@
-"""Dummy `time.now` tool — proves the LLM↔MCP loop end-to-end."""
+"""Dummy `time.now` tool -- proves the LLM<->MCP loop end-to-end."""
 
 from __future__ import annotations
 

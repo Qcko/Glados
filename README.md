@@ -69,6 +69,10 @@ uv run glados
 > If Ollama was already pulled to its default path, stop the service, move
 > `~/.ollama/models` to your new `OLLAMA_MODELS` location, then start it again.
 
+<!-- rule-guard:allow no-local-env-leak - the "/home/<user>/" below is an
+     anonymised placeholder in prose describing this very check, not a path
+     from anyone's machine. -->
+
 > **Git hooks (one-time).** The repo ships a `pre-commit` guard in
 > [.githooks/](.githooks/) that blocks committing machine-local paths (drive
 > letters, `/home/<user>/`, …) into tracked files. Point git at it once per

@@ -7,7 +7,7 @@
 # A device running both roles needs TWO server identities: a client_id binds to
 # exactly one (room, role), so the mic and speaker each get their own client_id
 # (same room_id) and their own token. Both must be listed in the server's
-# `configs/glados.toml` [auth].clients and bound in `configs/rooms.toml` — one
+# `configs/glados.toml` [auth].clients and bound in `configs/rooms.toml` -- one
 # row role = "mic", one row role = "speaker", both with this room_id.
 #
 # Resilience: each role self-reconnects on transport blips. If one role hits a
@@ -26,15 +26,15 @@ room_id = "bedroom"
 # tls_ca = "<your-secrets-dir>/glados-server-cert.pem"
 #
 # On a Termux phone brought up via enroll.sh, use the CANONICAL paths enroll
-# installs to (so no on-device editing is needed) — author this config on the
+# installs to (so no on-device editing is needed) -- author this config on the
 # dev box with these and stage it alongside the tokens + cert in Downloads:
 #   tls_ca     = "~/.config/glados-room/glados-server-cert.pem"
 #   token_file = "~/.config/glados-room/secrets/<client_id>.token"   # per role below
 
 [mic]
 client_id = "bedroom-mic"
-# Token precedence keyring → env → file (first present wins). Keys are PER-ROLE
-# — a shared top-level token would feed both roles one secret. See the flat
+# Token precedence keyring -> env -> file (first present wins). Keys are PER-ROLE
+# -- a shared top-level token would feed both roles one secret. See the flat
 # config.example.toml for the env-leak caveat (prefer a mode-600 file on a
 # shared device).
 # token_env = "GLADOS_BEDROOM_MIC_TOKEN"
@@ -55,7 +55,7 @@ client_id = "bedroom-speaker"
 # Termux/enroll.sh canonical path:
 # token_file = "~/.config/glados-room/secrets/bedroom-speaker.token"
 # Playback backend: "sounddevice" (PortAudio, default) or "pacat" (+ pacat_*,
-# PulseAudio playback for Termux/Android — the mirror of "parec" capture).
+# PulseAudio playback for Termux/Android -- the mirror of "parec" capture).
 # playback_backend = "sounddevice"
 # output_device = 2
 # prebuffer_ms = 120

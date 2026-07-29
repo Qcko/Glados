@@ -1,10 +1,10 @@
 """FastAPI server exposing `/ws/v1`.
 
-Handshake → register client connection → forward `user_text` to the
+Handshake -> register client connection -> forward `user_text` to the
 Organizer. The Organizer owns sessions, tool dispatch, and egress; this file
 only handles wire I/O and connection bookkeeping.
 
-Construction is done by `build_app(config_dir)` — a factory that wires
+Construction is done by `build_app(config_dir)` -- a factory that wires
 config, components, and the Organizer into a fresh `FastAPI` instance with
 all runtime state on `app.state`. Tests can build isolated apps; production
 imports the module-level `app = build_app()` default.
@@ -84,7 +84,7 @@ log = logging.getLogger(__name__)
 
 CONFIG_DIR_ENV = "GLADOS_CONFIG_DIR"
 
-# How often the idle reaper sweeps lazy MCP servers (ARCH §13). Well under any
+# How often the idle reaper sweeps lazy MCP servers (ARCH section 13). Well under any
 # sane `idle_timeout_s` so a server is reaped within ~one tick of going idle.
 _LAZY_REAPER_TICK_S = 30.0
 
@@ -93,7 +93,7 @@ def _reap_idle_servers(
     lazy_servers: list[tuple["StdioServer", float]], now: float
 ) -> list[Awaitable[None]]:
     """Return a sleep() coroutine for every resident lazy server idle past its
-    timeout. Pure of timing — the caller supplies `now` and awaits the results,
+    timeout. Pure of timing -- the caller supplies `now` and awaits the results,
     which keeps it unit-testable with a fake clock."""
     return [
         srv.sleep()
@@ -113,7 +113,7 @@ async def _lazy_reaper(lazy_servers: list[tuple["StdioServer", float]]) -> None:
 
 
 def _build_tool_router(servers_cfg: ServersConfig) -> "ToolRouter | None":
-    """Build the per-turn tool-scoper from servers.toml (ARCH §13). Returns None
+    """Build the per-turn tool-scoper from servers.toml (ARCH section 13). Returns None
     when no server declares scoping, so an unconfigured deployment keeps the
     pre-feature behaviour (every tool offered every turn) with no scope overhead.
     In-process tools (time, toy) aren't in servers.toml and so stay unscoped =
@@ -150,7 +150,7 @@ def _resolve_servers_toml(cfg_dir: Path) -> Path:
 _WARMUP_PCM = b"\x00\x00" * 1_600
 _WARMUP_TEXT = "hi"
 
-# Stateless validator — fine at module level.
+# Stateless validator -- fine at module level.
 _client_msg = TypeAdapter(ClientMessage)
 _admin_msg = TypeAdapter(AdminClientMessage)
 
@@ -163,10 +163,10 @@ _MAX_ADMIN_CONNS = 8
 # The loopback admin viewer page (self-contained, no build step).
 _ADMIN_UI_HTML = str(Path(__file__).resolve().parent.parent / "web" / "admin.html")
 
-# Server→client message types an admin observer is allowed to see: text turn-
+# Server->client message types an admin observer is allowed to see: text turn-
 # events only. Everything else (TtsChunk audio, ToolConfirmRequest, memory
-# notices, errors) is withheld by default — a deny-by-default allowlist so a
-# future message type can't silently leak into the observe stream (ARCH §9).
+# notices, errors) is withheld by default -- a deny-by-default allowlist so a
+# future message type can't silently leak into the observe stream (ARCH section 9).
 _OBSERVABLE_TYPES = frozenset(
     {
         "welcome",
@@ -204,7 +204,7 @@ def _make_notify_observers(
             try:
                 # Bound the send: a connected-but-not-reading admin socket would
                 # otherwise fill its TCP buffer and block here, stalling the
-                # Organizer broadcast — and thus the real room. On timeout the
+                # Organizer broadcast -- and thus the real room. On timeout the
                 # observer is dropped like a dead one; the room never waits.
                 await asyncio.wait_for(ws.send_json(envelope), _OBSERVER_SEND_TIMEOUT_S)
             except Exception:
@@ -217,14 +217,14 @@ def _make_notify_observers(
 def _observed_payload(msg: BaseModel) -> dict | None:
     """The dict to forward to admin observers for `msg`, or None if `msg`
     is not on the observe allowlist. `tool_result` is minimized to its
-    outcome — the raw `content` can carry sensitive tool output and
+    outcome -- the raw `content` can carry sensitive tool output and
     `<external>` untrusted bytes an observer has no need to see."""
     data = msg.model_dump()
     kind = data.get("type")
     if kind not in _OBSERVABLE_TYPES:
         return None
     if kind == "tool_result":
-        # Drop raw `content` — it can hold sensitive tool output + <external>
+        # Drop raw `content` -- it can hold sensitive tool output + <external>
         # bytes an observer has no need to see.
         return {
             k: data[k]
@@ -232,7 +232,7 @@ def _observed_payload(msg: BaseModel) -> dict | None:
             if k in data
         }
     if kind == "tool_call":
-        # Drop `args` symmetrically — call arguments routinely carry the same
+        # Drop `args` symmetrically -- call arguments routinely carry the same
         # sensitive material as results (paths, message bodies, credentials).
         # The observer still sees which tool ran (server/name).
         return {
@@ -242,7 +242,7 @@ def _observed_payload(msg: BaseModel) -> dict | None:
         }
     return data
 
-# Source-checkout layout only: src/glados/core/server.py → repo root is parents[3].
+# Source-checkout layout only: src/glados/core/server.py -> repo root is parents[3].
 # GLaDOS is self-hosted, not pip-distributed; if that ever changes, ship the
 # built client as package data and resolve via importlib.resources.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -285,21 +285,21 @@ def _build_specialist_llm(
     provider="local" is the default all-local path: the specialist runs on a
     local Ollama model. Nothing leaves the box, so it needs neither the cloud
     opt-in nor an API key. An empty `local_smart_model` reuses the already-built
-    primary brain instance (identical behaviour — useful purely to see routing/
+    primary brain instance (identical behaviour -- useful purely to see routing/
     escalation fire); point it at a larger tag for a real primary/specialist
     split.
 
     provider="anthropic" is the dormant cloud escape hatch and fails closed: the
     cloud opt-in must be set AND the API key present in the configured env var
-    (TOML never holds the key — ARCH §9). A missing key logs a warning and
+    (TOML never holds the key -- ARCH section 9). A missing key logs a warning and
     disables the specialist rather than crashing boot. The endpoint is hardcoded
-    to api.anthropic.com — reusing this for a self-hosted endpoint is a separate
-    guarded slice (ARCH §12)."""
+    to api.anthropic.com -- reusing this for a self-hosted endpoint is a separate
+    guarded slice (ARCH section 12)."""
     if not cfg.enabled:
         return None
     if cfg.provider == "local":
         if not cfg.local_smart_model or cfg.local_smart_model == llm_cfg.model:
-            return primary_llm  # alias — same instance, same model
+            return primary_llm  # alias -- same instance, same model
         return OllamaLLM(
             host=llm_cfg.host,
             model=cfg.local_smart_model,
@@ -312,7 +312,7 @@ def _build_specialist_llm(
     api_key = os.environ.get(cfg.api_key_env)
     if not api_key:
         log.warning(
-            "router.cloud_enabled is set but %s is empty — specialist disabled, "
+            "router.cloud_enabled is set but %s is empty -- specialist disabled, "
             "all turns run on the primary brain",
             cfg.api_key_env,
         )
@@ -374,12 +374,12 @@ async def _warmup(stt: STT, tts: TTS) -> None:
     try:
         await stt.transcribe(_WARMUP_PCM)
     except Exception:
-        log.exception("STT warmup failed (continuing — first transcribe may be slow)")
+        log.exception("STT warmup failed (continuing -- first transcribe may be slow)")
     try:
         async for _ in tts.synthesize(_WARMUP_TEXT):
             pass
     except Exception:
-        log.exception("TTS warmup failed (continuing — first synth may be slow)")
+        log.exception("TTS warmup failed (continuing -- first synth may be slow)")
 
 
 # ---- App factory -------------------------------------------------------
@@ -389,7 +389,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     """Build a fresh FastAPI app with all components bound to `app.state`.
 
     `config_dir` defaults to `$GLADOS_CONFIG_DIR` or `"configs"`. Each call
-    produces an independent app instance — no shared module-level state —
+    produces an independent app instance -- no shared module-level state --
     so tests can construct isolated apps and the lifespan cleans up
     per-app room workers on shutdown.
     """
@@ -414,8 +414,8 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     specialist_llm = _build_specialist_llm(glados_cfg.router, glados_cfg.llm, llm)
     router = _build_router(glados_cfg.router)
     # STT and TTS are shared across connections (real backends load model
-    # weights on construct). VAD is per-connection — it carries per-stream
-    # buffer state — and is built fresh in `_build_pipeline`.
+    # weights on construct). VAD is per-connection -- it carries per-stream
+    # buffer state -- and is built fresh in `_build_pipeline`.
     stt = _build_stt(glados_cfg.stt)
     tts = _build_tts(glados_cfg.tts)
     connections: dict[str, WebSocket] = {}
@@ -440,7 +440,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         ]
 
     # Loopback admin room-viewer registries (populated only when the admin
-    # app is bound — see build_admin_app + main()). admin_conns: conn_id -> ws;
+    # app is bound -- see build_admin_app + main()). admin_conns: conn_id -> ws;
     # admin_observed: conn_id -> the room it currently watches (None = none).
     # Kept separate from `connections` so observers are NEVER mistaken for room
     # members (they must not affect mic-gating, tool-confirm, or "one session
@@ -488,7 +488,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         # is much better than running it inline at first use.
         #
         # Read stt/tts from `_app.state` at startup rather than closing
-        # over the build-time locals — tests routinely swap these via
+        # over the build-time locals -- tests routinely swap these via
         # `app.state.stt = fake` after `build_app()` returns and before
         # `with TestClient(app)` fires the lifespan.
         #
@@ -505,15 +505,15 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         # populated before the first WS connection can call a tool.
         # Guard-wrapped, hash-approved server memory accumulated across all
         # trusted servers, installed on the organizer once the loop finishes
-        # (ARCH §14). Empty unless a server is flagged `trusted` AND ships a
+        # (ARCH section 14). Empty unless a server is flagged `trusted` AND ships a
         # `memory://lessons` resource that clears the LocalGuard gate.
         memory_notes: list[str] = []
         # Trusted servers whose lessons failed the hash-approval gate. Metadata
         # only (source/hash/length/reason); surfaced to operators but never
-        # injected, never spoken (ARCH §14 BLOCK-notice surface).
+        # injected, never spoken (ARCH section 14 BLOCK-notice surface).
         memory_blocks: list[MemoryBlockNotice] = []
         # (server, idle_timeout_s) for every lazy server, handed to the idle
-        # reaper after the spawn loop (ARCH §13).
+        # reaper after the spawn loop (ARCH section 13).
         lazy_servers: list[tuple[StdioServer, float]] = []
         for entry in _app.state.servers_cfg.server:
             if not entry.autostart:
@@ -547,7 +547,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
                     specs = await server.list_tools()
             except (Exception, asyncio.TimeoutError) as e:  # noqa: BLE001
                 log.warning(
-                    "stdio server %s failed to initialise: %s — skipping",
+                    "stdio server %s failed to initialise: %s -- skipping",
                     entry.id,
                     type(e).__name__ if isinstance(e, asyncio.TimeoutError) else e,
                 )
@@ -560,7 +560,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
                 # tool nobody listed. See ServerEntry.apply_flags.
                 _app.state.mcp.register(StdioToolProxy(server, entry.apply_flags(spec)))
             _app.state.stdio_servers.append(server)
-            # Server-shipped lessons (ARCH §14). Only trusted servers are
+            # Server-shipped lessons (ARCH section 14). Only trusted servers are
             # candidates (origin gate); the blob is read over MCP, then must
             # clear the LocalGuard hash-approval gate (content gate) before it
             # is injected. memory_gate.vet returns None for any non-approved
@@ -574,7 +574,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
                     if result.note is not None:
                         memory_notes.append(result.note)
                     else:
-                        # Failed the gate — inject nothing, but make the BLOCK
+                        # Failed the gate -- inject nothing, but make the BLOCK
                         # visible to the operator (metadata only).
                         memory_blocks.append(
                             MemoryBlockNotice(
@@ -586,7 +586,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
                         )
             # Lazy servers spawn at boot only to list tools (and read lessons
             # above); put the child dormant now so it isn't held resident until
-            # someone actually calls a tool (ARCH §13). The first dispatch wakes
+            # someone actually calls a tool (ARCH section 13). The first dispatch wakes
             # it; the reaper below sleeps it again after `idle_timeout_s`.
             if entry.lazy:
                 await server.sleep()
@@ -604,7 +604,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         llm_warm_task = asyncio.create_task(
             _app.state.organizer.warm_up_llm(), name="llm-warmup"
         )
-        # One sweeper for all lazy servers — sleeps any that woke for a
+        # One sweeper for all lazy servers -- sleeps any that woke for a
         # dispatch and have since gone idle past their timeout.
         reaper_task: asyncio.Task | None = (
             asyncio.create_task(_lazy_reaper(lazy_servers), name="lazy-mcp-reaper")
@@ -636,15 +636,15 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             # via their own task and run their finally-block before exit.
             await _app.state.organizer.close()
             # Close LLM HTTP client (OllamaLLM holds a pooled AsyncClient).
-            # Fakes don't expose aclose — skip silently. NOTE: llm.aclose()
-            # must not require Ollama to be reachable — it only tears down
+            # Fakes don't expose aclose -- skip silently. NOTE: llm.aclose()
+            # must not require Ollama to be reachable -- it only tears down
             # the local httpx pool. We kill the daemon AFTER this step.
             llm_aclose = getattr(_app.state.llm, "aclose", None)
             if llm_aclose is not None:
                 await llm_aclose()
             # Specialist brain (v2.6 router) may hold its own pooled
             # AsyncClient. When it aliases the primary llm instance (provider=
-            # "local" with no distinct model) it was already closed above — skip
+            # "local" with no distinct model) it was already closed above -- skip
             # it to avoid a double-aclose.
             specialist = _app.state.specialist_llm
             specialist_aclose = getattr(specialist, "aclose", None)
@@ -665,7 +665,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     if _CLIENT_ASSETS.is_dir():
         app.mount("/assets", StaticFiles(directory=_CLIENT_ASSETS), name="assets")
 
-    # All runtime state lives on app.state — handlers fetch it via
+    # All runtime state lives on app.state -- handlers fetch it via
     # `ws.app.state` / `request.app.state`. No module-level singletons.
     app.state.glados_cfg = glados_cfg
     app.state.rooms_cfg = rooms_cfg
@@ -674,13 +674,13 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     app.state.connections = connections
     # Shared with build_admin_app + the notify_observers closure above (same
     # dict objects, so an observe registered on the admin app is seen by the
-    # broadcast tap running under the main app — one process, one Organizer).
+    # broadcast tap running under the main app -- one process, one Organizer).
     app.state.admin_conns = admin_conns
     app.state.admin_observed = admin_observed
     app.state.mcp = mcp
     app.state.stdio_servers = stdio_servers
     # Trusted-server memory that failed the LocalGuard gate at load time
-    # (ARCH §14). Populated by the lifespan; initialised here so the
+    # (ARCH section 14). Populated by the lifespan; initialised here so the
     # /admin/memory route and the push-on-connect path are safe before the
     # lifespan has run (e.g. in tests that don't enter the lifespan).
     app.state.memory_blocks = []
@@ -712,10 +712,10 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
 
 
 def build_admin_app(app: FastAPI) -> FastAPI:
-    """The loopback-only admin room-viewer surface (ARCHITECTURE §9). Served on
+    """The loopback-only admin room-viewer surface (ARCHITECTURE section 9). Served on
     its own FastAPI bound to 127.0.0.1:admin_port (see main()), so the
     house-wide observe capability never reaches the LAN-facing app. Shares the
-    main app's state — same Organizer, same admin registries — so an observe
+    main app's state -- same Organizer, same admin registries -- so an observe
     registered here is seen by the broadcast tap running under the main app.
 
     Auth is the admin secret (keyring `glados.admin`/`observe-token`),
@@ -761,7 +761,7 @@ async def _admin_authenticate(ws: WebSocket, state) -> bool:
     try:
         raw = await ws.receive_json()
     except Exception:
-        # Non-JSON/binary first frame, or the peer vanished — close and bail.
+        # Non-JSON/binary first frame, or the peer vanished -- close and bail.
         await _admin_reject(ws, "expected admin_hello")
         return False
     try:
@@ -788,7 +788,7 @@ async def _serve_admin(ws: WebSocket, conn_id: str, state) -> None:
         except WebSocketDisconnect:
             raise
         except Exception:
-            # Bad (non-JSON) frame — report and keep the connection, rather
+            # Bad (non-JSON) frame -- report and keep the connection, rather
             # than dropping the operator with a stack trace.
             await _send_error(ws, "bad_message", "expected JSON")
             continue
@@ -801,7 +801,7 @@ async def _serve_admin(ws: WebSocket, conn_id: str, state) -> None:
             prev = state.admin_observed.get(conn_id)
             state.admin_observed[conn_id] = msg.room_id
             # Audit: who observed which room, when. A house-wide surveillance
-            # capability must leave a trail (ARCHITECTURE §9).
+            # capability must leave a trail (ARCHITECTURE section 9).
             log.info(
                 "admin observe: %s switched %s -> %s", conn_id, prev, msg.room_id
             )
@@ -825,7 +825,7 @@ def _require_loopback(request: Request) -> None:
     server-memory metadata). That was acceptable while the server bound to
     127.0.0.1; once `GLADOS_HOST` exposes it on the LAN, the routes must stay
     loopback-only. The web UI shell (`/`, `/assets`) is intentionally not
-    gated — it carries no inventory and clients fetch their data over the
+    gated -- it carries no inventory and clients fetch their data over the
     token-authenticated WS, not these routes."""
     peer = request.client.host if request.client else None
     if peer not in _LOOPBACK_HOSTS:
@@ -855,7 +855,7 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/admin/memory")
     async def admin_memory(request: Request) -> dict:
         """Operator view of trusted-server memory that failed the LocalGuard
-        gate (ARCH §14). Metadata only — no untrusted blob bytes. Loopback-only
+        gate (ARCH section 14). Metadata only -- no untrusted blob bytes. Loopback-only
         (see _require_loopback): the metadata is operator inventory, not for
         LAN clients. The review/approve step that would accept a blocked blob
         is a separate, high-friction desktop action, not anything this
@@ -871,7 +871,7 @@ def _register_routes(app: FastAPI) -> None:
         peer_ip = ws.client.host if ws.client else "unknown"
         # Cheap pre-accept reject for the flood case: when the caps are
         # already full, decline the upgrade without paying for the 101
-        # handshake, so rejects stay cheaper than the attack. BUSY only — a
+        # handshake, so rejects stay cheaper than the attack. BUSY only -- a
         # pre-accept close carries no close frame, and a locked-out (or
         # raced-to-capacity) peer must still get the explanatory reject
         # below. The peek takes no slot; admit() stays authoritative.
@@ -888,8 +888,8 @@ def _register_routes(app: FastAPI) -> None:
         try:
             # The slot taken by admit() above covers exactly the pending
             # (pre-auth) phase: released in the finally below on every exit
-            # path — success, auth failure, disconnect, timeout, or
-            # cancellation — exactly once, before the serve loop starts.
+            # path -- success, auth failure, disconnect, timeout, or
+            # cancellation -- exactly once, before the serve loop starts.
             try:
                 async with asyncio.timeout(state.glados_cfg.handshake.timeout_s):
                     binding = await _handshake(
@@ -907,9 +907,9 @@ def _register_routes(app: FastAPI) -> None:
             client_id = binding.client_id
             await _replace_connection(state.connections, client_id, ws)
             # Surface any load-time memory BLOCKs to operator UIs the moment
-            # they connect — the notices are emitted at startup, before any
+            # they connect -- the notices are emitted at startup, before any
             # client exists, so a connecting `ui` client would otherwise never
-            # see them. Metadata only; never to mic/speaker roles (ARCH §14).
+            # see them. Metadata only; never to mic/speaker roles (ARCH section 14).
             if binding.role == "ui":
                 await _push_memory_blocks(ws, state.memory_blocks)
             pipeline = _build_pipeline(
@@ -928,7 +928,7 @@ def _register_routes(app: FastAPI) -> None:
             if client_id is not None and state.connections.get(client_id) is ws:
                 del state.connections[client_id]
             # In-flight turns continue on their room worker even after this
-            # WS goes away — other room members still see Done/Cancelled,
+            # WS goes away -- other room members still see Done/Cancelled,
             # and the closure-bound `send` no-ops harmlessly for the now-
             # disconnected client.
 
@@ -981,7 +981,7 @@ async def _handshake(
         return None
 
     # Only the two credential failures below count toward the per-IP
-    # lockout. Malformed hellos (above) and binding mismatches (below — the
+    # lockout. Malformed hellos (above) and binding mismatches (below -- the
     # peer holds a valid token, it's just misconfigured) are bounded by the
     # caps and timeout instead, so a fuzzer can't trip the lockout cheaply
     # and a legitimate-but-misconfigured device can't lock itself out.
@@ -992,7 +992,7 @@ async def _handshake(
         return None
     expected = secrets.get("client-tokens", msg.client_id)
     # Constant-time compare so response timing can't leak how many leading token
-    # bytes matched — a classic per-byte timing attack that would let an attacker
+    # bytes matched -- a classic per-byte timing attack that would let an attacker
     # recover the token incrementally instead of searching the full keyspace.
     # Compare as bytes: compare_digest rejects non-ASCII str, and msg.token is
     # attacker-controlled.
@@ -1048,7 +1048,7 @@ async def _serve(
         elif isinstance(msg, ToolConfirmResponse):
             await organizer.handle_tool_confirm_response(client_id, msg)
         elif isinstance(msg, PlaybackDone):
-            # Speaker reports its audio drained — shortens the feedback gate.
+            # Speaker reports its audio drained -- shortens the feedback gate.
             # The organizer role-scopes this to speaker-bound clients.
             await organizer.handle_playback_done(client_id, msg.session_id)
 
@@ -1076,7 +1076,7 @@ async def _push_memory_blocks(
 def _note_auth_failure(
     gate: HandshakeGate, peer_ip: str, cfg: HandshakeConfig
 ) -> None:
-    """Record a credential failure and narrate the transition — the gate is
+    """Record a credential failure and narrate the transition -- the gate is
     pure policy and never logs; what the operator sees is decided here."""
     outcome = gate.record_failure(peer_ip)
     if outcome is FailureOutcome.ALREADY_LOCKED:
@@ -1106,7 +1106,7 @@ async def _reject(ws: WebSocket, verdict: Verdict) -> None:
         await _send_error(ws, code, message)
         await ws.close(code=1013)
     except Exception:
-        pass  # peer already gone — the reject must not become a 500
+        pass  # peer already gone -- the reject must not become a 500
 
 
 async def _close_quietly(ws: WebSocket) -> None:

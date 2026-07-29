@@ -2,7 +2,7 @@
 fan-out tap, and the admin-channel handshake.
 
 The admin surface lets an operator watch any room's conversation as TEXT on a
-loopback-only port (ARCHITECTURE §9). These tests pin the read-only/allowlist
+loopback-only port (ARCHITECTURE section 9). These tests pin the read-only/allowlist
 invariants and the authz; the dual-port wiring + the live forward path are
 exercised on hardware (the cross-loop forward is awkward under TestClient).
 """
@@ -71,7 +71,7 @@ def test_observed_payload_drops_audio_and_confirm() -> None:
 
 
 def test_observed_payload_minimizes_tool_result() -> None:
-    # Raw content can hold sensitive tool output + <external> bytes — drop it.
+    # Raw content can hold sensitive tool output + <external> bytes -- drop it.
     p = _observed_payload(
         ToolResult(session_id="s", call_id="c", ok=True, content={"secret": "x"})
     )
@@ -80,7 +80,7 @@ def test_observed_payload_minimizes_tool_result() -> None:
 
 
 def test_observed_payload_minimizes_tool_call_args() -> None:
-    # Args carry the same sensitive material as results — drop them, keep name.
+    # Args carry the same sensitive material as results -- drop them, keep name.
     p = _observed_payload(
         ToolCall(
             session_id="s",
@@ -151,7 +151,7 @@ def test_admin_index_serves_the_viewer_page() -> None:
     _app, client = _admin_client()
     r = client.get("/")
     assert r.status_code == 200
-    # The page must speak the live protocol — assert the message types so a
+    # The page must speak the live protocol -- assert the message types so a
     # schema rename breaks this test, not the operator's debugging session.
     for token in (
         "admin_hello",
@@ -172,7 +172,7 @@ def test_admin_rejects_bad_secret() -> None:
 
 
 def test_admin_rejects_when_secret_unset() -> None:
-    # No admin secret configured → even a plausible token is refused (the
+    # No admin secret configured -> even a plausible token is refused (the
     # `not expected` branch), never an open-by-default admin surface.
     os.environ["GLADOS_CONFIG_DIR"] = str(Path(__file__).parent.parent / "configs")
     app = build_app()

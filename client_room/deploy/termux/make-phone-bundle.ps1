@@ -1,5 +1,5 @@
 # Build the GLaDOS phone bundle (Windows / PowerShell). Mirror of
-# make-phone-bundle.sh — both wrap `git archive`, so no `sh` is needed on
+# make-phone-bundle.sh -- both wrap `git archive`, so no `sh` is needed on
 # the dev box. Produces a self-extracting go.sh (and a raw .tar.gz alongside
 # it) containing only TRACKED files (never your gitignored config.room.toml /
 # tokens / env), with the committed LF + exec bits intact.

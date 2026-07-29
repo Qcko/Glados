@@ -11,7 +11,7 @@ tool runs in-process or in a subprocess.
 
 Crash semantics: when the reader observes EOF or the subprocess exits,
 every pending future fails with `StdioServerError`. The next `call_tool`
-invocation triggers a bounded auto-restart — up to `max_restarts` within
+invocation triggers a bounded auto-restart -- up to `max_restarts` within
 `restart_window_s` with exponential backoff. Once the budget is spent
 the circuit stays open: subsequent calls return a clean
 `MCPCallResult(ok=False, error=...)` until `aclose()` (no manual reset
@@ -42,7 +42,7 @@ _log = logging.getLogger(__name__)
 _MCP_PROTOCOL_VERSION = "2024-11-05"
 
 # Well-known resource URI for a server's co-located lessons memory (ARCH
-# §14). A uniform constant across servers — namespace by document kind if
+# section 14). A uniform constant across servers -- namespace by document kind if
 # a server ever ships several (`memory://quirks`), never by server name
 # (that's redundant with the connection and breaks the constant).
 _LESSONS_URI = "memory://lessons"
@@ -75,7 +75,7 @@ class StdioServer:
         self._stderr_task: asyncio.Task | None = None
         self._pending: dict[int, asyncio.Future[dict]] = {}
         self._next_id = 1
-        # Lazy-spawn state (ARCH §13 "lazy MCP child spawn + idle reap"). A
+        # Lazy-spawn state (ARCH section 13 "lazy MCP child spawn + idle reap"). A
         # dormant server has no child process but is NOT closed: the next
         # `call_tool` wakes it via a clean start()+initialize(), and the
         # idle reaper sleeps it again after `idle_timeout_s` of no calls.
@@ -90,7 +90,7 @@ class StdioServer:
         # RPC is actually sent (after `_wake` returns), so a check on `_pending`
         # alone leaves a window where a just-woken server gets reaped out from
         # under the call. This counter spans the whole call_tool body, closing
-        # that window — `sleep()` refuses while it's non-zero.
+        # that window -- `sleep()` refuses while it's non-zero.
         self._active_calls = 0
         # Serialises writes so two concurrent `call()` invocations cannot
         # interleave bytes on stdin. Reads are owned by the single reader
@@ -101,7 +101,7 @@ class StdioServer:
         self._closed = False
         # Auto-restart budget: up to `max_restarts` attempts within a
         # rolling `restart_window_s` window. Successful restarts also
-        # count — three crashes in a minute is a sign of a deeper problem
+        # count -- three crashes in a minute is a sign of a deeper problem
         # and we'd rather surface "circuit open" to the LLM than chew
         # CPU respawning forever.
         self._max_restarts = max_restarts
@@ -116,7 +116,7 @@ class StdioServer:
         # On Windows the default stdin/stdout encoding for a subprocess is
         # the OEM code page, which mangles non-ASCII tool args. We don't
         # care for the toy server but Dunnes will scrape pages with
-        # non-ASCII text — set PYTHONIOENCODING and pass the env through.
+        # non-ASCII text -- set PYTHONIOENCODING and pass the env through.
         env = dict(self._env or {})
         env.setdefault("PYTHONIOENCODING", "utf-8")
         # stderr piped + drained into the logger so server diagnostics
@@ -174,7 +174,7 @@ class StdioServer:
                 rid = msg.get("id")
                 fut = self._pending.pop(rid, None)
                 if fut is None:
-                    # Stray response — id never matched a pending call.
+                    # Stray response -- id never matched a pending call.
                     # Could be a protocol bug in the server or a parse-
                     # error response with id=null. Log so a stalled call
                     # is debuggable post-mortem.
@@ -203,7 +203,7 @@ class StdioServer:
         self._pending.clear()
 
     async def _send_notification(self, method: str, params: dict | None = None) -> None:
-        """JSON-RPC notification — no id, no response expected. Used by
+        """JSON-RPC notification -- no id, no response expected. Used by
         the MCP `notifications/initialized` handshake step."""
         if self._closed or self._dead or self._proc is None or self._proc.stdin is None:
             return
@@ -275,7 +275,7 @@ class StdioServer:
         (`{name, description, inputSchema}`) into GLaDOS's `ToolSpec`
         (`{server, name, description, parameters, ...}`). The `server`
         field is injected from our configured `server_id` because real
-        MCP doesn't carry a per-tool server identifier — server identity
+        MCP doesn't carry a per-tool server identifier -- server identity
         is implicit in the subprocess. GLaDOS-only flags (`untrusted`,
         `requires_confirmation`, `timeout_s`) are NOT on the wire; they
         live in `servers.toml` `tool_overlays` and are applied after this
@@ -299,12 +299,12 @@ class StdioServer:
         return specs
 
     async def read_lessons(self) -> str | None:
-        """Fetch the server's co-located lessons memory (ARCH §14 layer 1).
+        """Fetch the server's co-located lessons memory (ARCH section 14 layer 1).
 
         Reads the well-known resource `memory://lessons` (`text/markdown`)
         over MCP `resources/read` and returns the concatenated text, or
         None if the server exposes no such resource / returns no text /
-        errors. The URI is a uniform constant across servers — provenance
+        errors. The URI is a uniform constant across servers -- provenance
         comes from the connection's `server_id`, stamped by the caller when
         it wraps the content, not from the URI. Best-effort: any failure
         means "this server has no lessons to inject", never a hard error,
@@ -332,8 +332,8 @@ class StdioServer:
         return _lessons_text(resp.get("result") or {})
 
     async def call_tool(self, name: str, args: dict) -> MCPCallResult:
-        # Hold the in-flight guard across the whole call — wake, restart, AND
-        # the RPC — so the reaper can't sleep the server mid-dispatch (the
+        # Hold the in-flight guard across the whole call -- wake, restart, AND
+        # the RPC -- so the reaper can't sleep the server mid-dispatch (the
         # window between a successful `_wake` and `_call_method` populating
         # `_pending`). Stamp activity too so a fresh call also reads non-idle.
         self._active_calls += 1
@@ -368,7 +368,7 @@ class StdioServer:
 
     async def _try_restart(self) -> bool:
         """Bounded auto-restart. Returns True if the server is live after
-        this call. Idempotent — concurrent callers serialise on the lock
+        this call. Idempotent -- concurrent callers serialise on the lock
         and only one respawn actually fires per dead-window."""
         async with self._restart_lock:
             if not self._dead or self._closed:
@@ -418,7 +418,7 @@ class StdioServer:
         """Tear down the child process and its reader/stderr tasks. Cancels
         the reader BEFORE closing stdin so the resulting EOF can't race
         `_mark_dead`. Leaves `_proc = None`. Shared by `aclose` (permanent)
-        and `sleep` (dormant) — the caller sets the resulting state flag."""
+        and `sleep` (dormant) -- the caller sets the resulting state flag."""
         if self._reader_task is not None and not self._reader_task.done():
             self._reader_task.cancel()
             try:
@@ -451,7 +451,7 @@ class StdioServer:
 
         Idempotent and serialised on `_restart_lock` so it can't interleave
         with a concurrent `_wake` / `_try_restart`. Refuses to sleep while a
-        call is in flight — either an RPC already on the wire (`_pending`) or a
+        call is in flight -- either an RPC already on the wire (`_pending`) or a
         `call_tool` anywhere in its wake-then-dispatch span (`_active_calls`).
         Together these close the window where the reaper would reap a server a
         dispatch just woke."""
@@ -530,12 +530,12 @@ def _translate_tool_result(result: dict) -> MCPCallResult:
 
     Translation rules:
     - Concatenate all text-typed blocks into one string. Non-text blocks
-      (images, embedded resources) are dropped today — bring back when a
+      (images, embedded resources) are dropped today -- bring back when a
       real consumer needs them.
     - If `isError`, return ok=False with that text as the error.
     - Otherwise, try to parse the text as JSON. If it's a JSON object,
       use it directly as `content`. This is how MCP servers ship
-      structured data (the spec has no first-class object response —
+      structured data (the spec has no first-class object response --
       everything rides in `text` blocks). Falling back to wrapping the
       raw string as `{"text": "..."}` keeps non-JSON tools usable.
     """
@@ -558,7 +558,7 @@ def _translate_tool_result(result: dict) -> MCPCallResult:
         if isinstance(parsed, dict):
             return MCPCallResult(ok=True, content=parsed)
         if parsed is not None:
-            # Valid JSON but not an object — list, scalar, bool, null.
+            # Valid JSON but not an object -- list, scalar, bool, null.
             # MCPCallResult.content is dict-only, so wrap under "value"
             # rather than discarding the parse and re-stringifying.
             return MCPCallResult(ok=True, content={"value": parsed})
@@ -570,7 +570,7 @@ def _lessons_text(result: dict) -> str | None:
 
     MCP returns `{"contents": [{"uri", "mimeType", "text"|"blob"}, ...]}`.
     We concatenate the `text` of every text-bearing content block (binary
-    `blob` blocks are skipped — lessons are markdown). Empty/whitespace
+    `blob` blocks are skipped -- lessons are markdown). Empty/whitespace
     text collapses to None so the caller treats it as "no lessons".
     """
     parts: list[str] = []

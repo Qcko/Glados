@@ -5,7 +5,7 @@ the WS handler): concurrent pending-handshake caps (global + per-source-IP)
 and a per-source-IP failure lockout. Design and panel adjudications in
 client_room/deploy/DESIGN-ws-handshake-rate-limit.md.
 
-The gate is a plain synchronous object — the server runs on one event loop
+The gate is a plain synchronous object -- the server runs on one event loop
 and every method is atomic between awaits. The caller resolves the peer IP
 (no reverse proxy is assumed; see HandshakeConfig) and anchors
 `admit`/`release` in its own try/finally so a slot is released exactly once
@@ -89,7 +89,7 @@ class HandshakeGate:
 
     def release(self, ip: str) -> None:
         # Clamp rather than trust the caller contract (one release per OK
-        # admit) — a future second caller must not be able to drive the
+        # admit) -- a future second caller must not be able to drive the
         # counter negative and widen the cap.
         self._pending_total = max(0, self._pending_total - 1)
         remaining = self._pending_by_ip.get(ip, 0) - 1

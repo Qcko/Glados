@@ -2,7 +2,7 @@
 
 Slice goal: receive binary audio frames over WS and stash them on disk so
 later slices (Whisper integration) have something to replay against. No
-STT, no Organizer involvement — purely a debugging artifact.
+STT, no Organizer involvement -- purely a debugging artifact.
 
 Each AudioSink owns one WAV file under
 `<traces_dir>/audio/<client_id>/<utc_iso>.wav`. The file is opened on the

@@ -44,7 +44,7 @@ def test_in_memory_delete_returns_false_when_missing() -> None:
 
 
 def test_keyring_secrets_delegates_to_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
-    """KeyringSecrets must hit the real `keyring` module — verify by
+    """KeyringSecrets must hit the real `keyring` module -- verify by
     monkeypatching its API and confirming the calls land with the
     namespaced service name."""
     calls: list[tuple] = []

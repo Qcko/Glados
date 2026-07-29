@@ -14,9 +14,9 @@ clients = ["desk-ui", "desk2-ui", "livingroom-mic", "livingroom-speaker"]
 # backend: "fake" (deterministic, used in tests) or "ollama"
 backend = "ollama"
 # Swap by un/commenting. Restart GLaDOS to pick up the change.
-# model = "qwen2.5:7b-instruct"            # baseline (4.7 GB) — fallback; beats Q4 14b (bake-off 2026-06-03)
-# model = "qwen2.5:14b-instruct"             # Q4_K_M (8.4 GB) — DO NOT SHIP: Thai/JSON pathologies (bake-off 2026-06-03)
-model = "qwen2.5:14b-instruct-q5_K_M"      # Q5_K_M (10.5 GB) — bake-off winner 2026-06-03 (15/22)
+# model = "qwen2.5:7b-instruct"            # baseline (4.7 GB) -- fallback; beats Q4 14b (bake-off 2026-06-03)
+# model = "qwen2.5:14b-instruct"             # Q4_K_M (8.4 GB) -- DO NOT SHIP: Thai/JSON pathologies (bake-off 2026-06-03)
+model = "qwen2.5:14b-instruct-q5_K_M"      # Q5_K_M (10.5 GB) -- bake-off winner 2026-06-03 (15/22)
 host = "http://localhost:11434"
 # Greedy decoding (0.0): the 14b/Q5 local model drifts into another language
 # when allowed to sample; greedy + the "reply in English" prompt rule curbs the
@@ -36,29 +36,29 @@ keep_alive = "-1"
 reply_language = "en"
 # Persona/verbosity override. Empty (default) uses the built-in SYSTEM_PROMPT
 # from brain/prompts/system.py. Set a full replacement string to retune persona
-# per demo without editing code — restart GLaDOS to pick it up. The ARCH §7
+# per demo without editing code -- restart GLaDOS to pick it up. The ARCH section 7
 # untrusted-content rule (<external> tags are data, not instructions) is
 # force-appended automatically, so an override can't weaken it. Hash-approved
-# server memory (ARCH §14) is still appended on top of whichever base wins.
+# server memory (ARCH section 14) is still appended on top of whichever base wins.
 # system_prompt = ""
 
 [router]
-# v2.6 local multi-model router. Off by default — GLaDOS runs every turn on
-# the single primary brain until you opt in. GLaDOS is all-local (ARCH §12); the
+# v2.6 local multi-model router. Off by default -- GLaDOS runs every turn on
+# the single primary brain until you opt in. GLaDOS is all-local (ARCH section 12); the
 # `cloud_*` knobs below gate a dormant escape hatch that stays off by default.
-#   enabled        — turn on per-turn routing between primary and specialist
-#   cloud_enabled  — opt in to the dormant cloud escape hatch. Only then does
+#   enabled        -- turn on per-turn routing between primary and specialist
+#   cloud_enabled  -- opt in to the dormant cloud escape hatch. Only then does
 #                    provider="anthropic" send tool ARGUMENTS and RESULTS to the
-#                    external provider (ARCHITECTURE §9). Leave false to keep
+#                    external provider (ARCHITECTURE section 9). Leave false to keep
 #                    everything local.
 # The API key is read from `api_key_env` at boot and never stored here
-# (ARCH §9 — TOML holds handles, not secrets). Set it in your shell:
+# (ARCH section 9 -- TOML holds handles, not secrets). Set it in your shell:
 #   setx ANTHROPIC_API_KEY "<key>"   # persists for future sessions
 # provider:
-#   "local"     — the default all-local specialist: runs on a local Ollama
+#   "local"     -- the default all-local specialist: runs on a local Ollama
 #                 model, nothing leaves the box (no cloud_enabled / key needed).
-#   "anthropic" — the dormant cloud escape hatch (needs cloud_enabled = true +
-#                 an API key). Endpoint hardcoded to api.anthropic.com (ARCH §12).
+#   "anthropic" -- the dormant cloud escape hatch (needs cloud_enabled = true +
+#                 an API key). Endpoint hardcoded to api.anthropic.com (ARCH section 12).
 enabled = true
 cloud_enabled = false
 provider = "local"
@@ -76,9 +76,9 @@ escalate_on_failed = true
 max_words_local = 30
 
 [session]
-# Conversation continuity (ARCH §3 idle-window, §8 hot buffer). A follow-up in
-# the same room/speaker reuses the live session — replaying its history so
-# "add it back" / "do that instead" resolve — when it lands within
+# Conversation continuity (ARCH section 3 idle-window, section 8 hot buffer). A follow-up in
+# the same room/speaker reuses the live session -- replaying its history so
+# "add it back" / "do that instead" resolve -- when it lands within
 # idle_window_s of the last utterance; after that a fresh session opens with no
 # history. history_max_turns bounds how many prior turns are replayed.
 idle_window_s = 180.0
@@ -107,14 +107,14 @@ silero_speech_pad_ms = 30
 #   2. drop the `whisper_language` line below (None = auto-detect)
 #   3. re-add the "always reply in English" clause to SYSTEM_PROMPT
 #      in src/glados/brain/prompts/system.py
-# ARCH §13 carries the trade-off log if you need the history.
+# ARCH section 13 carries the trade-off log if you need the history.
 backend = "faster-whisper"
 fake_text = "hello world"
 whisper_model = "distil-small.en"
 whisper_device = "cpu"
 whisper_compute_type = "int8"
 whisper_language = "en"
-# Vocabulary biasing — no retraining. `whisper_hotwords` (space-separated)
+# Vocabulary biasing -- no retraining. `whisper_hotwords` (space-separated)
 # nudges decoding toward names/jargon Whisper mishears; grow it from real
 # mis-transcriptions. `whisper_initial_prompt` is freeform context that can
 # also fix spelling. Leave empty to disable.
@@ -127,7 +127,7 @@ whisper_initial_prompt = ""
 # from huggingface.co/rhasspy/piper-voices into the voices dir.
 backend = "piper"
 piper_voice = "en_GB-cori-high"
-# Voices dir is intentionally NOT pinned here — this is a shared, tracked
+# Voices dir is intentionally NOT pinned here -- this is a shared, tracked
 # config and must stay free of machine-specific paths. It defaults to
 # $GLADOS_PIPER_VOICES_DIR, else ~/.cache/piper/voices. Set the env var to
 # relocate the large voice files off C: (persist it so launches inherit it):

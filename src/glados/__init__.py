@@ -29,8 +29,8 @@ def main() -> None:
 def _run_with_admin(server, ssl_args: dict) -> None:
     """Run the main app plus the loopback-only admin room-viewer in one event
     loop. The admin app is ALWAYS bound to 127.0.0.1 regardless of `host`, so
-    the observe capability never reaches the LAN (ARCHITECTURE §9). Both
-    uvicorn servers share the process — and thus the one Organizer + admin
+    the observe capability never reaches the LAN (ARCHITECTURE section 9). Both
+    uvicorn servers share the process -- and thus the one Organizer + admin
     registries created when glados.core.server is imported."""
     import asyncio
 
@@ -48,7 +48,7 @@ def _run_with_admin(server, ssl_args: dict) -> None:
     main_server = uvicorn.Server(
         uvicorn.Config(app, host=server.host, port=server.port, **ssl_args)
     )
-    # Plain HTTP on loopback — TLS adds nothing over a 127.0.0.1 bind, and the
+    # Plain HTTP on loopback -- TLS adds nothing over a 127.0.0.1 bind, and the
     # admin secret is the defense-in-depth layer on top of loopback isolation.
     admin_server = uvicorn.Server(
         uvicorn.Config(admin_app, host="127.0.0.1", port=server.admin_port)
@@ -58,7 +58,7 @@ def _run_with_admin(server, ssl_args: dict) -> None:
         # Each Server.serve() installs its own signal handlers; the second
         # install wins, so a Ctrl-C only flips one server's should_exit. Wait
         # for whichever stops first (signal or crash), then tell the other to
-        # exit too — otherwise gather would hang forever on the survivor.
+        # exit too -- otherwise gather would hang forever on the survivor.
         tasks = [
             asyncio.create_task(main_server.serve()),
             asyncio.create_task(admin_server.serve()),

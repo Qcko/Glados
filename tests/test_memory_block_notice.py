@@ -1,7 +1,7 @@
-"""Server-side surfacing of memory BLOCK notices (ARCH §14).
+"""Server-side surfacing of memory BLOCK notices (ARCH section 14).
 
 When a trusted server's lessons fail the LocalGuard gate at load time, nothing
-is injected — but the BLOCK is made visible to operators as metadata only: at
+is injected -- but the BLOCK is made visible to operators as metadata only: at
 `GET /admin/memory` and pushed to `ui`-role clients on connect. These tests
 seed `app.state.memory_blocks` directly rather than standing up a real trusted
 server + LocalGuard; the gate's own outcomes are covered in test_memory_gate.py.

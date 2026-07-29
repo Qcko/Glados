@@ -88,7 +88,7 @@ async def test_streaming_parses_text_and_tool_call() -> None:
 @pytest.mark.asyncio
 async def test_midstream_error_event_raises() -> None:
     # Anthropic sends mid-stream failures as a 200-OK SSE `error` event, so
-    # raise_for_status passes — the adapter must surface it, not end silently.
+    # raise_for_status passes -- the adapter must surface it, not end silently.
     stream = _sse(
         {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
         {"type": "error", "error": {"type": "overloaded_error", "message": "overloaded"}},

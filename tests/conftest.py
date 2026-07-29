@@ -36,8 +36,8 @@ _DEV_TOKENS = {
 @pytest.fixture(autouse=True, scope="session")
 def _patch_keyring_for_tests():
     """Replace KeyringSecrets with a dev-seeded InMemorySecrets at the
-    class symbol, so every `build_app()` — module-level default or a
-    fresh one a test constructs — gets a safe store by construction.
+    class symbol, so every `build_app()` -- module-level default or a
+    fresh one a test constructs -- gets a safe store by construction.
     Tests never touch the OS keyring."""
     import glados.core.server as srv
 

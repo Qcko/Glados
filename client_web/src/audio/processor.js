@@ -1,6 +1,6 @@
 // AudioWorklet running in AudioWorkletGlobalScope (separate JS realm,
 // audio thread). No DOM, no Window. Plain JS so Vite emits it as a
-// standalone asset that `audioWorklet.addModule(url)` can fetch —
+// standalone asset that `audioWorklet.addModule(url)` can fetch --
 // .ts files would be inlined into the main bundle.
 //
 // Job: take 128-sample float32 chunks at the input AudioContext's sample

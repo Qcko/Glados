@@ -1,6 +1,6 @@
 """Session registry.
 
-A session is keyed by `(room_id, speaker_id)` (ARCH §3). A follow-up utterance
+A session is keyed by `(room_id, speaker_id)` (ARCH section 3). A follow-up utterance
 reuses the live session for that key when it lands within the idle window of the
 last activity; after the gap a fresh session opens. The session_id is the stable
 handle the organizer hangs per-conversation history on, so reuse is what makes

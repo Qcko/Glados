@@ -1,4 +1,4 @@
-"""Generic toy tools — stand-in MCP surface for the demo while real
+"""Generic toy tools -- stand-in MCP surface for the demo while real
 third-party servers (LifeQuests, etc.) are still gated.
 
 Three tools, all in-process:

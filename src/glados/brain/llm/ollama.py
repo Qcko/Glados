@@ -2,11 +2,11 @@
 
 Streams NDJSON from `/api/chat`. Translates between our `LLMMessage` /
 `LLMToolCall` types and Ollama's wire format. Tool names are sanitised over
-the wire (`server.name` → `server__name`) and a reverse map restores them
+the wire (`server.name` -> `server__name`) and a reverse map restores them
 on the way back; the `__` separator is reserved (server/tool names with
 `__` are rejected, keeping the sanitisation injective).
 
-Untrusted-content wrapping (ARCHITECTURE §7) lives in the Organizer, not
+Untrusted-content wrapping (ARCHITECTURE section 7) lives in the Organizer, not
 here: a `ToolSpec(untrusted=True)` causes the Organizer to wrap the
 result in `<external>...</external>` before it reaches this adapter.
 """
@@ -47,7 +47,7 @@ class OllamaLLM:
         self._transport = transport
         # Lazily constructed on first `chat()` so we bind to the running
         # event loop rather than whichever loop happened to be current at
-        # build time. Reused across calls — httpx keeps a connection pool
+        # build time. Reused across calls -- httpx keeps a connection pool
         # internally, so streaming requests reuse keep-alive sockets to
         # Ollama instead of doing TCP+HTTP setup per turn.
         self._client: httpx.AsyncClient | None = None
@@ -68,7 +68,7 @@ class OllamaLLM:
     def _ensure_client(self) -> httpx.AsyncClient:
         # Intentionally sync: the None-check and assignment cannot interleave
         # without an `await` between them, so concurrent first-`chat()` calls
-        # share one client. Do NOT add `await` here — that would open a
+        # share one client. Do NOT add `await` here -- that would open a
         # double-construct window and leak a socket pool.
         if self._client is None:
             # Streaming LLM: bound connect/write/pool to the configured

@@ -2,15 +2,15 @@
 
 A turn can end three ways from the harness/router's point of view:
 
-- ``done`` — the model did what was asked (or answered conversationally).
-- ``needs-user`` — the model handed back with a question without acting.
-- ``failed`` — a tool error went unrecovered, or the tool loop blew its budget.
+- ``done`` -- the model did what was asked (or answered conversationally).
+- ``needs-user`` -- the model handed back with a question without acting.
+- ``failed`` -- a tool error went unrecovered, or the tool loop blew its budget.
 
 The classification is derived from *observable* tool results, never from the
 model's self-report. A drifting local model narrates failure cheerfully (see
 the 2026-05-30 bake-off T6: two tool errors followed by an upbeat clarifying
 question), so its narration is worthless as a completion signal. The wire
-already carries the truth — each dispatch records ``ok`` — this module just
+already carries the truth -- each dispatch records ``ok`` -- this module just
 aggregates it to the turn level so the v2.6 router can use it as an
 escalation input.
 
@@ -20,7 +20,7 @@ the model just never added to the cart). The lightweight goal-check below
 closes the common case of that gap without leaving the deterministic lane: when
 the user issued an *action* request ("add milk", "remove the eggs") and the
 turn ran tools but never landed a successful *mutating* call, the action did
-not happen — that is drift, not success. It stays a heuristic on observable
+not happen -- that is drift, not success. It stays a heuristic on observable
 signals (the user's verb + the per-tool ``mutating`` flag), not a model
 self-report or a semantic judgement of the reply text.
 """
@@ -37,7 +37,7 @@ TurnOutcomeKind = Literal["done", "needs-user", "failed", "confabulated"]
 # state this turn, not just look something up. Matched at the start of the
 # request (after an optional politeness/filler lead-in) so a mid-sentence
 # mention ("tell me what to add") doesn't trip the action heuristic. Read verbs
-# (show, list, find, what/which/is) are deliberately absent — a read request is
+# (show, list, find, what/which/is) are deliberately absent -- a read request is
 # satisfied by a successful search, so it must not demand a mutating call.
 _ACTION_VERBS = (
     "add",
@@ -75,11 +75,11 @@ def is_action_request(text: str) -> bool:
 
 # Asking the current time reads as a *question*, not an imperative, so the local
 # model answers from its prior and fabricates a plausible-but-wrong time instead
-# of calling time.now (SESSION 2026-06-15 Finding 2: "What time is it?" → 0 calls,
-# wrong; "run time.now" → real call). A sibling to is_action_request: detect the
+# of calling time.now (SESSION 2026-06-15 Finding 2: "What time is it?" -> 0 calls,
+# wrong; "run time.now" -> real call). A sibling to is_action_request: detect the
 # intent deterministically so the organizer can force the dispatch rather than
 # trusting the model to. Anchored to phrasings that clearly ask for the current
-# time — bare "what time does the shop close" / "set a timer" must NOT match.
+# time -- bare "what time does the shop close" / "set a timer" must NOT match.
 _TIME_REQUEST_RE = re.compile(
     r"(?:"
     r"what(?:'s| is)\s+(?:the\s+)?time\b"  # what's the time / what is the time
@@ -93,7 +93,7 @@ _TIME_REQUEST_RE = re.compile(
     r")"
     # The time-phrase must sit at the END of the clause (modulo trailing fillers
     # and punctuation). Without this, "what's the time the train leaves" matches
-    # the loose first branch — a planning question, not "what's the clock".
+    # the loose first branch -- a planning question, not "what's the clock".
     r"(?=(?:\s+(?:now|right|currently|please|exactly|today|then))*[\s?.!,]*$)",
     re.IGNORECASE,
 )
@@ -114,7 +114,7 @@ class ToolRecord:
     tool: str  # qualified name, e.g. "dunnes.add_to_cart_by_name"
     ok: bool
     # Side-effecting calls (cart writes, checkout, login, money). Mirrors
-    # ToolSpec.requires_confirmation — the existing per-tool flag for
+    # ToolSpec.requires_confirmation -- the existing per-tool flag for
     # "this mutates external state".
     mutating: bool = False
 
@@ -147,7 +147,7 @@ def classify(turn: TurnRecord) -> TurnOutcomeKind:
 
     Priority order matters: an unrecovered tool error is ``failed`` even when
     the turn ends on a question (T6 ended on a cheerful question *after* two
-    errors — that is a failure, not a clarification request)."""
+    errors -- that is a failure, not a clarification request)."""
     if turn.loop_exhausted:
         return "failed"
     if _has_unrecovered_error(turn.tools):
@@ -168,7 +168,7 @@ def classify(turn: TurnRecord) -> TurnOutcomeKind:
 def _confabulated(turn: TurnRecord) -> bool:
     """The user asked to mutate state, the turn dispatched *no tools at all*,
     yet the reply declares the action done ("Sure, adding that now.", "Added
-    milk to your cart."). That is a fabricated completion — the signature of a
+    milk to your cart."). That is a fabricated completion -- the signature of a
     poisoned history steering the model away from tool-calls (SESSION 2026-06-15:
     six consecutive zero-dispatch turns all narrating success). It is the
     zero-tool case `_action_drifted` deliberately leaves alone: there, a
@@ -185,7 +185,7 @@ def _confabulated(turn: TurnRecord) -> bool:
 def _action_drifted(turn: TurnRecord) -> bool:
     """The user asked to mutate state, the turn ran at least one tool, yet no
     successful mutating call landed. A pure read/search can't satisfy an action
-    request. Turns with no tool calls are out of scope here — the search-and-
+    request. Turns with no tool calls are out of scope here -- the search-and-
     narrate drift this targets always shows tool activity; the zero-tool
     fabricated-completion case is handled by `_confabulated`."""
     return (

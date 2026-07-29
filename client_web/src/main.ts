@@ -1,3 +1,4 @@
+// rule-guard:allow ascii-source - the stop and mute glyphs are user-visible button labels chosen deliberately; ASCII would change the UI, not the source.
 import "./styles.css";
 
 import { Mic, type MicEvent } from "./audio/mic";

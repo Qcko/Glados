@@ -1,3 +1,4 @@
+# rule-guard:allow ascii-source - curly quotes are the fixture text the normaliser is asserted to fold.
 """Unit tests for the standalone WER implementation.
 
 Cases chosen to exercise each error class independently (so a regression

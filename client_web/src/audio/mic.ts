@@ -5,7 +5,7 @@
 //   bytes 0..4  : big-endian uint32 sequence number
 //   bytes 4..N  : PCM16-LE samples
 
-// Worklets need a separately-fetchable URL — they can't be inlined into
+// Worklets need a separately-fetchable URL -- they can't be inlined into
 // the main bundle. Using `?url` on a plain `.js` file makes Vite copy it
 // to `dist/assets/` and return that URL. (Vite would otherwise treat a
 // JS file imported normally as a module and bundle it away.)
@@ -59,7 +59,7 @@ export class Mic {
       };
       source.connect(node);
       // AudioWorkletNode must terminate somewhere or the graph is GC'd.
-      // ctx.destination is fine for v0 — the worklet outputs nothing so
+      // ctx.destination is fine for v0 -- the worklet outputs nothing so
       // the user hears their own mic at zero volume. Future: speaker
       // playback will replace this terminal.
       node.connect(ctx.destination);

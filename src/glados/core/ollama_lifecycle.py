@@ -4,11 +4,11 @@ Probes the configured Ollama host on startup. If the daemon is already
 running, leaves it alone. If it isn't running and we're on Windows,
 launches the bundled tray app (which in turn spawns `ollama.exe serve`)
 and waits for the API to come up. On GLaDOS shutdown, kills the tray +
-daemon only if we started them — a daemon that was already up may have
+daemon only if we started them -- a daemon that was already up may have
 other consumers.
 
 The tray executable is located via `%LOCALAPPDATA%\\Programs\\Ollama\\ollama app.exe`
-— the default Ollama Windows install path — or via the `GLADOS_OLLAMA_TRAY`
+-- the default Ollama Windows install path -- or via the `GLADOS_OLLAMA_TRAY`
 env var override. No hardcoded user paths.
 
 Non-Windows platforms get a warning and a no-op: GLaDOS deployment targets
@@ -63,26 +63,26 @@ class OllamaLifecycle:
             return
         log.info("Ollama not running; launching tray at %s", tray)
         try:
-            # Off the event loop — CreateProcess on Windows can spend
+            # Off the event loop -- CreateProcess on Windows can spend
             # 100-500 ms doing tray-icon setup and we don't want to stall
             # other lifespan work behind it.
             # DETACHED_PROCESS so a GLaDOS crash leaves Ollama running
             # instead of orphaning a half-dead process tree; next clean
             # boot will find it up and started_by_us stays False.
             # SW_SHOWMINNOACTIVE (7): tray starts minimized without
-            # stealing focus — GLaDOS boot shouldn't pop windows.
+            # stealing focus -- GLaDOS boot shouldn't pop windows.
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 7
             await asyncio.to_thread(
-                subprocess.Popen,  # noqa: S603 — path is from env or known-good probe
+                subprocess.Popen,  # noqa: S603 -- path is from env or known-good probe
                 [str(tray)],
                 close_fds=True,
                 creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
                 startupinfo=startupinfo,
             )
         except OSError as e:
-            log.error("Failed to launch Ollama tray: %s — first LLM call will fail", e)
+            log.error("Failed to launch Ollama tray: %s -- first LLM call will fail", e)
             return
         if await self._wait_until_ready():
             self.started_by_us = True
@@ -90,7 +90,7 @@ class OllamaLifecycle:
         else:
             log.error(
                 "Ollama did not become ready within %.0fs after tray launch "
-                "— first LLM call will fail",
+                "-- first LLM call will fail",
                 _BOOT_TIMEOUT_S,
             )
 
@@ -137,7 +137,7 @@ class OllamaLifecycle:
             p = Path(override)
             return p if p.is_file() else None
         # Per-user install (default for the Windows installer), then
-        # machine-wide install fallback. Both probe the standard layout —
+        # machine-wide install fallback. Both probe the standard layout --
         # no hardcoded user paths.
         for root_env in ("LOCALAPPDATA", "ProgramFiles"):
             root = os.environ.get(root_env)

@@ -1,4 +1,4 @@
-"""Reply-language drift detection + repair-prompt construction (ARCH §7).
+"""Reply-language drift detection + repair-prompt construction (ARCH section 7).
 
 The local 14B model intermittently emits a free-form reply in the WRONG
 language (observed: Thai) when its language prior is weak -- chiefly on a cold
@@ -89,10 +89,10 @@ def fallback_line(reply_language: str) -> str:
 def build_repair_messages(
     drifted_text: str, reply_language: str
 ) -> list[LLMMessage]:
-    """A fresh, minimal, self-anchored repair inference (ARCH §7). The ONLY
+    """A fresh, minimal, self-anchored repair inference (ARCH section 7). The ONLY
     variable input is the drifted text, wrapped <external> and treated as data
     -- the repair never replays tool history, so untrusted tool content cannot
-    re-enter or steer this pass. The system message restates the §7 rule so a
+    re-enter or steer this pass. The system message restates the section 7 rule so a
     drifted reply that embedded injected text cannot redirect the rewrite."""
     language = _LANGUAGE_NAMES.get(_lang_key(reply_language), "English")
     # Defang a literal close tag so the wrapped text cannot end the wrapper

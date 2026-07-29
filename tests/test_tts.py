@@ -96,7 +96,7 @@ async def test_organizer_emits_tts_chunk_after_assistant_delta(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_organizer_skips_tts_when_no_text(tmp_path: Path) -> None:
-    """Empty final_text (rare — would need an LLM that emits no text and no
+    """Empty final_text (rare -- would need an LLM that emits no text and no
     tool calls) must not blow up the turn or emit empty tts_chunks."""
     from glados.core.adapters import LLMText
 
@@ -192,7 +192,7 @@ def _fake_piper(monkeypatch):
 
 
 def test_piper_construction_does_no_work(_fake_piper, tmp_path: Path) -> None:
-    """`__init__` must not download or load — otherwise the asyncio loop
+    """`__init__` must not download or load -- otherwise the asyncio loop
     is blocked at app-build time. The whole point of this slice."""
     from glados.audio.tts.piper import PiperTTS
 
@@ -221,7 +221,7 @@ async def test_piper_repeat_synthesize_does_not_reload(_fake_piper, tmp_path: Pa
         pass
     async for _ in tts.synthesize("there"):
         pass
-    # Both calls share the loaded voice — no second load.
+    # Both calls share the loaded voice -- no second load.
     assert _fake_piper.load_calls == 1
     assert len(_fake_piper.ensure_calls) == 1
 
@@ -233,7 +233,7 @@ async def test_piper_concurrent_first_synth_serialises_load(
     """Two concurrent first-synthesize calls must load the voice exactly
     once. Without the asyncio.Lock + double-check, both would race past
     the `if self._voice is not None` guard and call `PiperVoice.load`
-    twice — wasted work, and on cold start, two parallel ~110 MB
+    twice -- wasted work, and on cold start, two parallel ~110 MB
     downloads."""
     import asyncio
 
@@ -255,7 +255,7 @@ async def test_piper_concurrent_first_synth_serialises_load(
 
 @pytest.mark.asyncio
 async def test_piper_empty_text_does_not_load(_fake_piper, tmp_path: Path) -> None:
-    """`synthesize("")` returns immediately without touching the voice —
+    """`synthesize("")` returns immediately without touching the voice --
     no point in downloading 110 MB to say nothing."""
     from glados.audio.tts.piper import PiperTTS
 
@@ -275,7 +275,7 @@ def test_apply_pronunciations_word_boundary_and_case() -> None:
     compiled = _compile_pronunciations({"GLaDOS": "Gladoss"})
     # Case-insensitive, every occurrence.
     assert apply_pronunciations("hey GLaDOS and glados", compiled) == "hey Gladoss and Gladoss"
-    # Whole-word only — don't rewrite inside a longer token.
+    # Whole-word only -- don't rewrite inside a longer token.
     assert apply_pronunciations("GLaDOSish", compiled) == "GLaDOSish"
     # Empty lexicon is identity.
     assert apply_pronunciations("untouched", _compile_pronunciations({})) == "untouched"
@@ -293,14 +293,14 @@ def test_apply_pronunciations_single_pass_no_cascade() -> None:
     from glados.audio.tts.piper import _compile_pronunciations, apply_pronunciations
 
     # Single pass: each input span maps once and the result is NOT re-scanned.
-    # A sequential rewriter would turn "A B" into "C C" (A→B, then both B→C).
+    # A sequential rewriter would turn "A B" into "C C" (A->B, then both B->C).
     compiled = _compile_pronunciations({"A": "B", "B": "C"})
     assert apply_pronunciations("A B", compiled) == "B C"
 
 
 @pytest.mark.asyncio
 async def test_piper_synthesize_applies_pronunciations(tmp_path: Path, monkeypatch) -> None:
-    """The rewritten text — not the original — must reach the voice model."""
+    """The rewritten text -- not the original -- must reach the voice model."""
     import sys
     import types as _types
 

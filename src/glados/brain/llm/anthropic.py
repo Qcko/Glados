@@ -1,10 +1,10 @@
 """Anthropic Messages API adapter implementing the `LLM` Protocol.
 
 The dormant cloud escape hatch for the v2.6 router. GLaDOS is all-local by
-default (ARCHITECTURE §12); this adapter only runs when the specialist slot is
+default (ARCHITECTURE section 12); this adapter only runs when the specialist slot is
 explicitly pointed at the cloud (`provider="anthropic"` + cloud opt-in + key).
-It drives the *same* MCP tools as the local path — the registry doesn't care
-which model emits the tool call — so the local side stays a pure dispatcher.
+It drives the *same* MCP tools as the local path -- the registry doesn't care
+which model emits the tool call -- so the local side stays a pure dispatcher.
 
 Streams Server-Sent Events from `/v1/messages`. Translates between our
 `LLMMessage` / `LLMToolCall` types and Anthropic's content-block format. Tool
@@ -12,13 +12,13 @@ names are sanitised over the wire (`server.name` -> `server__name`, the `__`
 separator reserved) and restored on the way back, matching the Ollama adapter.
 
 Privacy: on this path tool *arguments and results* cross to Anthropic alongside
-the transcript (ARCHITECTURE §9). Construction is gated on explicit opt-in +
+the transcript (ARCHITECTURE section 9). Construction is gated on explicit opt-in +
 an API key in the server wiring; this class assumes that gate already passed.
-The endpoint is hardcoded to api.anthropic.com — there is no `base_url` knob,
+The endpoint is hardcoded to api.anthropic.com -- there is no `base_url` knob,
 which is what keeps the dormant code from being an arbitrary-destination exfil
-path; adding one for a self-hosted endpoint is a separate guarded slice (§12).
+path; adding one for a self-hosted endpoint is a separate guarded slice (section 12).
 Zero-retention is an account-level setting on Anthropic's side, not a per-call
-body flag — there is nothing to send here for it.
+body flag -- there is nothing to send here for it.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ class AnthropicLLM:
         self._max_tokens = max_tokens
         self._timeout = timeout
         self._transport = transport
-        # Lazily built on first chat() so the pool binds to the running loop —
+        # Lazily built on first chat() so the pool binds to the running loop --
         # same rationale as OllamaLLM.
         self._client: httpx.AsyncClient | None = None
 
@@ -123,7 +123,7 @@ class AnthropicLLM:
             chunk = json.loads(data)
             # Anthropic streams mid-stream failures (overloaded_error,
             # api_error) as a 200-OK SSE `error` event, so raise_for_status
-            # already passed. Surface it loudly — otherwise the turn ends with
+            # already passed. Surface it loudly -- otherwise the turn ends with
             # empty text and a misleading `done` outcome, with nothing in the
             # trace naming why the cloud reply never came.
             if chunk.get("type") == "error":
@@ -178,7 +178,7 @@ class AnthropicLLM:
             args = {}
         spec = name_map.get(block["name"])
         if spec is None:
-            # Hallucinated name — surface it as a call with a sentinel server
+            # Hallucinated name -- surface it as a call with a sentinel server
             # so the registry returns "unknown tool" and the model can recover.
             return LLMToolCall(
                 call_id=uuid.uuid4().hex,

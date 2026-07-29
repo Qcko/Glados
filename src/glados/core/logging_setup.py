@@ -30,7 +30,7 @@ _configured = False
 def setup_logging() -> Path:
     """Install handlers on the root logger. Returns the log file path.
 
-    Safe to call more than once — only the first call wires handlers.
+    Safe to call more than once -- only the first call wires handlers.
     Skipped under pytest so test runs don't install a RotatingFileHandler
     on the shared root logger (which would survive across test cases and
     spam glados.log with test noise).

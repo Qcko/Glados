@@ -73,12 +73,12 @@ def test_recovery_is_per_tool() -> None:
 
 
 def test_question_with_no_tools_is_needs_user() -> None:
-    turn = _turn(final_text="Which store did you mean — Cornelscourt or Bishopstown?")
+    turn = _turn(final_text="Which store did you mean -- Cornelscourt or Bishopstown?")
     assert classify(turn) == "needs-user"
 
 
 def test_question_after_successful_call_is_done() -> None:
-    # Acted, then asked a genuine follow-up — not a hand-back.
+    # Acted, then asked a genuine follow-up -- not a hand-back.
     turn = _turn(final_text="I added milk. Did you also want bread?")
     turn.record_tool("dunnes.add_to_cart_by_name", ok=True, mutating=True)
     assert classify(turn) == "done"
@@ -120,7 +120,7 @@ def test_action_request_punted_with_question_is_needs_user() -> None:
     # Asked to act, searched, then handed back with a question instead of
     # acting. A clarification request, not silent drift.
     turn = _turn(
-        final_text="I found a few milks — which one did you mean?",
+        final_text="I found a few milks -- which one did you mean?",
         action_intent=True,
     )
     turn.record_tool("dunnes.search_products", ok=True, mutating=False)
@@ -128,7 +128,7 @@ def test_action_request_punted_with_question_is_needs_user() -> None:
 
 
 def test_read_request_search_only_is_done() -> None:
-    # "What's in my cart?" is a read — a successful search satisfies it, so
+    # "What's in my cart?" is a read -- a successful search satisfies it, so
     # the goal-check must not demand a mutating call.
     turn = _turn(final_text="You have milk and bread.", action_intent=False)
     turn.record_tool("dunnes.view_cart", ok=True, mutating=False)
@@ -137,20 +137,20 @@ def test_read_request_search_only_is_done() -> None:
 
 def test_action_request_no_tools_declarative_is_confabulated() -> None:
     # Asked to act, dispatched nothing, yet declares it done. Fabricated
-    # completion — the poisoned-history signature (SESSION 2026-06-15).
+    # completion -- the poisoned-history signature (SESSION 2026-06-15).
     turn = _turn(final_text="Sure, adding that now.", action_intent=True)
     assert classify(turn) == "confabulated"
 
 
 def test_action_request_no_tools_question_is_needs_user() -> None:
-    # Same zero-tool turn, but ends on a question — an honest hand-back
+    # Same zero-tool turn, but ends on a question -- an honest hand-back
     # (clarification), not a fabricated completion.
     turn = _turn(final_text="Which milk did you mean?", action_intent=True)
     assert classify(turn) == "needs-user"
 
 
 def test_action_request_no_tools_empty_reply_is_done() -> None:
-    # Nothing said, nothing claimed — no fabrication to flag. (A no-op turn
+    # Nothing said, nothing claimed -- no fabrication to flag. (A no-op turn
     # like this is not committed to history anyway.)
     turn = _turn(final_text="", action_intent=True)
     assert classify(turn) == "done"
@@ -158,7 +158,7 @@ def test_action_request_no_tools_empty_reply_is_done() -> None:
 
 def test_read_request_no_tools_declarative_is_not_confabulated() -> None:
     # A read/question, not an action request, never trips confabulation even
-    # with zero tools — only side-effecting claims are flagged.
+    # with zero tools -- only side-effecting claims are flagged.
     turn = _turn(final_text="It is Friday afternoon.", action_intent=False)
     assert classify(turn) == "done"
 

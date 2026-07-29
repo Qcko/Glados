@@ -1,6 +1,6 @@
 """Secrets store abstraction backed by the OS keyring.
 
-Per ARCH §9: TOML holds handles only, never values. Real values live in
+Per ARCH section 9: TOML holds handles only, never values. Real values live in
 the OS-native credential store (Windows Credential Manager, libsecret,
 macOS Keychain) under service names like `glados.client-tokens`,
 `glados.dunnes`, `glados.spotify`. The scope is the second half of the
@@ -21,7 +21,7 @@ from keyring.errors import PasswordDeleteError
 def _block_jaraco_tarball() -> None:
     """Defense-in-depth: neutralise `jaraco.context.tarball`.
 
-    GLaDOS never extracts tar archives via jaraco.context — `keyring` only
+    GLaDOS never extracts tar archives via jaraco.context -- `keyring` only
     uses its decorator helpers (`@suppress`, `@on_interrupt`, etc.). The
     `tarball` helper has had a zip-slip path-traversal CVE in the past
     (CVE-2026-23949, fixed in 6.1.0; we ship >=6.1.2 so we're not exposed

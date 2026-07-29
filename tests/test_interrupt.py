@@ -25,7 +25,7 @@ from glados.mcp.registry import MCPRegistry
 
 
 class SlowLLM:
-    """Yields one delta, then hangs forever — guaranteed cancel point."""
+    """Yields one delta, then hangs forever -- guaranteed cancel point."""
 
     def __init__(self) -> None:
         self.entered = asyncio.Event()
@@ -37,7 +37,7 @@ class SlowLLM:
 
 
 class SlowTTS:
-    """Yields one chunk, then hangs — cancel point inside _speak."""
+    """Yields one chunk, then hangs -- cancel point inside _speak."""
 
     def __init__(self) -> None:
         self.entered = asyncio.Event()
@@ -184,7 +184,7 @@ async def test_interrupt_after_done_is_noop(tmp_path: Path) -> None:
 @pytest.fixture(scope="module")
 def http_client():
     """See test_audio_pipeline.py for the rationale on context-managing
-    TestClient — needed so each module's room workers are torn down before
+    TestClient -- needed so each module's room workers are torn down before
     the next module's TestClient creates its own event loop."""
     os.environ["GLADOS_CONFIG_DIR"] = str(Path(__file__).parent.parent / "configs")
     os.environ["GLADOS_LLM_BACKEND"] = "fake"

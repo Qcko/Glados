@@ -1,4 +1,4 @@
-"""Per-room FIFO queue (ARCH §3.4).
+"""Per-room FIFO queue (ARCH section 3.4).
 
 Same-room utterances are serialised. Cross-room are parallel. Voice
 barge-in clears the room's pending queue in addition to cancelling the
@@ -118,7 +118,7 @@ async def test_manager_parallelises_across_rooms() -> None:
     mgr.enqueue("kitchen", b_action)
     await asyncio.wait_for(a_started.wait(), timeout=1.0)
     await asyncio.wait_for(b_started.wait(), timeout=1.0)
-    # Both running concurrently → release lets both finish.
+    # Both running concurrently -> release lets both finish.
     release.set()
     await mgr.flush()
     await mgr.close()
@@ -208,7 +208,7 @@ async def test_manager_close_cancels_running_action() -> None:
 @pytest.mark.asyncio
 async def test_same_room_user_text_is_fifo(tmp_path: Path) -> None:
     """Welcome and Done from the first turn arrive before Welcome for the
-    second — proves the queue actually serialises."""
+    second -- proves the queue actually serialises."""
     async with _make_organizer(
         [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
         tmp_path,
@@ -218,7 +218,7 @@ async def test_same_room_user_text_is_fifo(tmp_path: Path) -> None:
         await org.handle_user_text("desk-ui", "second")
         await org.flush()
 
-        # Each turn emits welcome + assistant_delta + done. Two turns →
+        # Each turn emits welcome + assistant_delta + done. Two turns ->
         # six messages in strict order.
         types = [m["type"] for _, m in sink]
         # First turn's done comes before second turn's welcome.
@@ -231,7 +231,7 @@ async def test_same_room_user_text_is_fifo(tmp_path: Path) -> None:
 async def test_user_transcript_broadcast_carries_source(tmp_path: Path) -> None:
     """Every turn echoes a `user_transcript` to the room so the UI can
     show what the server believes the user said. Typed input is tagged
-    "text"; audio-derived input is tagged "voice" — the UI flags the
+    "text"; audio-derived input is tagged "voice" -- the UI flags the
     latter so STT mistranscriptions (e.g. Czech heard as French) jump
     out without grepping the trace."""
     async with _make_organizer(
@@ -295,7 +295,7 @@ async def test_cross_room_turns_can_overlap(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_voice_barge_in_clears_room_queue(tmp_path: Path) -> None:
     """A voice 'stop' both cancels the active turn AND drops anything
-    queued for that room — voice 'stop' means stop everything."""
+    queued for that room -- voice 'stop' means stop everything."""
     llm = _GatedLLM()
     async with _make_organizer(
         [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
@@ -314,7 +314,7 @@ async def test_voice_barge_in_clears_room_queue(tmp_path: Path) -> None:
         # Let cancellation propagate.
         await org.flush()
 
-        # A was cancelled. B never ran — exactly one welcome.
+        # A was cancelled. B never ran -- exactly one welcome.
         welcomes = [m for _, m in sink if m["type"] == "welcome"]
         assert len(welcomes) == 1, f"barge-in must drop queued B (got {welcomes})"
         types = [m["type"] for _, m in sink]
@@ -326,14 +326,14 @@ async def test_barge_in_during_action_startup_window(tmp_path: Path) -> None:
     """Race window: between the worker creating an action_task (and
     assigning `_active_actions[room]`) and the action body actually
     registering into `_inflight`, a voice barge-in could see "no active
-    session, empty queue" and fall through to a regular turn — i.e.
+    session, empty queue" and fall through to a regular turn -- i.e.
     "stop" becomes a turn that says stop. `_active_actions` (set by the
     worker pre-await) closes that window; `_has_active_or_starting_turn`
     consults it.
 
     Test strategy: bypass `handle_user_text` and `enqueue` directly with
     a gated action that pauses on an `asyncio.Event` before running
-    anything. That deterministically reproduces the race window — the
+    anything. That deterministically reproduces the race window -- the
     worker has the action in `_active_actions` but the body has done
     nothing, so `_inflight` is empty. Then we fire a voice barge-in and
     assert no new turn opened. If `_has_active_or_starting_turn` only
@@ -350,7 +350,7 @@ async def test_barge_in_during_action_startup_window(tmp_path: Path) -> None:
     async with _make_organizer(
         [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
         tmp_path,
-        FakeLLM(),  # unused — `gated` never reaches LLM
+        FakeLLM(),  # unused -- `gated` never reaches LLM
     ) as (org, sink):
         org._queues.enqueue("desk", gated)
         # Let the worker dequeue, create action_task, assign
@@ -385,14 +385,14 @@ async def test_barge_in_during_action_startup_window(tmp_path: Path) -> None:
         # release. So queue-depth is the sentinel here.
         assert org._queues.queue_depth("desk") == 0, (
             "barge-in in startup window must not enqueue a follow-up "
-            "turn — `_has_active_or_starting_turn` must consult "
+            "turn -- `_has_active_or_starting_turn` must consult "
             "`_active_actions`, not just `_inflight`. Queue depth = "
             f"{org._queues.queue_depth('desk')}"
         )
 
         # Release the gate so the worker drains cleanly. After flush(),
         # we can also assert no welcome ever appeared (the gated action
-        # doesn't broadcast anything — only real `_run_user_text` does).
+        # doesn't broadcast anything -- only real `_run_user_text` does).
         pause.set()
         await org.flush()
         welcomes = [m for _, m in sink if m["type"] == "welcome"]
@@ -404,7 +404,7 @@ async def test_barge_in_during_action_startup_window(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_ui_interrupt_does_not_clear_queue(tmp_path: Path) -> None:
-    """UI Interrupt cancels the active turn but lets queued ones run —
+    """UI Interrupt cancels the active turn but lets queued ones run --
     typed cancellation is finer-grained than voice 'stop'."""
     llm = _GatedLLM()
     async with _make_organizer(
@@ -420,7 +420,7 @@ async def test_ui_interrupt_does_not_clear_queue(tmp_path: Path) -> None:
         await org.handle_interrupt("desk-ui", sid)
         # Active turn A cancels; B runs next. Release the gate so B can
         # complete (B will also hit the gate but it's already set after
-        # A's release; wait — gate is set per-LLM-instance, so once we
+        # A's release; wait -- gate is set per-LLM-instance, so once we
         # release once it's set forever).
         llm.release.set()
         await org.flush()

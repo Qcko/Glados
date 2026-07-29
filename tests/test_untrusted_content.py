@@ -1,10 +1,10 @@
-"""ARCHITECTURE §7: tool results from external sources (web fetch,
+"""ARCHITECTURE section 7: tool results from external sources (web fetch,
 scrapers) are wrapped in `<external>...</external>` before reaching the
 LLM, paired with a system-prompt rule that anything inside `<external>`
 is data, not instructions.
 
 The wrapping decision is per-tool, driven by `ToolSpec.untrusted`. Local
-tools (time, dice, in-process toys) stay unwrapped — they're trusted to
+tools (time, dice, in-process toys) stay unwrapped -- they're trusted to
 return well-formed data. Tools that pull from the open web set
 `untrusted=True` on their spec; the Organizer handles the rest."""
 
@@ -108,7 +108,7 @@ def _system_prompt_seen(passes: list[list[LLMMessage]]) -> str:
 
 @pytest.mark.asyncio
 async def test_memory_notes_injected_into_system_prompt(tmp_path: Path) -> None:
-    """ARCH §14: guard-wrapped server memory is appended to the system prompt
+    """ARCH section 14: guard-wrapped server memory is appended to the system prompt
     behind a framing preamble, and the LLM sees it on the turn's system msg."""
     spec = ToolSpec(server="local", name="now", description="t", parameters={"type": "object"})
     mcp = MCPRegistry()
@@ -143,7 +143,7 @@ async def test_no_memory_notes_leaves_prompt_unchanged(tmp_path: Path) -> None:
         llm,
         mcp,
     ) as (org, _):
-        org.set_memory_notes([])  # explicit empty — still just SYSTEM_PROMPT
+        org.set_memory_notes([])  # explicit empty -- still just SYSTEM_PROMPT
         await org.handle_user_text("desk-ui", "what time is it")
         await org.flush()
 
@@ -153,7 +153,7 @@ async def test_no_memory_notes_leaves_prompt_unchanged(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_system_prompt_override_replaces_base(tmp_path: Path) -> None:
     """A config-supplied system_prompt replaces the built-in SYSTEM_PROMPT as
-    the base the LLM sees, but the ARCH §7 untrusted-content rule is
+    the base the LLM sees, but the ARCH section 7 untrusted-content rule is
     force-appended so an override can't silently drop it."""
     spec = ToolSpec(server="local", name="now", description="t", parameters={"type": "object"})
     mcp = MCPRegistry()
@@ -323,7 +323,7 @@ async def test_untrusted_payload_cannot_close_wrapper_early(tmp_path: Path) -> N
 def test_system_prompt_warns_about_external_tags() -> None:
     """The wrapping is only meaningful if the system prompt teaches the
     model what <external> means. Asserting on substrings here is fragile
-    by design — if someone reflows the prompt and drops the warning the
+    by design -- if someone reflows the prompt and drops the warning the
     test fails loudly."""
     assert "<external>" in SYSTEM_PROMPT
     assert "instructions" in SYSTEM_PROMPT.lower()
@@ -333,7 +333,7 @@ def test_system_prompt_carries_id_and_quantity_nudges() -> None:
     """Bake-off T11/T12 regressions. T12: the model hallucinated a
     placeholder product id instead of reading it from view_cart. T11: it
     added an item again for 'make it one' instead of setting the quantity.
-    Substring asserts are fragile by design — a reflow that drops the nudge
+    Substring asserts are fragile by design -- a reflow that drops the nudge
     should fail here so the regression is caught."""
     lower = SYSTEM_PROMPT.lower()
     assert "example_product_id" in lower  # T12: name the anti-pattern

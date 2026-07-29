@@ -1,4 +1,4 @@
-"""LocalGuard-for-prompts integration seam (ARCH §14).
+"""LocalGuard-for-prompts integration seam (ARCH section 14).
 
 GLaDOS owns only the *integration*: at memory-load it asks LocalGuard whether
 a server-shipped lessons blob exactly matches a human-approved baseline,
@@ -9,10 +9,10 @@ baseline store, the injection-scan ruleset, and the approve-with-diff flow.
 The boundary is LocalGuard's CLI (`localguard memory check`), not a Python
 import: the two repos keep separate venvs and the baseline store lives under
 LocalGuard's own `LOCALGUARD_LIBRARY` root. A pure hash lookup, deterministic,
-no model — the runtime path has no injection surface of its own.
+no model -- the runtime path has no injection surface of its own.
 
-Fail-closed is the whole point. Every non-APPROVED outcome — unknown content,
-changed content, LocalGuard absent, CLI error, malformed output — yields None,
+Fail-closed is the whole point. Every non-APPROVED outcome -- unknown content,
+changed content, LocalGuard absent, CLI error, malformed output -- yields None,
 and None means *nothing is injected*. New or edited lessons must be approved
 out-of-band (`localguard memory approve`) before they reach a prompt again.
 """
@@ -48,9 +48,9 @@ class GateResult:
     `note` is the guard-wrapped, inject-ready string and is present iff
     `approved`. `reason` is LocalGuard's human-readable block cause and is
     present iff blocked. `sha256`/`length` are metadata-safe descriptors of
-    the blob (a hex digest and character count) — they carry **none of the
+    the blob (a hex digest and character count) -- they carry **none of the
     untrusted bytes**, so they are safe to surface to an operator on any
-    channel (ARCH §14 BLOCK-notice surface).
+    channel (ARCH section 14 BLOCK-notice surface).
     """
 
     source: str
@@ -64,7 +64,7 @@ class GateResult:
 def check(source: str, blob: str) -> GateResult:
     """Vet a server's lessons blob through LocalGuard, fail-closed.
 
-    `source` is the stable origin key LocalGuard baselines against — the MCP
+    `source` is the stable origin key LocalGuard baselines against -- the MCP
     server id. On approval the result carries an inject-ready `note`; on any
     non-approved outcome (unknown/changed content, LocalGuard unreachable, CLI
     error) it carries a `reason` and `note is None`, so the caller injects
@@ -119,10 +119,10 @@ def _check_approval(source: str, blob: str) -> tuple[bool, str | None]:
             source,
             _LOCALGUARD_CMD_ENV,
         )
-        return False, "localguard not found — gate unavailable"
+        return False, "localguard not found -- gate unavailable"
     except Exception as e:  # noqa: BLE001
         # TimeoutExpired, OSError, ValueError (bad args), or anything else.
-        # The gate's only acceptable failure mode is "inject nothing" — never
+        # The gate's only acceptable failure mode is "inject nothing" -- never
         # let a check error crash the caller (the server lifespan) open.
         log.warning("memory gate: localguard check failed for %r: %s", source, e)
         return False, f"localguard check failed ({type(e).__name__})"
@@ -130,13 +130,13 @@ def _check_approval(source: str, blob: str) -> tuple[bool, str | None]:
         log.info("memory gate: APPROVED lessons for %r", source)
         return True, None
     # Non-zero is LocalGuard's fail-closed signal (unknown/changed/blocked).
-    # Log LocalGuard's own detail line locally — the log is operator-local and
-    # not the metadata channel — but the *returned* reason rides the operator
-    # metadata channel (UI push + /admin/memory), where §14 promises no
+    # Log LocalGuard's own detail line locally -- the log is operator-local and
+    # not the metadata channel -- but the *returned* reason rides the operator
+    # metadata channel (UI push + /admin/memory), where section 14 promises no
     # untrusted bytes. So we never forward LocalGuard's free-text `reason`; we
     # forward only its closed-vocabulary `reason_code` (and only after a
     # syntactic safety check), falling back to the exit code. The operator
-    # reads the actual bytes later, inert, in the review pane — never here.
+    # reads the actual bytes later, inert, in the review pane -- never here.
     detail = (proc.stdout or proc.stderr or "").strip().splitlines()
     log.info(
         "memory gate: BLOCKED lessons for %r (exit %d): %s",
@@ -158,7 +158,7 @@ def _check_approval(source: str, blob: str) -> tuple[bool, str | None]:
 # channel only after a *syntactic* safety check: a lowercase token of bounded
 # length, colon-namespaced at most, no whitespace/quotes/punctuation. A blob
 # fragment cannot satisfy this shape, so even a regressed or hostile LocalGuard
-# cannot smuggle untrusted bytes through this field — GLaDOS upholds the §14
+# cannot smuggle untrusted bytes through this field -- GLaDOS upholds the section 14
 # no-echo invariant at its own boundary rather than trusting the producer.
 # `\Z` (not `$`) so a trailing newline can't ride through: `$` matches just
 # before a final `\n`, which would let "foo\n" pass and forward the newline.
@@ -169,7 +169,7 @@ def _safe_reason_code(stdout: str | None) -> str | None:
     """Extract LocalGuard's `reason_code` from a `--json` verdict, or None.
 
     None when stdout is absent, not JSON, not an object, lacks the field, or
-    the value fails the syntactic safety check — in every such case the caller
+    the value fails the syntactic safety check -- in every such case the caller
     falls back to the exit-code reason. Forward-compatible: returns None today
     (LocalGuard does not yet emit the field) without any error.
     """
@@ -206,10 +206,10 @@ def _strip_quotes(tok: str) -> str:
 
 
 def _wrap(source: str, blob: str) -> str:
-    """Frame approved memory as untrusted reference data (ARCH §14 layer 4).
+    """Frame approved memory as untrusted reference data (ARCH section 14 layer 4).
 
     Even hash-approved content is delimited and labelled, never spliced in as
-    raw system instructions — the §7 `<external>` discipline applied to
+    raw system instructions -- the section 7 `<external>` discipline applied to
     memory. Any literal closing tag inside the blob is defanged so the blob
     cannot break out of its own delimiter (belt-and-braces; LocalGuard's
     approval scan also flags framing-tag defang attempts).
@@ -222,8 +222,8 @@ def _wrap(source: str, blob: str) -> str:
 
 
 # Any token that looks like an opening or closing <memory-notes> tag,
-# tolerant of case, internal whitespace, and attributes — so a blob can't
+# tolerant of case, internal whitespace, and attributes -- so a blob can't
 # break out of (or forge) its own delimiter. We neutralise only the leading
-# `<`; LocalGuard's approval-time scan is the primary defence (ARCH §14 L3),
+# `<`; LocalGuard's approval-time scan is the primary defence (ARCH section 14 L3),
 # this is belt-and-braces matching the <external> discipline.
 _TAG_LIKE = re.compile(r"<\s*/?\s*memory-notes", re.IGNORECASE)

@@ -1,11 +1,11 @@
 # Room client config. Copy to `client_room/config.toml` (gitignored) and fill
-# in for the local device. The SAME file serves both room clients — run
+# in for the local device. The SAME file serves both room clients -- run
 # `python -m client_room.mic` (uploads audio) or `python -m client_room.speaker`
 # (plays TTS). The role is decided by the rooms.toml binding, not this file.
 #
 # The matching client_id must also be listed in the server's
 # `configs/glados.toml` [auth].clients and bound to a room+role in
-# `configs/rooms.toml` — role = "mic" to run the mic client, role = "speaker"
+# `configs/rooms.toml` -- role = "mic" to run the mic client, role = "speaker"
 # to run the speaker client. A role/binding mismatch is a terminal handshake
 # error (the client stops instead of reconnecting).
 
@@ -15,7 +15,7 @@ room_id = "bedroom"
 
 # --- Auth token -----------------------------------------------------------
 # The token is NOT stored in this file. It is resolved at startup with the
-# precedence: keyring → env → file (first present wins).
+# precedence: keyring -> env -> file (first present wins).
 #
 #   1. Keyring (preferred on a desktop): OS keyring, service
 #      `glados.client-tokens`, username = client_id:
@@ -23,7 +23,7 @@ room_id = "bedroom"
 #   2. Env var (set `token_env` to its name). NOTE: env tokens leak to any
 #      local user via `ps -e` / `/proc/<pid>/environ`. On a shared device
 #      prefer a mode-600 file over an env var.
-#   3. File (set `token_file` to a path). Must be mode 600 — the client
+#   3. File (set `token_file` to a path). Must be mode 600 -- the client
 #      refuses a group/other-readable file (POSIX).
 #
 # token_env = "GLADOS_MIC_TOKEN"
@@ -38,9 +38,9 @@ room_id = "bedroom"
 # input_device = 1
 
 # parec only. `parec_rate` should match the source's NATIVE rate so PulseAudio
-# does no resampling (the client resamples native → 16 kHz itself). `parec_source`
+# does no resampling (the client resamples native -> 16 kHz itself). `parec_source`
 # is the PulseAudio source name (omit for the default source). `parec_args` is an
-# argv ARRAY of extra parec flags — never a split string (keeps it injection-free).
+# argv ARRAY of extra parec flags -- never a split string (keeps it injection-free).
 # On Termux/Android, boot PulseAudio first:
 #   pulseaudio --start --exit-idle-time=-1
 #   pactl load-module module-sles-source
@@ -50,7 +50,7 @@ room_id = "bedroom"
 
 # --- Playback backend (speaker client only) -------------------------------
 # "sounddevice" (default): PortAudio. "pacat": external PulseAudio playback for
-# boxes without PortAudio (e.g. Termux/Android) — the mirror of "parec" capture.
+# boxes without PortAudio (e.g. Termux/Android) -- the mirror of "parec" capture.
 # The output stream's sample rate follows the server's TTS chunks (pinned to the
 # first chunk, rebuilt on change), so it is not configured here.
 # playback_backend = "sounddevice"
@@ -59,9 +59,9 @@ room_id = "bedroom"
 # output_device = 2
 
 # pacat only. `pacat_sink` is the PulseAudio sink name (omit for the default
-# sink). `pacat_latency_msec` bounds pacat's own buffering — keep it small so a
+# sink). `pacat_latency_msec` bounds pacat's own buffering -- keep it small so a
 # barge-in flush leaves only a short already-pushed tail. `pacat_args` is an argv
-# ARRAY of extra pacat flags — never a split string (keeps it injection-free).
+# ARRAY of extra pacat flags -- never a split string (keeps it injection-free).
 # pacat_sink = "bluez_output.XX_XX_XX_XX_XX_XX.1"
 # pacat_latency_msec = 80
 # pacat_args = []

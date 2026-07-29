@@ -34,7 +34,7 @@ _shared_model = None
 
 def _load_model_once():
     """`load_silero_vad()` is fast but not free, and the model is
-    immutable + thread-safe — share it across VAD instances."""
+    immutable + thread-safe -- share it across VAD instances."""
     global _shared_model
     if _shared_model is None:
         from silero_vad import load_silero_vad
@@ -119,7 +119,7 @@ class SileroVAD:
         return bytes(self._history[start_off:end_off])
 
     def _trim_history(self, end_abs: int) -> None:
-        # Never let the base move backward — that would corrupt all
+        # Never let the base move backward -- that would corrupt all
         # subsequent absolute-index arithmetic.
         if end_abs <= self._history_base_sample:
             return

@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class ToolSpec(BaseModel):
     # Reject unknown keys on construction. Catches typos in stdio MCP
-    # servers' `tools/list` payloads — a misspelled `require_confirmation`
+    # servers' `tools/list` payloads -- a misspelled `require_confirmation`
     # would otherwise silently default to False and gate nothing.
     model_config = ConfigDict(extra="forbid")
 
@@ -26,12 +26,12 @@ class ToolSpec(BaseModel):
     # Organizer wraps the result in <external>...</external> delimiters
     # before feeding it back to the LLM. Pair with a system-prompt rule
     # that instructions inside <external> are data, not commands.
-    # See ARCHITECTURE.md §7 untrusted-content discipline.
+    # See ARCHITECTURE.md section 7 untrusted-content discipline.
     untrusted: bool = False
     # When True, the Organizer broadcasts a ToolConfirmRequest to the
     # originating room before dispatch and waits for ToolConfirmResponse
     # (granted=True) within the deny timeout. Hard-coded per tool by the
-    # author — not LLM-decided. Per ARCH §7 permission gates: any
+    # author -- not LLM-decided. Per ARCH section 7 permission gates: any
     # side-effecting tool (cart writes, checkout, login, money) MUST be
     # gated. Default False so today's read-only tools (echo, time, etc.)
     # are unchanged.
@@ -46,7 +46,7 @@ class ToolSpec(BaseModel):
     mutating: bool = False
     # Per-tool override for the registry's dispatch timeout. None falls back
     # to the registry default (8s). Selenium-driven scrapers (Dunnes, etc.)
-    # need ~30s for a page load — bake the override into the tool's spec
+    # need ~30s for a page load -- bake the override into the tool's spec
     # rather than threading a timeout argument through every call site.
     timeout_s: float | None = None
 
@@ -116,7 +116,7 @@ class STT(Protocol):
     """Transcribe one utterance of 16 kHz mono int16 PCM into text.
 
     The v1 step 2 contract is one-shot (full utterance in, text out). The
-    streaming-partials variant from ARCHITECTURE §6 is deferred until a
+    streaming-partials variant from ARCHITECTURE section 6 is deferred until a
     backend wants it; wrapping is trivial."""
 
     async def transcribe(self, pcm: bytes) -> str: ...

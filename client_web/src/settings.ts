@@ -10,10 +10,10 @@ export interface Settings {
 
 // No embedded credentials. The bundle is served unauthenticated, so a baked-in
 // client_id/token would ship working credentials to anyone who can load the page
-// (see deploy/ROADMAP.md and ARCHITECTURE.md §9). The operator types their
+// (see deploy/ROADMAP.md and ARCHITECTURE.md section 9). The operator types their
 // identity into the connect form; it persists to localStorage from there. The
 // server validates the token against the OS keyring (scope `glados.client-tokens`,
-// username = client id) at the WS handshake — that is the real trust boundary.
+// username = client id) at the WS handshake -- that is the real trust boundary.
 const DEFAULTS: Settings = {
   clientId: "",
   roomId: "",
@@ -39,6 +39,6 @@ export function saveSettings(s: Settings): void {
   try {
     localStorage.setItem(KEY, JSON.stringify(s));
   } catch {
-    // Quota or disabled storage — silently ignore; in-memory state still works.
+    // Quota or disabled storage -- silently ignore; in-memory state still works.
   }
 }

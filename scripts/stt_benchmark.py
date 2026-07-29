@@ -1,8 +1,8 @@
 """STT benchmark: WER + latency on a manifest of (audio, reference) pairs.
 
 Why: built to baseline `distil-small.en` before the multilingual swap,
-which has since been rolled back (ARCH §13: DEFERRED). The harness is
-now the tool for benchmarking *any* future STT change — model upgrade,
+which has since been rolled back (ARCH section 13: DEFERRED). The harness is
+now the tool for benchmarking *any* future STT change -- model upgrade,
 compute_type tweak, language pinning, multilingual retry. Run twice
 with two manifests for cross-language compare when needed.
 
@@ -30,7 +30,7 @@ Output JSON has shape:
             "rtf_mean": float,  # latency / audio_duration
             "latency_ms_p50": float, "latency_ms_p95": float,
             "total_ref_words": int, "total_errors": int,
-            "corpus_wer": float  # sum(errors) / sum(ref_words) — preferred
+            "corpus_wer": float  # sum(errors) / sum(ref_words) -- preferred
         },
         "clips": [
             {"audio": "...", "wer": float, "latency_ms": float,
@@ -41,11 +41,11 @@ Output JSON has shape:
     }
 
 The `corpus_wer` and `corpus_rtf` are the metrics you should report when
-comparing runs — they're the standard ASR-community shape (totals over
+comparing runs -- they're the standard ASR-community shape (totals over
 totals), robust to varying clip lengths. Per-clip means are also
 emitted for visibility but short clips dominate them.
 
-Latency is wall-clock around `await stt.transcribe(pcm)` — includes the
+Latency is wall-clock around `await stt.transcribe(pcm)` -- includes the
 `asyncio.to_thread` dispatch (microseconds, negligible vs. inference)
 and is the user-perceived number GLaDOS cares about. Don't try to time
 inside the worker thread.
@@ -73,7 +73,7 @@ from glados.core.adapters import STT
 
 def _load_pcm(path: Path) -> tuple[bytes, float]:
     """Return (pcm_bytes, duration_seconds). Raises on unexpected format
-    rather than silently up- or down-sampling — guarantees apples-to-
+    rather than silently up- or down-sampling -- guarantees apples-to-
     apples comparison across runs."""
     with wave.open(str(path), "rb") as wf:
         if wf.getframerate() != 16_000:
@@ -98,10 +98,10 @@ async def benchmark(
 ) -> dict:
     """Run the manifest through `stt`, return the structured result.
 
-    Pure logic — no CLI, no model construction. The CLI wraps this so
+    Pure logic -- no CLI, no model construction. The CLI wraps this so
     the harness itself is testable with a FakeSTT.
 
-    `warmup` runs the first N clips through without recording — used
+    `warmup` runs the first N clips through without recording -- used
     by the CLI to absorb the model's first-inference graph-compile so
     it doesn't blow up p95.
     """
@@ -168,7 +168,7 @@ def _summarise(clips: list[dict]) -> dict:
         "rtf_mean": statistics.fmean(rtfs) if rtfs else 0.0,
         "total_ref_words": total_words,
         "total_errors": total_errors,
-        # Totals-over-totals — robust to varying clip lengths; the
+        # Totals-over-totals -- robust to varying clip lengths; the
         # numbers to report when comparing runs.
         "corpus_wer": (total_errors / total_words) if total_words else 0.0,
         "corpus_rtf": (total_latency / total_audio) if total_audio else 0.0,

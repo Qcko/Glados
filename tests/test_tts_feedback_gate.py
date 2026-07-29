@@ -1,12 +1,12 @@
 """TTS feedback gate (server-side mic-mute layer).
 
-While a room's speaker is mid-TTS — or within `tts_cooldown_s` of
-finishing — non-barge-in audio transcripts from that room are dropped
-to prevent the speaker→mic loop from self-triggering a new turn. Barge-
+While a room's speaker is mid-TTS -- or within `tts_cooldown_s` of
+finishing -- non-barge-in audio transcripts from that room are dropped
+to prevent the speaker->mic loop from self-triggering a new turn. Barge-
 in regex still passes through so voice-driven interrupt works.
 
 Pairs with the browser's `echoCancellation: true` (mic.ts) as a second
-layer — needed for external speakers and Pi clients without
+layer -- needed for external speakers and Pi clients without
 `webrtc-audio-processing`.
 """
 
@@ -84,8 +84,8 @@ _DESK_SPK = ClientBinding(
 @pytest.mark.asyncio
 async def test_gate_drops_non_barge_in_audio_while_speaking(tmp_path: Path) -> None:
     """While `_speaking_rooms` is set for a room, an arbitrary
-    transcript from that room must NOT open a new turn — it's almost
-    certainly the speaker→mic loop transcribing GLaDOS's own voice."""
+    transcript from that room must NOT open a new turn -- it's almost
+    certainly the speaker->mic loop transcribing GLaDOS's own voice."""
     tts = _GatedTTS()
     async with _make_organizer([_DESK], tmp_path, tts=tts) as (org, sink):
         # Fire a turn so the room goes into TTS.
@@ -98,7 +98,7 @@ async def test_gate_drops_non_barge_in_audio_while_speaking(tmp_path: Path) -> N
         # The TTS audio "loops back" as a transcript. Without the gate
         # this would open a new turn.
         await org.handle_audio_text("desk-ui", "echo: hello there")
-        # No new welcome, no new anything — the gate dropped it.
+        # No new welcome, no new anything -- the gate dropped it.
         assert len(sink) == before, (
             f"gate must drop the looped-back transcript, sink grew by "
             f"{len(sink) - before}: {sink[before:]}"
@@ -136,7 +136,7 @@ async def test_gate_passes_barge_in_while_speaking(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_gate_drops_audio_after_send_while_draining(tmp_path: Path) -> None:
     """After the server finishes SENDING, the room stays gated while the reply
-    is (estimated to be) still playing on the speaker — this is the fix for the
+    is (estimated to be) still playing on the speaker -- this is the fix for the
     feedback loop, where a long reply outlasted the old fixed cooldown."""
     async with _make_organizer(
         [_DESK, _DESK_SPK], tmp_path, tts=FakeTTS(), tts_cooldown_s=0.500,
@@ -158,10 +158,10 @@ async def test_gate_drops_audio_after_send_while_draining(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_gate_releases_after_cooldown(tmp_path: Path) -> None:
     """Once the cooldown expires, the next utterance is processed
-    normally — the gate must be transparent during silence."""
+    normally -- the gate must be transparent during silence."""
     async with _make_organizer(
         [_DESK, _DESK_SPK], tmp_path,
-        tts=FakeTTS(samples_per_chunk=1),  # ~0s audio → cooldown dominates
+        tts=FakeTTS(samples_per_chunk=1),  # ~0s audio -> cooldown dominates
         tts_cooldown_s=0.050, gate_drain_margin_s=0.0,
     ) as (org, sink):
         await org.handle_user_text("desk-ui", "hello there")
@@ -186,7 +186,7 @@ async def test_gate_is_per_room(tmp_path: Path) -> None:
     The gate is keyed by room, not global.
 
     Tested at the predicate level (`_room_mic_gated`) rather than by
-    racing two real turns — the shared `_GatedTTS` would block both
+    racing two real turns -- the shared `_GatedTTS` would block both
     turns on the same release event, and `flush()` would deadlock."""
     tts = _GatedTTS()
     async with _make_organizer(
@@ -204,11 +204,11 @@ async def test_gate_is_per_room(tmp_path: Path) -> None:
         # An audio transcript arriving from the desk room while kitchen
         # is mid-TTS must reach `handle_user_text` (i.e. produce an
         # enqueue), not be dropped. We don't drain the queue here because
-        # the desk turn would also block on the shared TTS — observing
+        # the desk turn would also block on the shared TTS -- observing
         # `queue_depth("desk") == 1` proves the gate let it through.
         await org.handle_audio_text("desk-ui", "what time is it")
         assert org._queues.queue_depth("desk") == 1, (
-            "desk audio must NOT be gated by kitchen's TTS — turn should "
+            "desk audio must NOT be gated by kitchen's TTS -- turn should "
             "be enqueued"
         )
 
@@ -221,7 +221,7 @@ async def test_gate_is_per_room(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_gate_clears_on_cancellation(tmp_path: Path) -> None:
     """A cancelled turn was flushed on the client, so it must NOT leave the room
-    gated for the full unplayed duration — that would deafen the mic to the
+    gated for the full unplayed duration -- that would deafen the mic to the
     user's follow-up. With a speaker present, cancel arms only the short
     cooldown; with cooldown=0 the gate is off immediately after cancel."""
 
@@ -249,13 +249,13 @@ async def test_gate_clears_on_cancellation(tmp_path: Path) -> None:
         # Cancel must NOT enter the long DRAINING window (the client flushed).
         # With cooldown=0 the gate is fully off right after cancel.
         assert not org._room_mic_gated("desk"), (
-            "cancel must not leave a long gate; cooldown=0 → off immediately"
+            "cancel must not leave a long gate; cooldown=0 -> off immediately"
         )
 
 
 @pytest.mark.asyncio
 async def test_late_arm_does_not_clobber_successor_turn_gate(tmp_path: Path) -> None:
-    """A cancelled turn's _speak finally runs on a later tick — by then the next
+    """A cancelled turn's _speak finally runs on a later tick -- by then the next
     turn may already own the gate in SENDING. The late arm must NOT overwrite
     it (which would un-gate the room mid-playback of the new turn)."""
     async with _make_organizer([_DESK, _DESK_SPK], tmp_path, tts=FakeTTS()) as (org, _):
@@ -274,7 +274,7 @@ async def test_late_arm_does_not_clobber_successor_turn_gate(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_no_speaker_opens_gate_immediately_after_send(tmp_path: Path) -> None:
-    """A room with no connected speaker played nothing — gating its mic for the
+    """A room with no connected speaker played nothing -- gating its mic for the
     reply duration would needlessly deafen it. The gate opens at send-end."""
     async with _make_organizer(
         [_DESK], tmp_path, tts=FakeTTS(), tts_cooldown_s=0.500, gate_drain_margin_s=5.0
@@ -288,11 +288,11 @@ async def test_no_speaker_opens_gate_immediately_after_send(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_playback_done_shortens_gate(tmp_path: Path) -> None:
     """A speaker reporting playback drained collapses the long DRAINING estimate
-    to the short cooldown — the early-release the signal exists for."""
+    to the short cooldown -- the early-release the signal exists for."""
     async with _make_organizer(
         [_DESK, _DESK_SPK], tmp_path,
-        tts=FakeTTS(samples_per_chunk=1),  # ~0s audio → earliest_release ≈ now
-        tts_cooldown_s=0.0, gate_drain_margin_s=10.0,  # huge estimate → stays gated
+        tts=FakeTTS(samples_per_chunk=1),  # ~0s audio -> earliest_release ~ now
+        tts_cooldown_s=0.0, gate_drain_margin_s=10.0,  # huge estimate -> stays gated
     ) as (org, sink):
         await org.handle_user_text("desk-ui", "hello there")
         await org.flush()
@@ -306,7 +306,7 @@ async def test_playback_done_shortens_gate(tmp_path: Path) -> None:
         # ...a stale session is ignored...
         await org.handle_playback_done("desk-spk", "not-the-session")
         assert org._tts_gate["desk"].phase == "draining"
-        # ...the right speaker + session collapses to cooldown (0 → open).
+        # ...the right speaker + session collapses to cooldown (0 -> open).
         await org.handle_playback_done("desk-spk", sid)
         assert not org._room_mic_gated("desk")
 
@@ -314,7 +314,7 @@ async def test_playback_done_shortens_gate(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_playback_done_implausibly_early_is_ignored(tmp_path: Path) -> None:
     """A PlaybackDone arriving far before a long reply could have finished is a
-    buggy/forged client trying to re-open the gate mid-playback — ignore it."""
+    buggy/forged client trying to re-open the gate mid-playback -- ignore it."""
     async with _make_organizer(
         [_DESK, _DESK_SPK], tmp_path,
         tts=FakeTTS(sample_rate=22_050, samples_per_chunk=22_050),  # ~1s of audio
@@ -325,7 +325,7 @@ async def test_playback_done_implausibly_early_is_ignored(tmp_path: Path) -> Non
         sid = next(m for _, m in sink if m["type"] == "welcome")["session_id"]
         assert org._tts_gate["desk"].phase == "draining"
 
-        # Right after send, ~all of the 1s estimate remains → too early.
+        # Right after send, ~all of the 1s estimate remains -> too early.
         await org.handle_playback_done("desk-spk", sid)
         assert org._tts_gate["desk"].phase == "draining", (
             "an implausibly early PlaybackDone must not collapse the gate"
@@ -336,7 +336,7 @@ async def test_playback_done_implausibly_early_is_ignored(tmp_path: Path) -> Non
 async def test_gate_judged_against_capture_time_not_arrival(tmp_path: Path) -> None:
     """The bug this fix exists for: STT takes ~2s, so a transcript of GLaDOS's
     own voice arrives AFTER the gate (sized to playback) has opened. A
-    `now`-based check would admit it → feedback loop. The decision must be made
+    `now`-based check would admit it -> feedback loop. The decision must be made
     against the audio's *capture* time, which fell inside the closed window."""
     async with _make_organizer(
         [_DESK, _DESK_SPK], tmp_path, tts=FakeTTS(),
@@ -377,7 +377,7 @@ async def test_gate_judged_against_capture_time_not_arrival(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_out_of_order_transcripts_judged_independently(tmp_path: Path) -> None:
     """Two background Whisper tasks can finish out of order. Each transcript
-    must be judged against its OWN capture time, not arrival order — the
+    must be judged against its OWN capture time, not arrival order -- the
     during-playback echo dropped, the post-gate utterance admitted, regardless
     of which `handle_audio_text` call lands first."""
     async with _make_organizer(
@@ -410,11 +410,11 @@ async def test_out_of_order_transcripts_judged_independently(tmp_path: Path) -> 
 @pytest.mark.asyncio
 async def test_stale_playback_done_cannot_reraise_horizon(tmp_path: Path) -> None:
     """A duplicate/late PlaybackDone arriving after the horizon has already
-    passed must NOT push `closed_until` back into the future — that would
+    passed must NOT push `closed_until` back into the future -- that would
     deafen the mic to a fresh user utterance. Early-release only ever lowers."""
     async with _make_organizer(
         [_DESK, _DESK_SPK], tmp_path,
-        tts=FakeTTS(samples_per_chunk=1),  # ~0s audio → earliest_release ≈ now
+        tts=FakeTTS(samples_per_chunk=1),  # ~0s audio -> earliest_release ~ now
         tts_cooldown_s=0.050, gate_drain_margin_s=0.0,
     ) as (org, sink):
         await org.handle_user_text("desk-ui", "hello there")

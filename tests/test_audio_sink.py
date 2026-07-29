@@ -62,7 +62,7 @@ def test_short_frame_rejected(tmp_path: Path) -> None:
 
 def test_odd_pcm_length_rejected(tmp_path: Path) -> None:
     sink = AudioSink(tmp_path, "desk-ui")
-    bad = struct.pack(">I", 0) + b"\x01\x02\x03"  # 3 bytes of "PCM" — not int16
+    bad = struct.pack(">I", 0) + b"\x01\x02\x03"  # 3 bytes of "PCM" -- not int16
     with pytest.raises(FrameTooShort):
         sink.write(bad)
 
@@ -95,7 +95,7 @@ def test_seq_restart_not_counted_as_drop(tmp_path: Path) -> None:
     sink = AudioSink(tmp_path, "desk-ui")
     for seq in (0, 1, 2, 3):
         sink.write(_frame(seq, [0]))
-    # mic toggled off then on — client restarts seq at 0
+    # mic toggled off then on -- client restarts seq at 0
     for seq in (0, 1, 2):
         sink.write(_frame(seq, [0]))
     assert sink.dropped == 0

@@ -139,7 +139,7 @@ async def test_audio_text_cancels_inflight_turn(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_audio_text_without_active_session_falls_through(tmp_path: Path) -> None:
     """A barge-in utterance with no in-flight turn AND empty queue should
-    NOT silently drop — it falls through to a normal turn (Whisper false
+    NOT silently drop -- it falls through to a normal turn (Whisper false
     positives are real; better to answer the user than swallow the input)."""
     from glados.brain.llm.fake import FakeLLM
 
@@ -172,7 +172,7 @@ async def test_non_barge_in_does_not_cancel_active_session(tmp_path: Path) -> No
 
         # Second utterance is a normal question. Must NOT cancel; instead
         # queues behind the active turn. The queued turn never runs because
-        # the first is still hanging on SlowLLM — that's fine for this assertion.
+        # the first is still hanging on SlowLLM -- that's fine for this assertion.
         await org.handle_audio_text("desk-ui", "what time is it")
         await asyncio.sleep(0.05)
         assert not any(m["type"] == "cancelled" for _, m in sink)
@@ -225,7 +225,7 @@ async def test_barge_in_only_cancels_same_room(tmp_path: Path) -> None:
         await llm.entered.wait()
         sid = next(m for _, m in sink if m["type"] == "welcome")["session_id"]
 
-        # desk2 speaker says "stop" — should NOT cancel desk's session.
+        # desk2 speaker says "stop" -- should NOT cancel desk's session.
         # No turn or queued items in desk2, so it falls through to a fresh
         # turn (also hanging on SlowLLM).
         await org.handle_audio_text("desk2-ui", "stop")

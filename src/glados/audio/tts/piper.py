@@ -1,8 +1,8 @@
 """PiperTTS: piper-tts behind the `core.adapters.TTS` Protocol.
 
 Construction is cheap: `__init__` only records the voice name and
-directory. The blocking work — voice file download (~110 MB on first
-run for `en_GB-cori-high`) and onnx model load — is deferred to the
+directory. The blocking work -- voice file download (~110 MB on first
+run for `en_GB-cori-high`) and onnx model load -- is deferred to the
 first `synthesize()` call and runs in worker threads so the asyncio
 loop is never blocked. The server's lifespan already calls
 `_warmup(stt, tts)` in a background task, which triggers that first
@@ -13,7 +13,7 @@ disk as long as `synthesize()` is never called.
 Voice files are downloaded from the rhasspy/piper-voices HuggingFace
 repo on first use into `voices_dir` (default
 `$GLADOS_PIPER_VOICES_DIR` or `~/.cache/piper/voices`) if not already
-present. Single-speaker voices only for v1 step 3 —
+present. Single-speaker voices only for v1 step 3 --
 multi-speaker (`libritts_r` etc.) would need a `speaker_id` arg.
 
 License heads-up: piper-tts 1.4.x is GPL-3 (OHF-Voice/piper1-gpl).
@@ -54,7 +54,7 @@ def _compile_pronunciations(
     rewritten at most once, so a spoken form that happens to contain another
     written key is never re-rewritten (no cascade). Longest keys first so an
     overlapping written form prefers the longer match. Returns None when empty.
-    Keys whose ends aren't word characters won't match (`\\b` boundary) — fine
+    Keys whose ends aren't word characters won't match (`\\b` boundary) -- fine
     for the proper nouns / acronyms this is for."""
     if not lexicon:
         return None
@@ -89,13 +89,13 @@ class PiperTTS:
         self._voices_dir = voices_dir
         self._pronunciations = _compile_pronunciations(pronunciations or {})
         # `_voice` is the loaded PiperVoice (Any to avoid importing piper
-        # at module load — see _ensure_loaded).
+        # at module load -- see _ensure_loaded).
         self._voice: Optional["_PiperVoice"] = None
         # piper's onnxruntime session isn't documented as concurrent-safe;
         # serialise inference to be conservative. Synthesis runs in a worker
         # thread so the asyncio loop is free regardless.
         self._infer_lock = threading.Lock()
-        # Async lock guards the lazy load — constructed lazily inside
+        # Async lock guards the lazy load -- constructed lazily inside
         # `_ensure_loaded` so it binds to whichever event loop first
         # calls `synthesize()`. Constructing in `__init__` would bind to
         # whatever loop was running at construct time (or none); a
@@ -117,13 +117,13 @@ class PiperTTS:
 
     async def _ensure_loaded(self) -> None:
         """Lazy-load the voice. First call may take ~30 s on a cold
-        machine (download) + ~1–2 s (onnx load); both run in threads so
+        machine (download) + ~1-2 s (onnx load); both run in threads so
         the asyncio loop stays responsive. Subsequent calls are no-ops.
         Concurrent first calls serialise on `_load_lock` and the second
         caller short-circuits via the double-check.
 
         Retry policy: if download or load fails, the exception
-        propagates and `_voice` stays None — the next `synthesize` will
+        propagates and `_voice` stays None -- the next `synthesize` will
         retry. v1 acceptable; consider an exponential-backoff guard if
         the network is flaky enough that retries pile up."""
         if self._voice is not None:
@@ -132,7 +132,7 @@ class PiperTTS:
             # First-arrival lazy lock construction. asyncio is
             # single-threaded within a loop, so two concurrent first-
             # synth calls can't both observe `is None` and both create
-            # — the second sees the assignment from the first because
+            # -- the second sees the assignment from the first because
             # there's no `await` between the check and the create.
             self._load_lock = asyncio.Lock()
         async with self._load_lock:
@@ -142,7 +142,7 @@ class PiperTTS:
             # ~200 ms on import. Keeping it out of `__init__` means a
             # PiperTTS instance that's never synthesised costs nothing.
             # The import itself runs on the event-loop thread (not in a
-            # to_thread hop) — cheap and only happens once because of
+            # to_thread hop) -- cheap and only happens once because of
             # the import-cache.
             from piper import PiperVoice
 

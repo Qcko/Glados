@@ -105,7 +105,7 @@ async def test_stop_if_started_kills_both_images(monkeypatch):
 @pytest.mark.asyncio
 async def test_probe_returns_false_on_connect_error(monkeypatch):
     lc = OllamaLifecycle("http://127.0.0.1:1")  # nothing listens here
-    # Real _probe — should hit a connect error fast and return False.
+    # Real _probe -- should hit a connect error fast and return False.
     assert await lc._probe() is False
 
 

@@ -1,11 +1,11 @@
-"""AudioPipeline: per-connection orchestration of VAD → STT → Organizer.
+"""AudioPipeline: per-connection orchestration of VAD -> STT -> Organizer.
 
 The server hands every inbound binary audio frame (`<BE u32 seq><PCM16-LE>`)
 to `feed_frame`. The pipeline parses it once, optionally tees it to a
 WAV trace sink for offline replay, and feeds the PCM body through the
 VAD. When the VAD emits an utterance end, transcription runs in a
 background task so the WS receive loop is never blocked by a multi-
-hundred-millisecond Whisper call — the user can start the next utterance
+hundred-millisecond Whisper call -- the user can start the next utterance
 while the previous one is still being transcribed.
 
 `close()` drains outstanding transcriptions before tearing down the sink
@@ -61,7 +61,7 @@ class AudioPipeline:
                 self._utterance_start_at = asyncio.get_running_loop().time()
             elif isinstance(event, VadEnd):
                 # Pair with the VadStart stamp (fall back to now for a VadEnd
-                # with no recorded start — a force-cut or a reset mid-utterance).
+                # with no recorded start -- a force-cut or a reset mid-utterance).
                 captured_at = (
                     self._utterance_start_at
                     if self._utterance_start_at is not None
@@ -72,7 +72,7 @@ class AudioPipeline:
 
     async def drain(self) -> None:
         """Wait for transcriptions spawned before this call. Tasks spawned
-        by `on_utterance` (e.g. Organizer LLM work) are not tracked here —
+        by `on_utterance` (e.g. Organizer LLM work) are not tracked here --
         they're the Organizer's concern."""
         pending = list(self._tasks)
         if not pending:

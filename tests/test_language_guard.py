@@ -1,3 +1,4 @@
+# rule-guard:allow ascii-source - Thai text is the fixture the language guard is asserted against - required i18n content.
 """Unit tests for the deterministic reply-language drift detector + the
 repair-prompt builder (core/language_guard). No model involved."""
 

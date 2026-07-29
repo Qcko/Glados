@@ -1,4 +1,4 @@
-"""Deterministic per-turn tool-scoping (ARCH §13 tiered tool-scoping, v1).
+"""Deterministic per-turn tool-scoping (ARCH section 13 tiered tool-scoping, v1).
 
 The local 14B model degenerates when shown ~30 flat tools -- it hallucinates
 `Call<PascalCase>` pseudo-tool-calls instead of real ones (the
@@ -18,7 +18,7 @@ Scoping is opt-in per server to stay back-compatible:
 - a server with NO keywords and not core is UNSCOPED: always in scope (so an
   un-annotated server behaves exactly as before this feature).
 
-Scope is computed once at turn start, preserving §7's per-turn frozen registry.
+Scope is computed once at turn start, preserving section 7's per-turn frozen registry.
 """
 
 from __future__ import annotations

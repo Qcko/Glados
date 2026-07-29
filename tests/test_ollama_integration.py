@@ -1,6 +1,6 @@
 """Integration test against a live Ollama instance.
 
-Skipped when Ollama isn't reachable or the model isn't pulled — so this stays
+Skipped when Ollama isn't reachable or the model isn't pulled -- so this stays
 green in CI while still being runnable locally with one command.
 """
 

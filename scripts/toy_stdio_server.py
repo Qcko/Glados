@@ -20,7 +20,7 @@ Protocol (line-delimited JSON-RPC 2.0):
         "isError":false}}
 
 Structured tool data rides as JSON-encoded strings inside text content
-blocks — the MCP wire schema has no first-class object response.
+blocks -- the MCP wire schema has no first-class object response.
 GLaDOS's StdioServer parses those text blocks back into dicts before
 handing them to the LLM.
 

@@ -14,34 +14,34 @@
 # example of the wire shape.
 #
 # Schema:
-#   id              — server identifier; becomes the `server` prefix on
+#   id              -- server identifier; becomes the `server` prefix on
 #                     every tool's qualified name. Real MCP doesn't put
 #                     the server name on the wire, so this is the only
 #                     place it's defined.
-#   command         — executable to launch.
-#   args            — list of command-line args.
-#   env             — env-var dict layered on top of the parent process env.
-#   autostart       — spawn on app startup. False = present but inert.
-#   lazy            — spawn at startup only to list tools (so the LLM sees
+#   command         -- executable to launch.
+#   args            -- list of command-line args.
+#   env             -- env-var dict layered on top of the parent process env.
+#   autostart       -- spawn on app startup. False = present but inert.
+#   lazy            -- spawn at startup only to list tools (so the LLM sees
 #                     them), then put the child dormant. The first tool
 #                     dispatch wakes it; after `idle_timeout_s` of no calls the
-#                     reaper sleeps it again (ARCH §13). Default false keeps the
+#                     reaper sleeps it again (ARCH section 13). Default false keeps the
 #                     child resident for the whole session. Use for heavy
 #                     servers (Dunnes Selenium/Chrome) that idle most sessions.
 #                     Ignored when autostart=false.
-#   idle_timeout_s  — seconds of no dispatch before a lazy server is reaped
+#   idle_timeout_s  -- seconds of no dispatch before a lazy server is reaped
 #                     back to dormant. Default 300. Ignored unless lazy=true.
-#   trusted         — first-party origin gate for server-shipped memory
-#                     (ARCH §14). When true, GLaDOS reads the server's
+#   trusted         -- first-party origin gate for server-shipped memory
+#                     (ARCH section 14). When true, GLaDOS reads the server's
 #                     `memory://lessons` resource at connect and, IF the blob
 #                     clears the LocalGuard hash-approval gate, injects it
 #                     (guard-wrapped) into the system prompt. Default false:
 #                     the lessons resource is never read. Origin trust is not
-#                     content trust — `trusted = true` only makes the blob
+#                     content trust -- `trusted = true` only makes the blob
 #                     eligible; it still has to match a human-approved
 #                     baseline (`localguard memory approve`) or nothing is
 #                     injected (fail closed).
-#   untrusted       — server-level UNTRUSTED FLOOR (ARCH §7). True means every
+#   untrusted       -- server-level UNTRUSTED FLOOR (ARCH section 7). True means every
 #                     tool this server exposes returns content from outside the
 #                     local trust boundary, so the Organizer wraps every result
 #                     in <external> and the system-prompt rule makes it data,
@@ -52,21 +52,21 @@
 #                     grows a tool it is treated as TRUSTED until somebody
 #                     remembers to list it, and remembering is not a security
 #                     control. The floor also covers tools that do not exist
-#                     yet. It is a FLOOR, not a default — an overlay may raise
+#                     yet. It is a FLOOR, not a default -- an overlay may raise
 #                     one tool to untrusted, but can never lower one below it.
-#   [server.tool_overlays.<ToolName>] — per-tool overlay applied after
+#   [server.tool_overlays.<ToolName>] -- per-tool overlay applied after
 #                     `tools/list`. GLaDOS-only flags don't ride the wire
 #                     (third-party servers don't know about them), so we
 #                     carry them here. Fields: untrusted, requires_confirmation,
-#                     mutating (side-effecting but un-gated — lets the
+#                     mutating (side-effecting but un-gated -- lets the
 #                     turn-outcome goal-check see an action landed; gated tools
 #                     count as mutating automatically), timeout_s (overrides
-#                     the 8s dispatch default — needed for slow Selenium loads).
+#                     the 8s dispatch default -- needed for slow Selenium loads).
 #
 # Crash semantics: a subprocess that dies is auto-restarted with bounded
 # attempts within a rolling window (default 3 / 60s, exponential backoff).
 # Once the budget is spent the circuit opens and tool calls return a clean
-# error rather than respawning forever. See ARCH §7.
+# error rather than respawning forever. See ARCH section 7.
 
 [[server]]
 id = "toy_stdio"
@@ -76,7 +76,7 @@ autostart = true
 
 # Gated by the v2 permission framework so the demo has a real confirm-prompt
 # path to exercise without inventing a side-effecting tool. Rolling dice is
-# not actually destructive — this is scaffolding.
+# not actually destructive -- this is scaffolding.
 [server.tool_overlays.roll_dice]
 requires_confirmation = true
 
@@ -86,7 +86,7 @@ requires_confirmation = true
 # Unofficial MCP server at <path-to>/DunnesStoresMCP that drives
 # dunnesstoresgrocery.com via a persistent Chrome profile. Login is
 # always manual (BootstrapLogin opens visible Chrome; the server never
-# sees credentials). All tool results are live scrapes — every tool is
+# sees credentials). All tool results are live scrapes -- every tool is
 # untrusted. Cart writes + delivery-slot commitment are gated because
 # Selenium = real money once the user advances to payment manually.
 #
@@ -118,7 +118,7 @@ env.DUNNES_EDGE_PROFILE = "<your-secrets-dir>/dunnes-edge-profile"
 # it also covers any tool a future build of the server adds.
 untrusted = true
 
-# NOTE: tool keys here are snake_case — the .NET MCP SDK auto-converts
+# NOTE: tool keys here are snake_case -- the .NET MCP SDK auto-converts
 # C# PascalCase method names (`AddToCart`) to snake_case (`add_to_cart`)
 # on the wire. Confirmed against /healthz on first boot. Overlay keys
 # match the `tool.name` returned by `tools/list`, not the C# source.
@@ -130,7 +130,7 @@ untrusted = true
 timeout_s = 35.0
 
 [server.tool_overlays.bootstrap_login]
-# Manual login — user types credentials in a visible Chrome window. Can
+# Manual login -- user types credentials in a visible Chrome window. Can
 # easily take a minute or three. Gated because (a) the LLM should never
 # fire it on its own; (b) the long timeout would otherwise starve the
 # room worker if it fires unattended.
@@ -154,7 +154,7 @@ timeout_s = 35.0
 # Cart writes (add_to_cart, set_cart_quantity, remove_from_cart) and the
 # delivery-slot commit are intentionally NOT gated by requires_confirmation.
 # The hard safety boundary is the manual payment step in the visible Edge
-# window — Dunnes MCP never submits payment, the user reviews the cart and
+# window -- Dunnes MCP never submits payment, the user reviews the cart and
 # pays themselves. Inserting a per-call confirmation modal on top of that
 # would break the conversation flow ("add milk" -> "may I add milk?" ->
 # "yes" makes no sense as voice UX) without adding real money safety.
@@ -172,7 +172,7 @@ timeout_s = 35.0
 mutating = true
 timeout_s = 35.0
 
-# Volume-aware add ("4 litres of milk") — composes the target across pack
+# Volume-aware add ("4 litres of milk") -- composes the target across pack
 # sizes and writes them to the cart, so it is mutating like the other adds.
 # Without the flag a successful compose looks like a no-op to the goal-check
 # and the turn is wrongly classed `failed`, which then re-fires the add on
@@ -202,7 +202,7 @@ timeout_s = 35.0
 
 # Name-resolving cart mutators (the model's preferred path: "set milk to 2",
 # "take one off", "remove the bread"). Each resolves a free-text name to a
-# cart line and writes it, so all carry mutating = true — same reason as the
+# cart line and writes it, so all carry mutating = true -- same reason as the
 # id-based writers above: a successful change must register as a mutation so
 # the turn is classed `done` (not `failed`) and the escalation loopback does
 # not re-fire it.
@@ -226,14 +226,14 @@ timeout_s = 35.0
 [server.tool_overlays.set_delivery_slot]
 mutating = true
 # Last automated step before payment; ungated for the same reason as the
-# cart writes — manual payment is the safety boundary.
+# cart writes -- manual payment is the safety boundary.
 timeout_s = 35.0
 
-# --- Local catalog (no network — cached JSON) --------------------------
+# --- Local catalog (no network -- cached JSON) --------------------------
 # The catalog tools (catalog_search, get_catalog_product, list_catalog,
 # catalog_path, get_price_history, get_price_stats) need no overlays at all:
-# the data was originally scraped, so it is untrusted — covered by the server
-# floor above — and with no Selenium the 8s dispatch default is fine.
+# the data was originally scraped, so it is untrusted -- covered by the server
+# floor above -- and with no Selenium the 8s dispatch default is fine.
 
 
 

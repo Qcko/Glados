@@ -64,8 +64,8 @@ def _organizer(llm, tmp: Path, bindings=None):
 @pytest.mark.asyncio
 async def test_warm_up_llm_exercises_tool_and_freeform_paths(tmp_path: Path) -> None:
     """The boot warm-up fires TWO inferences: one with the FULL registered tool
-    list (primes tool-selection — the cold-model fabrication bug) and one
-    tool-free (primes free-form generation — the cold-model language-drift bug),
+    list (primes tool-selection -- the cold-model fabrication bug) and one
+    tool-free (primes free-form generation -- the cold-model language-drift bug),
     then flips the readiness gate."""
 
     class RecordingLLM:
@@ -97,7 +97,7 @@ async def test_warm_up_llm_exercises_tool_and_freeform_paths(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_warm_up_llm_sets_gate_even_on_failure(tmp_path: Path, caplog) -> None:
-    """A warm-up that blows up must still release the gate — otherwise every
+    """A warm-up that blows up must still release the gate -- otherwise every
     real turn would deadlock behind a model that never warmed."""
 
     class BrokenLLM:
@@ -155,7 +155,7 @@ async def test_warmup_swallows_stt_failure(caplog) -> None:
     with caplog.at_level(logging.ERROR, logger="glados.core.server"):
         await _warmup(BrokenSTT(), tts)
     assert "STT warmup failed" in caplog.text
-    # TTS must still be exercised even when STT blows up — the two
+    # TTS must still be exercised even when STT blows up -- the two
     # backends are independent and one shouldn't gate the other.
     assert tts.calls == [_WARMUP_TEXT]
 

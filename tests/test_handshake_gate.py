@@ -1,6 +1,6 @@
 """Unit tests for the handshake admission gate (caps + per-IP lockout).
 
-Pure-sync tests against an injectable clock — no sockets, no sleeps. The
+Pure-sync tests against an injectable clock -- no sockets, no sleeps. The
 wire-level behaviour (error codes, close, recovery through a real WS) is in
 test_server_handshake.py.
 """

@@ -116,7 +116,7 @@ async def test_pipeline_invokes_on_utterance_at_vad_boundary(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_pipeline_anchors_capture_at_utterance_start(tmp_path: Path) -> None:
-    """`captured_at` must be stamped at VadStart, not VadEnd — anchoring on the
+    """`captured_at` must be stamped at VadStart, not VadEnd -- anchoring on the
     start is what lets the feedback gate catch a long TTS bleed despite the VAD
     silence-hangover. A VadStart in one frame, then a delay, then the VadEnd:
     the timestamp handed to on_utterance must reflect the START, not the later
@@ -248,7 +248,7 @@ async def test_pipeline_close_drains_in_flight(tmp_path: Path) -> None:
 def http_client():
     """Module-scoped TestClient that triggers app lifespan on enter/exit.
     Shutdown calls `_organizer.close()` which clears per-room queues and
-    workers — without that, workers from this module's event loop persist
+    workers -- without that, workers from this module's event loop persist
     and the next module's TestClient sees cross-loop queue state, which
     deadlocks on enqueue."""
     os.environ["GLADOS_CONFIG_DIR"] = str(Path(__file__).parent.parent / "configs")

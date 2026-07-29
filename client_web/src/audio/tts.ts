@@ -97,6 +97,6 @@ function decodePcm16(b64: string): Int16Array {
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  // PCM16-LE — Int16Array on a little-endian view of the bytes.
+  // PCM16-LE -- Int16Array on a little-endian view of the bytes.
   return new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 1);
 }

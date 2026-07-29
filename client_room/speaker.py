@@ -3,31 +3,31 @@
 Lifecycle of one session:
   1. open the socket, send `hello` (role="speaker") as the first message; a good
      handshake is silent (no `welcome` ack). The speaker never uploads audio; it
-     sends only one advisory control frame — `playback_done` (see below).
+     sends only one advisory control frame -- `playback_done` (see below).
   2. a recv loop dispatches server JSON: `tts_chunk` (base64 PCM16-LE + seq +
      sample_rate) is decoded and written into a `JitterBuffer`; the output
      device's real-time callback pulls from that buffer to feed the speaker.
   3. `cancelled` (barge-in) flushes the buffer and suppresses playback until the
      next `welcome`; `done` lets the buffer drain naturally (no flush). An
-     `error` frame is terminal (bad token / binding) — stop, don't reconnect.
+     `error` frame is terminal (bad token / binding) -- stop, don't reconnect.
 
-Playback-done signal: on `done` the speaker starts a drain watch — once the
+Playback-done signal: on `done` the speaker starts a drain watch -- once the
 `JitterBuffer` has emptied AND the device's `tail_s` (hardware/sink residue) has
 elapsed, it sends `playback_done{session_id}` so the server can early-release its
 mic feedback gate from the duration estimate to the short tail cooldown. It is
 purely advisory: a dropped/late signal just falls back to the server's estimate
-(see Organizer.handle_playback_done). The signal must never be EARLY — that would
-reopen the mic while TTS is still audible — so the tail is deliberately generous
+(see Organizer.handle_playback_done). The signal must never be EARLY -- that would
+reopen the mic while TTS is still audible -- so the tail is deliberately generous
 and the watch is cancelled the instant a `cancelled`/`welcome`/teardown
 invalidates the turn it was started for.
 
-Turn state machine (extends client_web/src/audio/tts.ts — the browser does not
+Turn state machine (extends client_web/src/audio/tts.ts -- the browser does not
 yet send `playback_done`; see the signal note above):
-  welcome   → clear suppression (allow playback for the new turn)
-  tts_chunk → if not suppressed: decode + enqueue (build/rebuild the device on
+  welcome   -> clear suppression (allow playback for the new turn)
+  tts_chunk -> if not suppressed: decode + enqueue (build/rebuild the device on
               the first chunk or a sample-rate change)
-  cancelled → flush + suppress + cancel the drain watch
-  done      → no flush (the tail drains); start the drain watch
+  cancelled -> flush + suppress + cancel the drain watch
+  done      -> no flush (the tail drains); start the drain watch
 
 Why "suppress until welcome" is race-free without a turn id on the wire: the
 server streams over a single ordered socket and processes a room's turns
@@ -60,7 +60,7 @@ _BYTES_PER_SAMPLE = 2  # PCM16-LE mono
 
 # How often the drain watch re-checks the JitterBuffer for empty. Coarse on
 # purpose: the signal only shortens the gate, so a few tens of ms of detection
-# lag is invisible — and a tight loop would burn a core polling a phone.
+# lag is invisible -- and a tight loop would burn a core polling a phone.
 _DRAIN_POLL_S = 0.03
 
 
@@ -106,16 +106,16 @@ class SpeakerClient(ReconnectingClient):
         self._last_seq: int | None = None
         # Generation token: bumped on every (re)build and on teardown. Each
         # device's on_close captures the gen it was started with and is ignored
-        # unless it still matches — so an intentional stop (rate-change rebuild,
+        # unless it still matches -- so an intentional stop (rate-change rebuild,
         # teardown) can never be mistaken for device death, with NO dependence on
         # host-specific finished_callback timing.
         self._device_gen = 0
         self._wake_closed: Callable[[], None] = lambda: None
-        # Live socket for this session — the drain watch reads it (as a spawn
+        # Live socket for this session -- the drain watch reads it (as a spawn
         # argument) to send `playback_done`. Re-set per session in `_session`.
         self._ws = None
         # The in-flight drain watch (one per turn, spawned on `done`). Cancelling
-        # it — on cancelled/welcome/teardown — is the ONLY thing that keeps it
+        # it -- on cancelled/welcome/teardown -- is the ONLY thing that keeps it
         # from firing for a turn the client has moved past; `_device_gen` resets
         # to 0 each session, so the task identity, not the gen alone, is the
         # cross-session guard. Teardown cancels it before the next session's
@@ -150,7 +150,7 @@ class SpeakerClient(ReconnectingClient):
     def _teardown_device(self) -> None:
         # Invalidate the current device's on_close (our own stop is not a death),
         # then stop the stream first (joins the callback, so the buffer is
-        # provably idle) before flushing — never free a buffer a callback reads.
+        # provably idle) before flushing -- never free a buffer a callback reads.
         self._device_gen += 1
         if self._device is not None:
             self._device.stop()
@@ -166,7 +166,7 @@ class SpeakerClient(ReconnectingClient):
             try:
                 msg = json.loads(raw)
             except (ValueError, TypeError):
-                continue  # garbage frame — ignore, don't crash a dumb client
+                continue  # garbage frame -- ignore, don't crash a dumb client
             if not isinstance(msg, dict):
                 continue
             if self._check_terminal(msg):
@@ -187,7 +187,7 @@ class SpeakerClient(ReconnectingClient):
 
     def _on_welcome(self) -> None:
         # New turn: allow playback again (clears a prior barge-in suppress). A
-        # drain watch from the previous turn is superseded — drop it so it can't
+        # drain watch from the previous turn is superseded -- drop it so it can't
         # fire against this turn's audio (the server serializes turns, so this is
         # belt-and-suspenders over the per-turn cancels).
         self._cancel_drain_watch()
@@ -204,9 +204,9 @@ class SpeakerClient(ReconnectingClient):
         self._cancel_drain_watch()
 
     def _on_done(self, msg: dict) -> None:
-        # `done` deliberately does NOT flush — the synthesized tail finishes
+        # `done` deliberately does NOT flush -- the synthesized tail finishes
         # playing. It DOES start the drain watch: the reply is now complete
-        # (ordered socket → every tts_chunk already enqueued), so an empty buffer
+        # (ordered socket -> every tts_chunk already enqueued), so an empty buffer
         # from here on means drained, not network-starved.
         session_id = msg.get("session_id")
         if not isinstance(session_id, str) or self._suppressed:
@@ -233,7 +233,7 @@ class SpeakerClient(ReconnectingClient):
         bails instead of signalling against the next turn's audio."""
         if buffer is None:
             # No device built (empty or fully-suppressed reply): nothing played
-            # locally, so the gate can release now. Recheck first — a `cancelled`
+            # locally, so the gate can release now. Recheck first -- a `cancelled`
             # could have landed in the tick between spawn and this task running.
             if gen != self._device_gen or self._suppressed:
                 return
@@ -243,7 +243,7 @@ class SpeakerClient(ReconnectingClient):
         # `done` means no more audio is coming, so drain what we have.
         buffer.force_arm()
         if not await self._await_buffer_empty(buffer, gen):
-            return  # invalidated or timed out — the server estimate covers it.
+            return  # invalidated or timed out -- the server estimate covers it.
         # The buffer is empty but the device/sink still holds `tail_s` of audio;
         # wait it out so the signal lands at silence, never before it.
         await asyncio.sleep(tail_s)
@@ -255,7 +255,7 @@ class SpeakerClient(ReconnectingClient):
         """Poll until the buffer drains (True) or the watch is invalidated /
         times out (False). The cap is a safety net: at `done` the buffer holds at
         most `max_buffer_s` of audio (its own backlog cap) and drains at realtime,
-        so a longer wait means something wedged — fall back to the estimate."""
+        so a longer wait means something wedged -- fall back to the estimate."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._max_buffer_s + 2.0
         while True:
@@ -312,7 +312,7 @@ class SpeakerClient(ReconnectingClient):
             return
         if self._last_seq is not None and seq not in (0, self._last_seq + 1):
             log.info(
-                "tts seq gap: expected %d, got %d (lost frame → likely audible glitch)",
+                "tts seq gap: expected %d, got %d (lost frame -> likely audible glitch)",
                 self._last_seq + 1, seq,
             )
         self._last_seq = seq
@@ -327,7 +327,7 @@ class SpeakerClient(ReconnectingClient):
         if self._device is not None:
             # Invalidate the old device's on_close BEFORE stopping it, so a
             # finished_callback fired during stop (whenever the host delivers it)
-            # carries a stale gen and is ignored — not seen as a death.
+            # carries a stale gen and is ignored -- not seen as a death.
             self._device_gen += 1
             self._device.stop()  # joins the old callback
             if self._buffer is not None:
@@ -356,7 +356,7 @@ class SpeakerClient(ReconnectingClient):
 def _make_device_factory(cfg: dict) -> DeviceFactory:
     """Build the playback-device factory from config. `playback_backend` selects
     between PortAudio (`sounddevice`, the dev-box default) and external `pacat`
-    (`pacat`, for Termux/Android phones with no PortAudio) — the mirror of the
+    (`pacat`, for Termux/Android phones with no PortAudio) -- the mirror of the
     mic's `capture_backend`."""
     backend = cfg.get("playback_backend", "sounddevice")
     if backend == "sounddevice":

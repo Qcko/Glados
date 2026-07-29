@@ -135,7 +135,7 @@ export class Transport {
     }
   }
 
-  // "First reply" — wall-time from the most recent client send to the next
+  // "First reply" -- wall-time from the most recent client send to the next
   // inbound frame. Cleared after firing so streamed deltas don't keep
   // re-triggering. Not a true RTT (would need a ping/pong), but a useful
   // proxy for "did the brain hear me yet?" while iterating on the LLM.

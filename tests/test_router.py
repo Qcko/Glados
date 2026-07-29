@@ -46,7 +46,7 @@ def test_long_request_routes_specialist() -> None:
 
 def test_long_action_request_stays_primary() -> None:
     # The poison seed: a long multi-item add must NOT route to the specialist by
-    # word count — the imperative check now precedes the length gate so it stays
+    # word count -- the imperative check now precedes the length gate so it stays
     # on the primary (which doesn't truncate the list). SESSION 2026-06-16.
     r = Router(max_words_local=10)
     long_add = (
@@ -196,7 +196,7 @@ async def test_no_escalation_when_specialist_absent(tmp_path: Path) -> None:
 async def test_failed_turn_with_mutation_does_not_escalate(tmp_path: Path) -> None:
     # A turn that already landed a successful mutating call must not re-run on
     # the specialist even if it classifies `failed` (e.g. loop exhaustion
-    # afterwards) — replaying the user request would fire the side effect twice.
+    # afterwards) -- replaying the user request would fire the side effect twice.
     from glados.core.turn_outcome import TurnRecord
 
     async with _organizer(

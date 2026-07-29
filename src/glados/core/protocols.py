@@ -2,7 +2,7 @@
 
 Every message is a Pydantic model with a literal `type` field, so they form a
 discriminated union. Adapter Protocols (STT, TTS, LLM, WakeWord) live in
-adapters.py — keeping them out of the wire schema.
+adapters.py -- keeping them out of the wire schema.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ class ToolConfirmResponse(BaseModel):
     """Reply to a ToolConfirmRequest. `granted=False` denies the tool
     call; the LLM sees `MCPCallResult(ok=False, error="user denied")`
     and can recover. The Organizer enforces that the responder is in the
-    originating room — replies from other rooms are dropped."""
+    originating room -- replies from other rooms are dropped."""
 
     type: Literal["tool_confirm_response"] = "tool_confirm_response"
     request_id: str
@@ -48,7 +48,7 @@ class PlaybackDone(BaseModel):
     """A speaker client reports that the TTS audio for `session_id` has finished
     playing out of its buffer. Lets the server shorten the feedback gate from
     the duration estimate to the short tail cooldown (see Organizer). Only
-    honored from a speaker-role client (server enforces); advisory — a missing
+    honored from a speaker-role client (server enforces); advisory -- a missing
     one just falls back to the estimate."""
 
     type: Literal["playback_done"] = "playback_done"
@@ -64,7 +64,7 @@ ClientMessage = Annotated[
 # Audio is sent as raw binary WebSocket frames, not JSON. Frame layout:
 #   bytes 0..4   : big-endian uint32 sequence number
 #   bytes 4..end : PCM16-LE samples at AUDIO_SAMPLE_RATE Hz, mono
-# Sample rate is a constant on both ends — keeping it implicit avoids
+# Sample rate is a constant on both ends -- keeping it implicit avoids
 # per-frame header bloat and lets the server treat every byte beyond
 # the prefix as audio samples.
 AUDIO_SAMPLE_RATE = 16_000
@@ -79,7 +79,7 @@ class Welcome(BaseModel):
 class UserTranscript(BaseModel):
     """What the server believes the user said for this turn. Broadcast
     once per turn, right after Welcome. `source` distinguishes a typed
-    `user_text` ingress from an audio-derived STT transcript — the UI
+    `user_text` ingress from an audio-derived STT transcript -- the UI
     shows the latter differently so STT mistranscriptions are visible
     at a glance (the whole point: catching e.g. Czech misdetected as
     French without having to grep traces)."""
@@ -142,7 +142,7 @@ class TurnOutcome(BaseModel):
     actually finish?").
 
     `confabulated` is the special case where the model claimed an *action* was
-    done while dispatching no tools at all — a fabricated completion, the
+    done while dispatching no tools at all -- a fabricated completion, the
     signature of a poisoned history. The organizer suppresses the false claim
     from the spoken reply and never commits it to the hot buffer."""
 
@@ -184,14 +184,14 @@ class ToolConfirmRequest(BaseModel):
 class MemoryBlockNotice(BaseModel):
     """Operator-facing notice that a *trusted* MCP server shipped lessons that
     did not clear the LocalGuard hash-approval gate, so **nothing was injected**
-    (ARCH §14, BLOCK-notice surface). Carries metadata only — `source` id,
+    (ARCH section 14, BLOCK-notice surface). Carries metadata only -- `source` id,
     `sha256` of the blob, character `length`, and LocalGuard's `reason`. It
     holds **none of the untrusted blob bytes** and is never routed through the
     assistant LLM or TTS, so it is safe on any surface; the UI renders it as an
     admin banner with an affordance to start a review. It is emitted at load
     time (before any client connects), so it is also pushed to `ui`-role clients
     on connect and exposed at `GET /admin/memory`. Granting a review/approve is
-    a separate, high-friction desktop action — never this notice, never voice."""
+    a separate, high-friction desktop action -- never this notice, never voice."""
 
     type: Literal["memory_block_notice"] = "memory_block_notice"
     source: str
@@ -211,13 +211,13 @@ class ErrorMessage(BaseModel):
 # 127.0.0.1:9765) lets an operator watch any room's conversation as text for
 # debugging. It NEVER rides the LAN-facing /ws/v1, and the house-wide observe
 # capability answers only on loopback + behind a distinct admin secret
-# (ARCHITECTURE §9).
+# (ARCHITECTURE section 9).
 
 
 class AdminHello(BaseModel):
     """First message on the admin channel: authenticate with the admin
     secret (constant-time compared server-side). Distinct from the room
-    `Hello` — the admin surface has no room/role binding."""
+    `Hello` -- the admin surface has no room/role binding."""
 
     type: Literal["admin_hello"] = "admin_hello"
     token: str
@@ -225,7 +225,7 @@ class AdminHello(BaseModel):
 
 class ObserveRoom(BaseModel):
     """Admin asks to observe `room_id` (read-only). `room_id=None` stops
-    observing — closes the tab server-side so a dead subscription can't
+    observing -- closes the tab server-side so a dead subscription can't
     keep fanning out."""
 
     type: Literal["observe_room"] = "observe_room"
@@ -235,7 +235,7 @@ class ObserveRoom(BaseModel):
 class HelloAck(BaseModel):
     """Server reply to a verified AdminHello: the rooms available to observe
     (derived from rooms.toml bindings). The admin client builds its room
-    picker from this — no separate HTTP route, so nothing admin leaks onto
+    picker from this -- no separate HTTP route, so nothing admin leaks onto
     the LAN-facing app."""
 
     type: Literal["hello_ack"] = "hello_ack"
@@ -246,7 +246,7 @@ class ObservedEvent(BaseModel):
     """A room's forwarded conversation event, wrapped so the admin client can
     attribute it to a room (the inner events carry only `session_id`). `event`
     is a serialized server message; only an allowlist of text turn-events is
-    ever forwarded (audio, tool-confirm, and memory notices are not — see
+    ever forwarded (audio, tool-confirm, and memory notices are not -- see
     `server.py` `_make_notify_observers`)."""
 
     type: Literal["observed_event"] = "observed_event"

@@ -1,3 +1,4 @@
+# rule-guard:allow ascii-source - Japanese and Scandinavian text are required i18n fixtures for the handshake.
 """End-to-end WS test: hello + auth + echo turn."""
 
 from __future__ import annotations

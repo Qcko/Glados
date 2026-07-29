@@ -92,7 +92,7 @@ def test_wire_matches_server_protocol() -> None:
 
 
 def test_resampler_48k_to_16k_frame_count() -> None:
-    # 1 s at 48 kHz → 16000 samples → exactly 20 frames of 800.
+    # 1 s at 48 kHz -> 16000 samples -> exactly 20 frames of 800.
     sig = np.zeros(48_000, dtype=np.float32)
     frames = Resampler(48_000).process(sig)
     assert len(frames) == 20
@@ -106,22 +106,22 @@ def test_resampler_carries_cursor_across_block_boundary() -> None:
     odd source indices. A cursor-reset bug would keep picking even indices."""
     rs = Resampler(32_000)  # 32000/16000 = ratio 2.0
     sig = np.empty(2_000, dtype=np.float32)
-    sig[0::2] = 1.0   # even source indices → +0x7fff
-    sig[1::2] = -1.0  # odd source indices  → -0x7fff
+    sig[0::2] = 1.0   # even source indices -> +0x7fff
+    sig[1::2] = -1.0  # odd source indices  -> -0x7fff
     out = b""
     for i in range(0, len(sig), 801):
         out += b"".join(rs.process(sig[i : i + 801]))
     samples = np.frombuffer(out, dtype="<i2")
-    # Block 1 picks even global indices (0,2,…,800 → +). Block 2 starts at
+    # Block 1 picks even global indices (0,2,...,800 -> +). Block 2 starts at
     # global offset 801, so the carried 1.0 cursor picks its LOCAL-odd =
-    # GLOBAL-even indices (802,804,… → +) too. A cursor-RESET bug would pick
-    # block 2's local-even = global-odd indices (−). So correct carry ⇒ all +.
+    # GLOBAL-even indices (802,804,... -> +) too. A cursor-RESET bug would pick
+    # block 2's local-even = global-odd indices (-). So correct carry => all +.
     assert len(samples) == wire.BATCH_SAMPLES
     assert (samples == 0x7FFF).all()
 
 
 def test_resampler_clamps_and_scales() -> None:
-    # +1.0 → 0x7fff; out-of-range floats clamp rather than wrap.
+    # +1.0 -> 0x7fff; out-of-range floats clamp rather than wrap.
     over = np.full(800, 2.0, dtype=np.float32)  # > 1.0, must clamp to +1.0
     samples = np.frombuffer(Resampler(16_000).process(over)[0], dtype="<i2")
     assert samples.min() == 0x7FFF and samples.max() == 0x7FFF
@@ -134,14 +134,14 @@ def test_bounded_queue_drops_oldest() -> None:
     q = BoundedAudioQueue(maxsize=2)
     q.put("a")
     q.put("b")
-    q.put("c")  # full → drop oldest "a"
+    q.put("c")  # full -> drop oldest "a"
     assert q.drops == 1
     assert q.get() == "b"
     assert q.get() == "c"
 
 
 def test_bounded_queue_sentinel_survives_full_queue() -> None:
-    """The shutdown sentinel must be delivered even when the queue is full —
+    """The shutdown sentinel must be delivered even when the queue is full --
     it evicts a block rather than being dropped itself (the send-loop unblock)."""
     q = BoundedAudioQueue(maxsize=2)
     q.put("a")
@@ -199,7 +199,7 @@ class _OneShotDevice:
 
 
 async def test_mic_client_sends_hello_before_audio() -> None:
-    block = np.zeros(2_400, dtype=np.float32)  # 48k/3 → 800 samples → 1 frame
+    block = np.zeros(2_400, dtype=np.float32)  # 48k/3 -> 800 samples -> 1 frame
     conns: list[_SpyConn] = []
 
     def connect(_url):
@@ -217,7 +217,7 @@ async def test_mic_client_sends_hello_before_audio() -> None:
             break
         await asyncio.sleep(0.01)
     client.stop()
-    conns[0]._closed.set()  # end the recv loop → session ends → run() exits
+    conns[0]._closed.set()  # end the recv loop -> session ends -> run() exits
     with contextlib.suppress(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=2.0)
 
@@ -249,7 +249,7 @@ async def test_mic_client_terminal_error_does_not_reconnect() -> None:
 
 async def test_mic_client_reconnects_when_device_closes() -> None:
     """The deadlock fix: when the capture source dies (on_close fires), the
-    send loop must unblock, the session end, and run() reconnect — not hang
+    send loop must unblock, the session end, and run() reconnect -- not hang
     forever on a queue that will never fill again."""
     block = np.zeros(2_400, dtype=np.float32)
     conns: list[_SpyConn] = []
@@ -364,7 +364,7 @@ def test_subprocess_input_frames_whole_samples_across_reads() -> None:
 
 
 def test_subprocess_input_eof_surfaces_on_close() -> None:
-    """parec death (stdout EOF) must invoke on_close — the session's only signal
+    """parec death (stdout EOF) must invoke on_close -- the session's only signal
     that capture ended."""
     closed = threading.Event()
     stdout = _FakeStdout()
@@ -389,7 +389,7 @@ def test_subprocess_input_double_stop_is_noop() -> None:
     dev = SubprocessInput(popen=lambda *a, **k: proc, stop_timeout_s=0.5)
     dev.start(lambda _b: None)
     dev.stop()
-    dev.stop()  # proc already cleared → no error
+    dev.stop()  # proc already cleared -> no error
 
 
 # ---- SubprocessOutput (pacat) ------------------------------------------
@@ -456,7 +456,7 @@ def test_subprocess_output_writes_buffer_pcm_to_stdin() -> None:
     pcm = struct.pack("<4h", 1000, -2000, 3000, -4000)  # 4 frames, distinctive
     buffer.write(pcm)
     dev = SubprocessOutput(
-        2,  # 2 Hz → chunk_ms=20 rounds to a 1-frame chunk; pcm spans 4 chunks
+        2,  # 2 Hz -> chunk_ms=20 rounds to a 1-frame chunk; pcm spans 4 chunks
         chunk_ms=20.0,
         popen=lambda *a, **k: _FakeOutProc(stdin),
         sleep=lambda _d: None,
@@ -487,7 +487,7 @@ def test_subprocess_output_self_paces_one_chunk_per_chunk_duration() -> None:
     stdin = _FakeStdin()
     dev = SubprocessOutput(
         100,
-        chunk_ms=20.0,  # 2-frame chunk → chunk_s = 0.02
+        chunk_ms=20.0,  # 2-frame chunk -> chunk_s = 0.02
         popen=lambda *a, **k: _FakeOutProc(stdin),
         sleep=fake_sleep,
         monotonic=fake_monotonic,
@@ -531,7 +531,7 @@ def test_subprocess_output_resync_prevents_burst_when_write_blocks() -> None:
 
 
 def test_subprocess_output_broken_pipe_surfaces_on_close() -> None:
-    """pacat death (write raises BrokenPipeError) must invoke on_close — the
+    """pacat death (write raises BrokenPipeError) must invoke on_close -- the
     session's only signal that playback ended."""
     closed = threading.Event()
     stdin = _FakeStdin(die=True)
@@ -569,7 +569,7 @@ def test_subprocess_output_double_stop_is_noop() -> None:
     )
     dev.start(JitterBuffer(prebuffer_bytes=0))
     dev.stop()
-    dev.stop()  # proc already cleared → no error
+    dev.stop()  # proc already cleared -> no error
 
 
 def test_subprocess_output_stop_halts_writer() -> None:
@@ -670,10 +670,10 @@ def test_mic_reexports_load_token() -> None:
 
 def test_jitter_buffer_prebuffer_gates_then_drains() -> None:
     jb = JitterBuffer(prebuffer_bytes=8)
-    assert jb.read(4) == b"\x00\x00\x00\x00", "not armed → silence"
+    assert jb.read(4) == b"\x00\x00\x00\x00", "not armed -> silence"
     jb.write(b"abcd")  # 4 < 8, still not armed
     assert jb.read(2) == b"\x00\x00"
-    jb.write(b"efgh")  # now 8 bytes buffered → armed
+    jb.write(b"efgh")  # now 8 bytes buffered -> armed
     assert jb.read(4) == b"abcd"
     assert jb.read(6) == b"efgh\x00\x00", "underrun zero-pads to exactly n"
     assert jb.underrun_bytes > 0
@@ -692,7 +692,7 @@ def test_jitter_buffer_flush_rearms_prebuffer() -> None:
 def test_jitter_buffer_caps_memory_dropping_oldest() -> None:
     jb = JitterBuffer(prebuffer_bytes=0, max_bytes=4)
     jb.write(b"1234")
-    jb.write(b"5678")  # over cap → drop oldest 4 bytes
+    jb.write(b"5678")  # over cap -> drop oldest 4 bytes
     assert jb.dropped_bytes == 4
     assert jb.read(4) == b"5678"
 
@@ -701,8 +701,8 @@ def test_jitter_buffer_head_cursor_preserves_stream_and_compacts() -> None:
     """The head-cursor read must hand back the exact byte stream in order across
     many interleaved writes/reads, and lazy compaction must keep the backing
     array far below total throughput (proving the consumed prefix is reclaimed,
-    not retained — the whole point of the refactor)."""
-    jb = JitterBuffer(prebuffer_bytes=0, max_bytes=1 << 30)  # huge cap → no drops
+    not retained -- the whole point of the refactor)."""
+    jb = JitterBuffer(prebuffer_bytes=0, max_bytes=1 << 30)  # huge cap -> no drops
     src = bytes((i * 7) % 256 for i in range(20_000))  # >> the 4096 compact floor
     out = bytearray()
     pos = 0
@@ -713,7 +713,7 @@ def test_jitter_buffer_head_cursor_preserves_stream_and_compacts() -> None:
             pos += 100
         avail = jb._available()
         if avail:
-            out += jb.read(min(73, avail))  # read size ≠ write size → crosses chunks
+            out += jb.read(min(73, avail))  # read size != write size -> crosses chunks
         max_backing = max(max_backing, len(jb._buf))
     assert bytes(out) == src, "head-cursor reads must preserve the byte stream in order"
     assert max_backing < 10_000, (
@@ -729,7 +729,7 @@ def test_jitter_buffer_drop_oldest_after_partial_read() -> None:
     jb = JitterBuffer(prebuffer_bytes=0, max_bytes=4)
     jb.write(b"AB")
     assert jb.read(1) == b"A"  # head now past 'A'; 'B' is the live backlog
-    jb.write(b"CDEF")  # live = B,C,D,E,F = 5 > cap 4 → drop oldest 1 ('B')
+    jb.write(b"CDEF")  # live = B,C,D,E,F = 5 > cap 4 -> drop oldest 1 ('B')
     assert jb.dropped_bytes == 1
     assert jb.read(4) == b"CDEF", "the consumed 'A' must not be re-read or mis-dropped"
 
@@ -777,7 +777,7 @@ async def _run_speaker(inbound, device_factory):
     (client, conns, task) for mid-session inspection BEFORE teardown flushes the
     buffer. Deterministic settle: the recv loop only yields control once it has
     drained every inbound frame (SpyConn.__anext__ never awaits between frames),
-    so when `_inbound` is empty the last frame is already dispatched — no
+    so when `_inbound` is empty the last frame is already dispatched -- no
     time-based sleep needed."""
     conns: list[_SpyConn] = []
 
@@ -834,7 +834,7 @@ async def test_speaker_cancelled_flushes_and_suppresses() -> None:
         _msg("cancelled"), _tts_chunk(1, 22_050, [4, 5, 6]),
     ]
     client, conns, task = await _run_speaker(inbound, lambda _r: dev)
-    # First turn flushed by cancelled; the post-cancel chunk dropped → silence.
+    # First turn flushed by cancelled; the post-cancel chunk dropped -> silence.
     assert np.frombuffer(dev.pull(3), dtype="<i2").tolist() == [0, 0, 0]
     await _stop_speaker(client, conns, task)
 
@@ -877,17 +877,17 @@ async def test_speaker_signals_playback_done_after_drain() -> None:
     dev = NullOutputDevice(22_050)  # tail_s = 0.0
     inbound = [_msg("welcome"), _tts_chunk(0, 22_050, [7, 8, 9]), _msg("done")]
     client, conns, task = await _run_speaker(inbound, lambda _r: dev)
-    # Reply still buffered → no signal yet (an early one would reopen the mic
+    # Reply still buffered -> no signal yet (an early one would reopen the mic
     # mid-TTS, the feedback bug Slice A fixed).
     assert _playback_dones(conns[0]) == []
-    dev.pull(3)  # the device pulls the last bytes → buffer drains
+    dev.pull(3)  # the device pulls the last bytes -> buffer drains
     assert await _wait_until(lambda: _playback_dones(conns[0]) == ["sess"])
     await _stop_speaker(client, conns, task)
 
 
 async def test_speaker_signals_playback_done_for_silent_reply() -> None:
     """A turn that produced no audio (no device ever built) releases the gate at
-    once — nothing is playing locally to feed back."""
+    once -- nothing is playing locally to feed back."""
     dev = NullOutputDevice(22_050)
     inbound = [_msg("welcome"), _msg("done")]
     client, conns, task = await _run_speaker(inbound, lambda _r: dev)
@@ -896,7 +896,7 @@ async def test_speaker_signals_playback_done_for_silent_reply() -> None:
 
 
 async def test_speaker_cancel_after_done_drops_playback_done() -> None:
-    """`cancelled` flushes the buffer (→ instantly empty) AND cancels the drain
+    """`cancelled` flushes the buffer (-> instantly empty) AND cancels the drain
     watch: the flush-induced empty must NOT be mistaken for a clean drain and
     fire a stale signal for the cancelled turn."""
     dev = NullOutputDevice(22_050)
@@ -915,12 +915,12 @@ async def test_speaker_cancel_after_done_drops_playback_done() -> None:
 async def test_speaker_suppressed_during_tail_skips_signal() -> None:
     """White-box: a barge-in that lands while the watch is in its post-drain tail
     sleep must be caught by the pre-send recheck, not signalled. Drives the race
-    deterministically — tail (0.2s) >> the 0.05s we wait before flipping
-    suppression — so the flip always lands inside the tail sleep."""
+    deterministically -- tail (0.2s) >> the 0.05s we wait before flipping
+    suppression -- so the flip always lands inside the tail sleep."""
     dev = NullOutputDevice(22_050, tail_s=0.2)
     inbound = [_msg("welcome"), _tts_chunk(0, 22_050, [1, 2, 3]), _msg("done")]
     client, conns, task = await _run_speaker(inbound, lambda _r: dev)
-    dev.pull(3)  # drain → watch passes _await_buffer_empty, enters the tail sleep
+    dev.pull(3)  # drain -> watch passes _await_buffer_empty, enters the tail sleep
     await asyncio.sleep(0.05)
     client._suppressed = True  # a cancel's effect, landing mid-tail
     assert not await _wait_until(
@@ -936,7 +936,7 @@ async def test_speaker_welcome_reallows_after_cancel() -> None:
         _msg("cancelled"), _msg("welcome"), _tts_chunk(1, 22_050, [4, 5, 6]),
     ]
     client, conns, task = await _run_speaker(inbound, lambda _r: dev)
-    # First turn flushed; second welcome cleared suppression → second turn plays.
+    # First turn flushed; second welcome cleared suppression -> second turn plays.
     assert np.frombuffer(dev.pull(3), dtype="<i2").tolist() == [4, 5, 6]
     await _stop_speaker(client, conns, task)
 
@@ -1100,7 +1100,7 @@ def test_room_from_config_resolves_per_role_tokens(monkeypatch) -> None:
     cfg = {
         "server_url": "ws://x", "room_id": "bedroom",
         # parec capture builds without touching hardware; speaker factory is a
-        # lambda not invoked at construction — so from_config stays hardware-free.
+        # lambda not invoked at construction -- so from_config stays hardware-free.
         "mic": {"client_id": "bedroom-mic", "capture_backend": "parec"},
         "speaker": {"client_id": "bedroom-speaker"},
     }
@@ -1113,7 +1113,7 @@ def test_room_from_config_resolves_per_role_tokens(monkeypatch) -> None:
 def test_room_from_config_fails_before_start_on_missing_token(monkeypatch) -> None:
     import keyring
 
-    # mic token present, speaker token absent → must raise before constructing
+    # mic token present, speaker token absent -> must raise before constructing
     # either client (no half-started device).
     monkeypatch.setattr(
         keyring, "get_password",
@@ -1129,7 +1129,7 @@ def test_room_from_config_fails_before_start_on_missing_token(monkeypatch) -> No
 
 
 def test_room_from_config_missing_key_is_friendly_exit() -> None:
-    # Missing [speaker] subtable → SystemExit (not a bare KeyError traceback).
+    # Missing [speaker] subtable -> SystemExit (not a bare KeyError traceback).
     with pytest.raises(SystemExit):
         RoomSupervisor.from_config({"server_url": "ws://x", "room_id": "r",
                                     "mic": {"client_id": "m"}})

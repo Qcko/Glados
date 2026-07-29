@@ -1,7 +1,7 @@
 """Tool registry + dispatcher.
 
 Holds both in-process tools and `StdioToolProxy` instances for subprocess
-MCP servers — the dispatcher doesn't care which transport sits behind a
+MCP servers -- the dispatcher doesn't care which transport sits behind a
 spec. Per-tool timeout overrides (`ToolSpec.timeout_s`) win over the
 dispatch default; slow tools (Selenium page loads) carry their own
 budget that way.
@@ -34,7 +34,7 @@ def _format_args(args: dict) -> str:
     except (TypeError, ValueError):
         rendered = repr(args)
     if len(rendered) > _ARG_DUMP_MAX:
-        rendered = rendered[: _ARG_DUMP_MAX - 1] + "…"
+        rendered = rendered[: _ARG_DUMP_MAX - 1] + "..."
     return rendered
 
 
@@ -88,7 +88,7 @@ class MCPRegistry:
         # forcing every call site to know.
         effective = tool.spec.timeout_s if tool.spec.timeout_s is not None else timeout
         # Same truncated rendering used for entry, exit, timeout, and error
-        # lines — avoids a multi-KB tool argument flooding the log.
+        # lines -- avoids a multi-KB tool argument flooding the log.
         rendered_args = _format_args(args)
         _log.info("dispatch %s args=%s timeout=%ss", key, rendered_args, effective)
         started = time.monotonic()

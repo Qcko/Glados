@@ -5,7 +5,7 @@ Background: the Organizer wraps `llm.chat(...)` in `contextlib.aclosing` so
 `CancelledError` propagates into the async generator. That `aclose()` must
 in turn exit the `async with client.stream(...)` block in
 [OllamaLLM.chat](../src/glados/brain/llm/ollama.py), which httpx implements
-by calling `response.aclose()` — which closes the HTTP/1.1 connection so
+by calling `response.aclose()` -- which closes the HTTP/1.1 connection so
 Ollama stops generating. If that chain were broken (e.g. by a bare-except
 or missing `async with`), the generator would close locally but Ollama
 would keep streaming tokens we'll never read.
@@ -90,6 +90,6 @@ async def test_cancel_propagates_to_httpx_aclose() -> None:
         await task
 
     assert body.aclose_calls >= 1, (
-        "httpx response body was not aclose()'d on cancel — "
+        "httpx response body was not aclose()'d on cancel -- "
         "Ollama would keep generating tokens with nothing reading them"
     )

@@ -1,7 +1,7 @@
 """WhisperSTT: faster-whisper behind the `core.adapters.STT` Protocol.
 
 Model is loaded once on construct (defaults: English-only
-`distil-small.en` CPU int8 — ~250 MB download to HF_HOME). `language`
+`distil-small.en` CPU int8 -- ~250 MB download to HF_HOME). `language`
 defaults to `None` (auto-detect); pin to a code (e.g. `"en"`) to skip
 detection. For multilingual operation see the recipe in
 configs/glados.toml.
@@ -37,7 +37,7 @@ class WhisperSTT:
         self._hotwords = hotwords or None
         self._initial_prompt = initial_prompt or None
         # ctranslate2 state inside WhisperModel is not safe for concurrent
-        # `transcribe` calls — serialise. The pipeline is willing to wait
+        # `transcribe` calls -- serialise. The pipeline is willing to wait
         # because transcriptions run in background tasks anyway.
         self._lock = threading.Lock()
 

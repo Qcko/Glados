@@ -1,9 +1,9 @@
 """Deterministic fake LLM. Two behaviours:
 
-- Last message is `user` and mentions "time" with `time.now` available →
+- Last message is `user` and mentions "time" with `time.now` available ->
   emit a tool_call.
-- Last message is `tool` (a tool result) → emit a final text answer.
-- Else → echo the user text.
+- Last message is `tool` (a tool result) -> emit a final text answer.
+- Else -> echo the user text.
 
 Real Ollama / vLLM adapter swaps in later behind the same `LLM` Protocol.
 """

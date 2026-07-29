@@ -146,7 +146,7 @@ async def test_read_lessons_returns_markdown() -> None:
 
 
 async def test_read_lessons_none_when_unsupported() -> None:
-    # The echo server has no resources support — replies with a JSON-RPC
+    # The echo server has no resources support -- replies with a JSON-RPC
     # error, which read_lessons swallows into None (the common case).
     server = _make_inline_server(_INLINE_SERVER)
     await server.start()
@@ -305,7 +305,7 @@ sys.exit(0)
         await server.aclose()
 
 
-# ---- Lazy spawn + idle reap (ARCH §13) ---------------------------------
+# ---- Lazy spawn + idle reap (ARCH section 13) ---------------------------------
 
 
 async def test_stdio_server_sleeps_then_wakes_on_call() -> None:
@@ -327,7 +327,7 @@ async def test_stdio_server_sleeps_then_wakes_on_call() -> None:
 
 async def test_wake_does_not_consume_restart_budget() -> None:
     """Sleep/wake is an intended transition, so cycling it more times than
-    `max_restarts` must keep working — it never touches the crash circuit."""
+    `max_restarts` must keep working -- it never touches the crash circuit."""
     server = StdioServer(
         sys.executable, ["-c", _INLINE_SERVER], max_restarts=1, server_id="inline"
     )
@@ -355,15 +355,15 @@ async def test_reap_idle_servers_sleeps_only_idle_resident() -> None:
         # Fresh call stamps activity 'now'; with a tiny window it reads idle.
         await server.call_tool("echo", {"text": "x"})
         now = server._last_activity  # noqa: SLF001
-        # Active within window → not reaped.
+        # Active within window -> not reaped.
         assert _reap_idle_servers([(server, 300.0)], now) == []
-        # Past the window → one sleep() coroutine returned; await it.
+        # Past the window -> one sleep() coroutine returned; await it.
         coros = _reap_idle_servers([(server, 300.0)], now + 301.0)
         assert len(coros) == 1
         for c in coros:
             await c
         assert not server.is_resident()
-        # Already dormant → skipped (not resident).
+        # Already dormant -> skipped (not resident).
         assert _reap_idle_servers([(server, 300.0)], now + 999.0) == []
     finally:
         await server.aclose()
@@ -372,7 +372,7 @@ async def test_reap_idle_servers_sleeps_only_idle_resident() -> None:
 async def test_sleep_refuses_while_call_in_flight() -> None:
     """The reaper must not sleep a server a dispatch just woke. `sleep()`
     refuses while `_active_calls` is non-zero, even before the RPC reaches
-    `_pending` — closing the wake-then-dispatch race."""
+    `_pending` -- closing the wake-then-dispatch race."""
     server = _make_inline_server(_INLINE_SERVER)
     await server.start()
     try:
@@ -381,10 +381,10 @@ async def test_sleep_refuses_while_call_in_flight() -> None:
         # enqueued, so _pending is still empty).
         server._active_calls = 1  # noqa: SLF001
         await server.sleep()
-        assert server.is_resident()  # refused — call still in flight
+        assert server.is_resident()  # refused -- call still in flight
         server._active_calls = 0  # noqa: SLF001
         await server.sleep()
-        assert not server.is_resident()  # now idle — sleeps
+        assert not server.is_resident()  # now idle -- sleeps
     finally:
         await server.aclose()
 
@@ -415,7 +415,7 @@ def test_toy_stdio_tools_registered_via_lifespan(stdio_app: TestClient) -> None:
 
 def test_toy_stdio_overlay_applies_requires_confirmation(stdio_app: TestClient) -> None:
     """servers.toml `[server.tool_overlays.roll_dice]` should flip the
-    spec's `requires_confirmation` to True after `tools/list` — the wire
+    spec's `requires_confirmation` to True after `tools/list` -- the wire
     schema doesn't carry that flag, so the overlay is the only place it
     can come from for a third-party server."""
     registry = stdio_app.app.state.mcp

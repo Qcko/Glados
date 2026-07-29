@@ -1,3 +1,4 @@
+# rule-guard:allow ascii-source - Thai text is required i18n fixture data for the language path.
 """v0 step 2: Organizer + fake LLM + MCP + traces, end-to-end."""
 
 from __future__ import annotations
