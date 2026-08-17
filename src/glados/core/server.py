@@ -272,6 +272,8 @@ def _build_llm(cfg: LLMConfig) -> LLM:
             temperature=cfg.temperature,
             timeout=cfg.timeout,
             keep_alive=cfg.keep_alive,
+            num_ctx=cfg.num_ctx,
+            num_predict=cfg.num_predict,
         )
     return FakeLLM()
 
@@ -306,6 +308,8 @@ def _build_specialist_llm(
             temperature=llm_cfg.temperature,
             timeout=llm_cfg.timeout,
             keep_alive=llm_cfg.keep_alive,
+            num_ctx=llm_cfg.num_ctx,
+            num_predict=llm_cfg.num_predict,
         )
     if not cfg.cloud_enabled:
         return None

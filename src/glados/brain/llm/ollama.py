@@ -14,12 +14,20 @@ result in `<external>...</external>` before it reaches this adapter.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import AsyncIterator
 
 import httpx
 
 from ...core.adapters import LLMEvent, LLMMessage, LLMText, LLMToolCall, ToolSpec
+
+log = logging.getLogger(__name__)
+
+# Fraction of num_ctx the assembled prompt may reach before each turn warns.
+# Ollama truncates from the front without reporting it, so the only signal that
+# the system prompt is about to be evicted is the prompt size itself.
+_CONTEXT_PRESSURE_RATIO = 0.8
 
 
 class OllamaLLM:
@@ -31,12 +39,26 @@ class OllamaLLM:
         temperature: float = 0.2,
         timeout: float = 60.0,
         keep_alive: str = "-1",
+        # None means "the caller did not say" -- the key is omitted and Ollama
+        # applies its own default. configs/glados.toml is the authoritative
+        # source of the real values (LLMConfig), so these stay None rather than
+        # duplicating numbers that would then drift out of step with it.
+        num_ctx: int | None = None,
+        num_predict: int | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._host = host.rstrip("/")
         self._model = model
         self._temperature = temperature
         self._timeout = timeout
+        self._num_ctx = num_ctx
+        self._num_predict = num_predict
+        # Context pressure is a standing condition, not an event: on a workload
+        # whose tool block is genuinely large it would be true on EVERY turn,
+        # and a warning that fires every turn stops being read -- which is how
+        # the missing-num_ctx bug survived this long. Warn on the first crossing
+        # only; the per-turn numbers stay available at info level.
+        self._context_pressure_warned = False
         # Ollama's /api/chat `keep_alive`: a number is SECONDS (with -1 the
         # "resident forever" sentinel), a string must be a unit duration
         # ("30m", "1h"). A bare-number string like "-1" is rejected (400), so
@@ -104,7 +126,7 @@ class OllamaLLM:
             "messages": [self._to_ollama_msg(m) for m in messages],
             "stream": True,
             "keep_alive": self._keep_alive,
-            "options": {"temperature": self._temperature},
+            "options": self._build_options(),
         }
         if name_map:
             payload["tools"] = [self._to_ollama_tool(k, v) for k, v in name_map.items()]
@@ -119,8 +141,64 @@ class OllamaLLM:
                 if not line:
                     continue
                 chunk = json.loads(line)
+                if chunk.get("done"):
+                    self._log_usage(chunk)
                 for event in self._events_from_chunk(chunk, name_map):
                     yield event
+
+    def _build_options(self) -> dict:
+        options: dict = {"temperature": self._temperature}
+        if self._num_ctx is not None:
+            options["num_ctx"] = self._num_ctx
+        if self._num_predict is not None:
+            options["num_predict"] = self._num_predict
+        return options
+
+    def _log_usage(self, chunk: dict) -> None:
+        # The final chunk carries Ollama's own token accounting. Dropping it (as
+        # this adapter did until 2026-08-17) is what made front-truncation
+        # invisible: the prompt silently loses its head and nothing reports it.
+        prompt_tokens = chunk.get("prompt_eval_count")
+        reply_tokens = chunk.get("eval_count")
+        done_reason = chunk.get("done_reason")
+        if prompt_tokens is None:
+            return
+        log.info(
+            "ollama chat done model=%s prompt_tokens=%s reply_tokens=%s "
+            "num_ctx=%s done_reason=%s",
+            self._model,
+            prompt_tokens,
+            reply_tokens,
+            self._num_ctx,
+            done_reason,
+        )
+        if done_reason == "length":
+            # The reply was cut at num_predict, so the spoken sentence just
+            # stops. Without this the slice would trade one silent truncation
+            # (the front of the prompt) for another (the tail of the reply).
+            log.warning(
+                "reply from model %s was truncated at the num_predict=%s cap "
+                "after %s tokens -- the spoken reply is cut mid-sentence. Raise "
+                "num_predict, or treat this as the repetition loop it bounds.",
+                self._model,
+                self._num_predict,
+                reply_tokens,
+            )
+        if self._num_ctx is None:
+            return
+        if prompt_tokens > self._num_ctx * _CONTEXT_PRESSURE_RATIO:
+            if self._context_pressure_warned:
+                return
+            self._context_pressure_warned = True
+            log.warning(
+                "assembled prompt is %s tokens against num_ctx=%s for model %s -- "
+                "Ollama truncates from the FRONT, so the system prompt (and with "
+                "it the <external> untrusted-content rule) is what gets evicted "
+                "first. Raise num_ctx or shrink the tool list / history.",
+                prompt_tokens,
+                self._num_ctx,
+                self._model,
+            )
 
     @staticmethod
     def _sanitise(spec: ToolSpec) -> str:

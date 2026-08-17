@@ -29,6 +29,34 @@ timeout = 60.0
 # = forever (sent as int); a unit duration ("30m", "1h") or "0" (evict at once)
 # also work. Passed through to the /api/chat keep_alive field.
 keep_alive = "-1"
+# Context window. Until 2026-08-17 this was never sent at all, so every request
+# ran at Ollama's own small default and the prompt was truncated FROM THE FRONT
+# -- silently evicting the system prompt, and with it the <external> rule and
+# the reply-in-English rule. Nothing else here budgets tokens (history is capped
+# by turn count, not size), so this is the only ceiling.
+# 8192 is conservative on purpose, NOT the model maximum: measured 2026-08-17 on
+# a 12 GB card, the 14b/Q5 model spills to CPU at EVERY context size (1.7 GB at
+# 8k, 3.9 GB at 16k, 8.7 GB at 32k) and each spilled layer costs decode speed.
+# Raising this will not OOM -- it just offloads more and gets slower.
+# THIS VALUE BELONGS TO THE MODEL TAG SELECTED ABOVE -- change both together.
+# Measured 2026-08-17, 12 GB card, ~2.3 GB held by the desktop:
+#   qwen2.5:14b-instruct-q5_K_M -> 8192. Spills 1.7 GB to CPU even here (and
+#     815 MiB at 4096), so there is no spill-free setting for this model on
+#     this card; 8192 buys context without making the offload much worse.
+#   qwen2.5:7b-instruct         -> 32768. Fully resident, ZERO spill (7830 MiB
+#     total), and decode is flat across 8k/16k/32k -- the signature of nothing
+#     being offloaded. On an 8 GB production card use 16384 (6006 MiB) instead;
+#     32k leaves no room for the desktop.
+# Comment out to fall back to Ollama's default.
+num_ctx = 8192
+# Cap on generated tokens per pass. Unbounded generation let the observed
+# repetition loop (2026-06-18) run until it filled the context; this bounds that
+# failure to a single turn. Keep well above the longest real spoken reply.
+# Costs NOTHING at rest: unlike num_ctx this reserves no memory, it is only a
+# stop condition. The single risk is clipping a genuinely long reply, and that
+# is no longer silent -- Ollama reports done_reason="length" and the adapter
+# warns, naming the cap. Model-independent; unchanged across model swaps.
+num_predict = 512
 # Language GLaDOS must reply in. The deterministic language guard rewrites any
 # free-form reply whose dominant script is not this language's -- the backstop
 # for cold-model drift the prompt rule alone does not stop. Only mapped

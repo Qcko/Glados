@@ -252,3 +252,165 @@ async def test_request_payload_shape() -> None:
     assert payload["stream"] is True
     assert payload["tools"][0]["function"]["name"] == "time__now"
     assert [m["role"] for m in payload["messages"]] == ["system", "user"]
+
+
+@pytest.mark.asyncio
+async def test_sends_num_ctx_and_num_predict() -> None:
+    """Both ride in `options`. Until 2026-08-17 only `temperature` was sent, so
+    every request ran at Ollama's own small default and the prompt was truncated
+    from the FRONT -- silently evicting the system prompt."""
+    captured: list[dict] = []
+    body = _ndjson({"message": {"content": "ok"}, "done": True})
+    adapter = OllamaLLM(
+        num_ctx=8192,
+        num_predict=512,
+        temperature=0.0,
+        transport=_mock_transport(body, captured=captured),
+    )
+    await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+
+    options = captured[0]["options"]
+    assert options["num_ctx"] == 8192
+    assert options["num_predict"] == 512
+    assert options["temperature"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_none_context_options_are_omitted_not_nulled() -> None:
+    """`None` must DROP the key, not send null -- Ollama rejects a null option,
+    so the escape hatch back to the server's own default has to be an absent
+    key. Guards the difference between "unset" and "explicitly nothing"."""
+    captured: list[dict] = []
+    body = _ndjson({"message": {"content": "ok"}, "done": True})
+    adapter = OllamaLLM(
+        num_ctx=None,
+        num_predict=None,
+        transport=_mock_transport(body, captured=captured),
+    )
+    await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+
+    options = captured[0]["options"]
+    assert "num_ctx" not in options
+    assert "num_predict" not in options
+    assert "temperature" in options
+
+
+@pytest.mark.asyncio
+async def test_warns_when_prompt_approaches_context_limit(caplog) -> None:
+    """Front-truncation is invisible on the wire, so prompt pressure is the only
+    signal that the system prompt is about to be evicted."""
+    body = _ndjson(
+        {"message": {"content": "ok"}, "done": True, "prompt_eval_count": 7000}
+    )
+    adapter = OllamaLLM(num_ctx=8192, transport=_mock_transport(body))
+    with caplog.at_level("WARNING"):
+        await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+
+    assert any("truncates from the FRONT" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_no_context_warning_when_prompt_is_small(caplog) -> None:
+    body = _ndjson(
+        {"message": {"content": "ok"}, "done": True, "prompt_eval_count": 100}
+    )
+    adapter = OllamaLLM(num_ctx=8192, transport=_mock_transport(body))
+    with caplog.at_level("WARNING"):
+        await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+@pytest.mark.asyncio
+async def test_no_context_warning_when_num_ctx_unset(caplog) -> None:
+    """A real prompt count with num_ctx=None must neither warn nor raise. The
+    guard this pins is one edit from `int > None`, which would TypeError inside
+    the stream loop and kill the turn."""
+    body = _ndjson(
+        {"message": {"content": "ok"}, "done": True, "prompt_eval_count": 7000}
+    )
+    adapter = OllamaLLM(num_ctx=None, transport=_mock_transport(body))
+    with caplog.at_level("WARNING"):
+        await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prompt_tokens, expect_warning", [(6554, True), (6553, False)]
+)
+async def test_context_pressure_ratio_boundary(
+    caplog, prompt_tokens: int, expect_warning: bool
+) -> None:
+    """Pin the boundary so _CONTEXT_PRESSURE_RATIO is load-bearing: 0.8 * 8192
+    is 6553.6. Without this the constant could be retuned anywhere in a wide
+    band with every test still green."""
+    body = _ndjson(
+        {
+            "message": {"content": "ok"},
+            "done": True,
+            "prompt_eval_count": prompt_tokens,
+        }
+    )
+    adapter = OllamaLLM(num_ctx=8192, transport=_mock_transport(body))
+    with caplog.at_level("WARNING"):
+        await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+
+    warned = any("truncates from the FRONT" in r.message for r in caplog.records)
+    assert warned is expect_warning
+
+
+@pytest.mark.asyncio
+async def test_context_pressure_warning_is_latched(caplog) -> None:
+    """Pressure is a standing condition. Warning every turn on a large-tool-list
+    workload is how a warning stops being read."""
+    body = _ndjson(
+        {"message": {"content": "ok"}, "done": True, "prompt_eval_count": 7000}
+    )
+    adapter = OllamaLLM(num_ctx=8192, transport=_mock_transport(body))
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+
+    hits = [r for r in caplog.records if "truncates from the FRONT" in r.message]
+    assert len(hits) == 1
+
+
+@pytest.mark.asyncio
+async def test_warns_when_reply_hits_num_predict_cap(caplog) -> None:
+    """done_reason="length" means the spoken reply was cut mid-sentence. Silent
+    tail-truncation is the same class of bug as the silent front-truncation
+    this slice exists to fix."""
+    body = _ndjson(
+        {
+            "message": {"content": "ok"},
+            "done": True,
+            "done_reason": "length",
+            "prompt_eval_count": 100,
+            "eval_count": 512,
+        }
+    )
+    adapter = OllamaLLM(num_ctx=8192, num_predict=512, transport=_mock_transport(body))
+    with caplog.at_level("WARNING"):
+        await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+
+    assert any("truncated at the num_predict" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_no_truncation_warning_on_normal_stop(caplog) -> None:
+    body = _ndjson(
+        {
+            "message": {"content": "ok"},
+            "done": True,
+            "done_reason": "stop",
+            "prompt_eval_count": 100,
+            "eval_count": 40,
+        }
+    )
+    adapter = OllamaLLM(num_ctx=8192, num_predict=512, transport=_mock_transport(body))
+    with caplog.at_level("WARNING"):
+        await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]

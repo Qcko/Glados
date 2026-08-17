@@ -10,7 +10,7 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from .protocols import Role
 
@@ -74,6 +74,26 @@ class LLMConfig(BaseModel):
     # string ("30m", "1h") or "0" (evict immediately) are also accepted; passed
     # through verbatim to the /api/chat `keep_alive` field.
     keep_alive: str = "-1"
+    # Context window sent as /api/chat options.num_ctx. Ollama otherwise applies
+    # its own small default and truncates the prompt FROM THE FRONT, which
+    # silently evicts the system prompt -- and with it the ARCH section 7
+    # untrusted-content rule and the reply-language rule. Nothing else in GLaDOS
+    # budgets tokens (history is capped by turn count, not size), so this is the
+    # only ceiling there is. `None` sends no value and restores the old
+    # behaviour: an escape hatch for a model whose default is already right.
+    #
+    # 8192 is deliberately conservative, NOT the model's maximum. Measured
+    # 2026-08-17 on a 12 GB card: qwen2.5:14b-instruct-q5_K_M spills to CPU at
+    # every context size (815 MiB at 4k, 1.7 GB at 8k, 3.9 GB at 16k, 8.7 GB at
+    # 32k), and each spilled layer costs decode speed. Raising this does not
+    # OOM -- it quietly offloads more and gets slower, which is why the cost is
+    # easy to miss. Re-derive it per model and per card; do not assume bigger.
+    num_ctx: int | None = Field(default=8192, ge=1)
+    # Generation cap sent as options.num_predict. Unbounded generation let an
+    # observed repetition loop (the CallCheckLoginStatus leak, 2026-06-18) run
+    # until it filled the context; this bounds that failure class to one turn.
+    # Must stay comfortably above the longest legitimate spoken reply.
+    num_predict: int | None = Field(default=512, ge=1)
     # Language GLaDOS must reply in. The language guard (core/language_guard.py)
     # rewrites a free-form reply whose dominant script is not this language's --
     # a deterministic backstop for the cold-model drift the prompt rule alone
