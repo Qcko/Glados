@@ -65,7 +65,13 @@ keep_alive = "-1"
 #   qwen3:4b           -> 4.18 GB, size == size_vram, ZERO spill.
 #   Both qwen3 tags fit the 12 GB card whole, unlike the 14b/Q5 they replace --
 #     which never had a spill-free setting here at any context size.
-# Comment out to fall back to Ollama's default.
+# DO NOT comment this out expecting Ollama's default -- this line said exactly
+# that until 19-08-2026 and it was FALSE. `core/config.py` carries a schema
+# default of 8192, so removing the line changes nothing; TOML has no null, so
+# there is no way to unset it from this file at all. To genuinely send no
+# num_ctx you must change the schema default in core/config.py to None. The
+# false comment silently voided one arm of the 19-08-2026 A/B before anyone
+# noticed the log still read num_ctx=8192.
 num_ctx = 8192
 # Cap on generated tokens per pass. Unbounded generation let the observed
 # repetition loop (2026-06-18) run until it filled the context; this bounds that

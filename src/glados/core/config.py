@@ -96,6 +96,12 @@ class LLMConfig(BaseModel):
     # per card; do not assume bigger. The qwen3 tags that replaced it both fit
     # the card whole at 8192 (zero spill), so headroom exists -- but note that
     # num_predict is now 4096, i.e. HALF this window can be spent on one reply.
+    # This default of 8192 is what a config OMITTING num_ctx gets -- it does NOT
+    # fall through to Ollama's own default. The type allows None, but TOML has no
+    # null, so None is reachable only by editing this line. Setting it too low is
+    # not a soft failure: at 2048 with the full tool list the prompt truncates
+    # from the FRONT and the model loses the tool definitions entirely (measured
+    # 19-08-2026 -- 0/3 tool calls on every model tested, incl. qwen3).
     num_ctx: int | None = Field(default=8192, ge=1)
     # Generation cap sent as options.num_predict. Unbounded generation let an
     # observed repetition loop (the CallCheckLoginStatus leak, 2026-06-18) run
