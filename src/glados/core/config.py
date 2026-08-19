@@ -93,7 +93,20 @@ class LLMConfig(BaseModel):
     # observed repetition loop (the CallCheckLoginStatus leak, 2026-06-18) run
     # until it filled the context; this bounds that failure class to one turn.
     # Must stay comfortably above the longest legitimate spoken reply.
-    num_predict: int | None = Field(default=512, ge=1)
+    #
+    # MODEL-DEPENDENT -- re-derive on every model swap. A reasoning model spends
+    # this budget inside its <think> block before emitting anything, so a cap
+    # sized for a non-reasoning model truncates it mid-reasoning and the turn
+    # surfaces as an EMPTY reply with no tool call. Measured 2026-08-19 on the
+    # T1-T12 suite: at 512, qwen3:4b scored 4/22 and qwen3:8b 18/22; at 4096 the
+    # same models scored 20/22 and 21/22. 512 was ample for the non-reasoning
+    # qwen2.5 incumbent, which is exactly why the old "model-independent" note
+    # here was both wrong and hard to doubt.
+    #
+    # The cost of raising it is that the repetition loop above is bounded 8x
+    # looser. Accepted deliberately: a wedged turn is recoverable, a silently
+    # blanked assistant is not.
+    num_predict: int | None = Field(default=4096, ge=1)
     # Language GLaDOS must reply in. The language guard (core/language_guard.py)
     # rewrites a free-form reply whose dominant script is not this language's --
     # a deterministic backstop for the cold-model drift the prompt rule alone

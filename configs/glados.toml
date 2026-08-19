@@ -55,8 +55,18 @@ num_ctx = 8192
 # Costs NOTHING at rest: unlike num_ctx this reserves no memory, it is only a
 # stop condition. The single risk is clipping a genuinely long reply, and that
 # is no longer silent -- Ollama reports done_reason="length" and the adapter
-# warns, naming the cap. Model-independent; unchanged across model swaps.
-num_predict = 512
+# warns, naming the cap. Watch for that warning in ~/.glados/logs/glados.log,
+# NOT the console.
+#
+# MODEL-DEPENDENT -- re-derive on every model swap. This said
+# "model-independent" until 2026-08-19; that was wrong. A reasoning model burns
+# the budget inside <think> before emitting anything, so a cap sized for a
+# non-reasoning model cuts it off mid-reasoning and the turn comes back as an
+# EMPTY reply with no tool call -- indistinguishable from a hang. On the T1-T12
+# suite at 512: qwen3:4b 4/22, qwen3:8b 18/22. The same models at 4096: 20/22
+# and 21/22. The shipping qwen2.5 never truncates at either value, which is
+# what made the false claim so easy to believe.
+num_predict = 4096
 # Language GLaDOS must reply in. The deterministic language guard rewrites any
 # free-form reply whose dominant script is not this language's -- the backstop
 # for cold-model drift the prompt rule alone does not stop. Only mapped
