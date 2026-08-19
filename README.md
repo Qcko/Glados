@@ -38,7 +38,7 @@ Full design and trade-offs in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 **v0** — text-only end-to-end. WebSocket protocol, per-client auth, Organizer
 with single-turn sessions, JSONL traces, in-process MCP with one dummy tool
-(`time.now`), and a real local LLM via **Ollama + Qwen2.5:7b-instruct**. A
+(`time.now`), and a real local LLM via **Ollama + Qwen3** (`qwen3:8b` shipped, `qwen3:4b` the code default). A
 deterministic `fake` backend is kept for tests.
 
 Roadmap: v0 text → v1 voice in browser → v2 multi-room concurrency → v3 Pi
@@ -50,7 +50,7 @@ clients → v4 wake word → v5 speaker ID. See ARCHITECTURE §12.
 uv sync
 # one-time: install Ollama and pull the default model
 winget install Ollama.Ollama
-ollama pull qwen2.5:7b-instruct
+ollama pull qwen3:8b && ollama pull qwen3:4b
 
 uv run glados
 ```

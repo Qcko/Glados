@@ -35,7 +35,7 @@ class OllamaLLM:
         self,
         *,
         host: str = "http://localhost:11434",
-        model: str = "qwen2.5:7b-instruct",
+        model: str = "qwen3:4b",
         temperature: float = 0.2,
         timeout: float = 60.0,
         keep_alive: str = "-1",

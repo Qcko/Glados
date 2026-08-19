@@ -40,3 +40,19 @@ When prompting a duck, include GLaDOS-shaped concerns to probe, e.g. "can the
 reaper sleep a server a dispatch just woke?" or "does this leak state across
 rooms?". Point the duck at the relevant `ARCHITECTURE.md` section so it can judge
 fit with the design.
+
+## Model testing: always run BOTH shipped-tier models
+
+Whenever a change is measured against a model -- bake-off suites
+(`scripts/bakeoff_run.py`), dispatch scoring, prompt changes, a regression
+probe -- run it against **both `qwen3:8b` and `qwen3:4b`**, never only the
+shipped one. `qwen3:8b` is what `configs/glados.toml` ships; `qwen3:4b` is the
+hardcoded default in `core/config.py`, so a config omitting `model` runs it.
+Both are live surfaces and a result from one is not evidence about the other.
+
+Measuring only the shipped model is how the `num_predict = 512` bug survived:
+it was harmless on the non-reasoning incumbent and silently blanked every qwen3
+turn, and nothing caught it because nothing exercised the other model.
+
+Restart GLaDOS between models -- room history carries across runs and a killed
+run's turns get replayed into the next one (see the confabulation trigger).

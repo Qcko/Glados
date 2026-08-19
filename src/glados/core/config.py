@@ -63,7 +63,12 @@ class AuthConfig(BaseModel):
 
 class LLMConfig(BaseModel):
     backend: Literal["fake", "ollama"] = "fake"
-    model: str = "qwen2.5:7b-instruct"
+    # The fallback a config lands on when it omits `model` -- deliberately the
+    # SMALLEST capable model (4.18 GB), not the shipped one, so an accidental
+    # default is cheap to load rather than a 6.6 GB surprise. Shipped model is
+    # chosen in configs/glados.toml; keep this in sync with what is on disk --
+    # a default naming an unpulled tag 404s at the first inference, not at boot.
+    model: str = "qwen3:4b"
     host: str = "http://localhost:11434"
     temperature: float = 0.2
     timeout: float = 60.0
@@ -83,11 +88,14 @@ class LLMConfig(BaseModel):
     # behaviour: an escape hatch for a model whose default is already right.
     #
     # 8192 is deliberately conservative, NOT the model's maximum. Measured
-    # 2026-08-17 on a 12 GB card: qwen2.5:14b-instruct-q5_K_M spills to CPU at
-    # every context size (815 MiB at 4k, 1.7 GB at 8k, 3.9 GB at 16k, 8.7 GB at
-    # 32k), and each spilled layer costs decode speed. Raising this does not
-    # OOM -- it quietly offloads more and gets slower, which is why the cost is
-    # easy to miss. Re-derive it per model and per card; do not assume bigger.
+    # 2026-08-17 on a 12 GB card: qwen2.5:14b-instruct-q5_K_M (retired
+    # 19-08-2026) spilled to CPU at every context size (815 MiB at 4k, 1.7 GB at
+    # 8k, 3.9 GB at 16k, 8.7 GB at 32k), and each spilled layer costs decode
+    # speed. Raising this does not OOM -- it quietly offloads more and gets
+    # slower, which is why the cost is easy to miss. Re-derive it per model and
+    # per card; do not assume bigger. The qwen3 tags that replaced it both fit
+    # the card whole at 8192 (zero spill), so headroom exists -- but note that
+    # num_predict is now 4096, i.e. HALF this window can be spent on one reply.
     num_ctx: int | None = Field(default=8192, ge=1)
     # Generation cap sent as options.num_predict. Unbounded generation let an
     # observed repetition loop (the CallCheckLoginStatus leak, 2026-06-18) run

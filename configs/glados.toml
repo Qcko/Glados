@@ -14,13 +14,22 @@ clients = ["desk-ui", "desk2-ui", "livingroom-mic", "livingroom-speaker"]
 # backend: "fake" (deterministic, used in tests) or "ollama"
 backend = "ollama"
 # Swap by un/commenting. Restart GLaDOS to pick up the change.
-# model = "qwen2.5:7b-instruct"            # baseline (4.7 GB) -- fallback; beats Q4 14b (bake-off 2026-06-03)
-# model = "qwen2.5:14b-instruct"             # Q4_K_M (8.4 GB) -- DO NOT SHIP: Thai/JSON pathologies (bake-off 2026-06-03)
-model = "qwen2.5:14b-instruct-q5_K_M"      # Q5_K_M (10.5 GB) -- bake-off winner 2026-06-03 (15/22)
+# REASONING MODELS: qwen3 emits <think> tokens that count against num_predict.
+# Never ship one without checking the num_predict note further down -- at 512 a
+# qwen3 goes silent rather than slow, which does not look like a config fault.
+# model = "qwen3:4b"                         # 4.18 GB -- 20/22, plain-sentence replies (best for TTS); also the hardcoded default
+# model = "qwen2.5:14b-instruct"             # Q4_K_M (8.4 GB) -- DO NOT SHIP: Thai/JSON pathologies (bake-off 03-06-2026)
+# model = "qwen2.5:14b-instruct-q5_K_M"      # Q5_K_M (10.5 GB) -- previous ship; 15/22, and the only model measured to LEAK tool text
+model = "qwen3:8b"                         # 6.61 GB -- 21/22 and the lowest per-turn latency measured (19-08-2026)
 host = "http://localhost:11434"
-# Greedy decoding (0.0): the 14b/Q5 local model drifts into another language
-# when allowed to sample; greedy + the "reply in English" prompt rule curbs the
-# code-switching without hurting tool-call selection.
+# Greedy decoding (0.0). Originally set because the 14b/Q5 (retired 19-08-2026)
+# drifted into another language when sampled; greedy + the "reply in English"
+# prompt rule curbed the code-switching without hurting tool-call selection.
+# RECONSIDERED, not inherited: qwen3:8b was measured at 0.0 and scored 21/22
+# with no drift and no repetition loop. Flagged for future work -- Qwen's own
+# guidance advises against greedy for qwen3 in thinking mode (repetition risk),
+# which is the failure num_predict bounds, and that bound is now 8x looser.
+# Revisit if a repetition loop ever shows up in ~/.glados/logs/glados.log.
 temperature = 0.0
 timeout = 60.0
 # Keep the model resident in VRAM so it never evicts mid-session. A re-cold
@@ -34,19 +43,28 @@ keep_alive = "-1"
 # -- silently evicting the system prompt, and with it the <external> rule and
 # the reply-in-English rule. Nothing else here budgets tokens (history is capped
 # by turn count, not size), so this is the only ceiling.
-# 8192 is conservative on purpose, NOT the model maximum: measured 2026-08-17 on
-# a 12 GB card, the 14b/Q5 model spills to CPU at EVERY context size (1.7 GB at
-# 8k, 3.9 GB at 16k, 8.7 GB at 32k) and each spilled layer costs decode speed.
+# 8192 is what the shipped qwen3:8b was MEASURED at (21/22, 19-08-2026), not a
+# ceiling forced by the card: unlike the 14b/Q5 it replaces, qwen3:8b fits whole
+# with room to spare, so there IS headroom to raise this -- but raising it is
+# unmeasured, and see the num_predict interaction noted below before doing so.
 # Raising this will not OOM -- it just offloads more and gets slower.
 # THIS VALUE BELONGS TO THE MODEL TAG SELECTED ABOVE -- change both together.
+# Historical, for the 14b/Q5 that shipped until 19-08-2026: it spilled to CPU at
+# EVERY context size (1.7 GB at 8k, 3.9 GB at 16k, 8.7 GB at 32k), which is why
+# this value used to be described as conservative-on-purpose.
 # Measured 2026-08-17, 12 GB card, ~2.3 GB held by the desktop:
 #   qwen2.5:14b-instruct-q5_K_M -> 8192. Spills 1.7 GB to CPU even here (and
 #     815 MiB at 4096), so there is no spill-free setting for this model on
 #     this card; 8192 buys context without making the offload much worse.
 #   qwen2.5:7b-instruct         -> 32768. Fully resident, ZERO spill (7830 MiB
-#     total), and decode is flat across 8k/16k/32k -- the signature of nothing
-#     being offloaded. On an 8 GB production card use 16384 (6006 MiB) instead;
-#     32k leaves no room for the desktop.
+#     total). Model REMOVED from disk 19-08-2026 (qwen3:4b is smaller and
+#     scores better); row kept because it is what the 32k datapoint came from.
+# Measured 19-08-2026, same card, via /api/ps at the shipped 8192:
+#   qwen3:8b (SHIPPED) -> 6.61 GB, size == size_vram, i.e. ZERO spill. This is
+#     the value the 21/22 bake-off ran at; raising it is UNMEASURED.
+#   qwen3:4b           -> 4.18 GB, size == size_vram, ZERO spill.
+#   Both qwen3 tags fit the 12 GB card whole, unlike the 14b/Q5 they replace --
+#     which never had a spill-free setting here at any context size.
 # Comment out to fall back to Ollama's default.
 num_ctx = 8192
 # Cap on generated tokens per pass. Unbounded generation let the observed
@@ -64,7 +82,7 @@ num_ctx = 8192
 # non-reasoning model cuts it off mid-reasoning and the turn comes back as an
 # EMPTY reply with no tool call -- indistinguishable from a hang. On the T1-T12
 # suite at 512: qwen3:4b 4/22, qwen3:8b 18/22. The same models at 4096: 20/22
-# and 21/22. The shipping qwen2.5 never truncates at either value, which is
+# and 21/22. The previously shipping qwen2.5 never truncates at either value, which is
 # what made the false claim so easy to believe.
 num_predict = 4096
 # Language GLaDOS must reply in. The deterministic language guard rewrites any
@@ -102,8 +120,8 @@ cloud_enabled = false
 provider = "local"
 cloud_model = "claude-haiku-4-5-20251001"
 # provider="local" only: Ollama tag for the specialist. Empty = reuse the
-# primary brain's model (alias). Point at a bigger local model (e.g. a 14b while
-# [llm] runs a 7b) for a realistic primary-vs-specialist split.
+# primary brain's model (alias). Point at a bigger local model (e.g. qwen3:8b while
+# [llm] runs qwen3:4b) for a realistic primary-vs-specialist split.
 local_smart_model = ""
 api_key_env = "ANTHROPIC_API_KEY"
 # Retry a turn the primary brain finished as `failed` (deterministic outcome)

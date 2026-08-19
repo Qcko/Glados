@@ -236,7 +236,7 @@ def test_local_specialist_distinct_model_builds_separate_ollama() -> None:
         enabled=True, provider="local", local_smart_model="qwen2.5:14b-instruct"
     )
     specialist = _build_specialist_llm(
-        cfg, LLMConfig(model="qwen2.5:7b-instruct"), FakeLLM()
+        cfg, LLMConfig(model="qwen3:4b"), FakeLLM()
     )
     assert isinstance(specialist, OllamaLLM) and specialist is not None
 
