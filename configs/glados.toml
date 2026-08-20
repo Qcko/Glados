@@ -197,11 +197,21 @@ silero_threshold = 0.5
 #   300ms    SPLIT       held      held
 #   400ms    SPLIT       held      held
 #   600ms    SPLIT       split     held
-# The old 200 ms split a sentence on a 300 ms gap, and a normal breath is
-# 300-600 ms -- that is the reported "GLaDOS cuts me off when I breathe". 500 ms
-# holds gaps up to 400 ms. 600 ms would hold everything tested but costs another
-# 100 ms of end-of-turn latency on EVERY turn; 500 is the compromise.
-silero_min_silence_ms = 500
+# The old 200 ms split a sentence on a 300 ms gap. 500 (briefly shipped
+# 20-08-2026) was then raised to 800 the same day on LIVE evidence, which beat
+# the synthetic estimate: measuring a real spoken sentence from the desk mic,
+# one speaker's ordinary mid-phrase gaps ran 400, 430, 500 and 780 ms. 500 left
+# only ~20 ms of margin over normal speech and would have cut on the 780.
+# Live-injected calibration through the real pipeline (lab vad_live.py, exact
+# gaps, no human timing): gaps to 550 ms held, 600 ms split.
+#
+# THIS IS ONE SPEAKER, ONE SESSION. The right value is per-person, so 800 is a
+# stopgap, not an answer. Filed: GLaDOS should derive it by observing the
+# speaker's own gap distribution during use (deterministic harness measurement,
+# NOT a prompt or an LLM judgement) -- see PITFALLS / SESSION notes on adaptive
+# endpointing. Semantic endpointing (is the transcript a complete request?) is
+# the other half, and is where a reasoning model legitimately helps.
+silero_min_silence_ms = 800
 # NOT MEASURED TO HELP -- this is a deliberate hedge, and the distinction matters.
 # On clean synthesised speech the old 30 ms already delivered the FULL utterance
 # (0 ms lost at every pad tested), so the offline probe does NOT reproduce the

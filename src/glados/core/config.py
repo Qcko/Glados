@@ -219,7 +219,7 @@ class VADConfig(BaseModel):
     # already lost nothing, so the dropped-onset symptom did not reproduce here
     # and most likely lives in the capture/AEC path, which no VAD value can fix.
     # Raising it is free (SileroVAD holds every chunk for up to 60 s anyway).
-    silero_min_silence_ms: int = 500
+    silero_min_silence_ms: int = 800
     silero_speech_pad_ms: int = 200
 
 
