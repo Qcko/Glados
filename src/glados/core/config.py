@@ -95,14 +95,20 @@ class LLMConfig(BaseModel):
     # slower, which is why the cost is easy to miss. Re-derive it per model and
     # per card; do not assume bigger. The qwen3 tags that replaced it both fit
     # the card whole at 8192 (zero spill), so headroom exists -- but note that
-    # num_predict is now 4096, i.e. HALF this window can be spent on one reply.
-    # This default of 8192 is what a config OMITTING num_ctx gets -- it does NOT
+    # num_predict is now 4096, i.e. a third of this window can go on one reply.
+    # This default (12288) is what a config OMITTING num_ctx gets -- it does NOT
     # fall through to Ollama's own default. The type allows None, but TOML has no
     # null, so None is reachable only by editing this line. Setting it too low is
     # not a soft failure: at 2048 with the full tool list the prompt truncates
     # from the FRONT and the model loses the tool definitions entirely (measured
     # 19-08-2026 -- 0/3 tool calls on every model tested, incl. qwen3).
-    num_ctx: int | None = Field(default=8192, ge=1)
+    #
+    # COUPLED TO num_predict. Generated tokens share this window, so keep
+    # `max_assembled_prompt + num_predict <= num_ctx`. Raised 8192 -> 12288 on
+    # 20-08-2026 because 4096 of num_predict against an ~4.7k steady-state
+    # prompt exceeded 8192 by ~570 tokens. Both qwen3 tags still fit the 12 GB
+    # card whole at 12288 (8b 7.23 GB, 4b 4.80 GB, zero spill).
+    num_ctx: int | None = Field(default=12288, ge=1)
     # Generation cap sent as options.num_predict. Unbounded generation let an
     # observed repetition loop (the CallCheckLoginStatus leak, 2026-06-18) run
     # until it filled the context; this bounds that failure class to one turn.

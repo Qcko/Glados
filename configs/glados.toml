@@ -17,10 +17,10 @@ backend = "ollama"
 # REASONING MODELS: qwen3 emits <think> tokens that count against num_predict.
 # Never ship one without checking the num_predict note further down -- at 512 a
 # qwen3 goes silent rather than slow, which does not look like a config fault.
-# model = "qwen3:4b"                         # 4.18 GB -- 20/22, plain-sentence replies (best for TTS); also the hardcoded default
+# model = "qwen3:4b"                         # 4.80 GB at 12288 -- 20/22, plain-sentence replies (best for TTS); also the hardcoded default
 # model = "qwen2.5:14b-instruct"             # Q4_K_M (8.4 GB) -- DO NOT SHIP: Thai/JSON pathologies (bake-off 03-06-2026)
 # model = "qwen2.5:14b-instruct-q5_K_M"      # Q5_K_M (10.5 GB) -- previous ship; 15/22, and the only model measured to LEAK tool text
-model = "qwen3:8b"                         # 6.61 GB -- 21/22 and the lowest per-turn latency measured (19-08-2026)
+model = "qwen3:8b"                         # 7.23 GB at 12288 -- 21/22 and the lowest per-turn latency measured (19-08-2026)
 host = "http://localhost:11434"
 # Greedy decoding (0.0). Originally set because the 14b/Q5 (retired 19-08-2026)
 # drifted into another language when sampled; greedy + the "reply in English"
@@ -43,10 +43,11 @@ keep_alive = "-1"
 # -- silently evicting the system prompt, and with it the <external> rule and
 # the reply-in-English rule. Nothing else here budgets tokens (history is capped
 # by turn count, not size), so this is the only ceiling.
-# 8192 is what the shipped qwen3:8b was MEASURED at (21/22, 19-08-2026), not a
-# ceiling forced by the card: unlike the 14b/Q5 it replaces, qwen3:8b fits whole
-# with room to spare, so there IS headroom to raise this -- but raising it is
-# unmeasured, and see the num_predict interaction noted below before doing so.
+# 12288 since 20-08-2026, raised from the 8192 the 21/22 bake-off was scored at,
+# because num_predict=4096 did not FIT inside 8192 alongside a real prompt (see
+# the coupling note below). The score was not re-measured at 12288 -- a larger
+# window is not a sampling change, but if quality ever looks off, this is a
+# variable that moved.
 # Raising this will not OOM -- it just offloads more and gets slower.
 # THIS VALUE BELONGS TO THE MODEL TAG SELECTED ABOVE -- change both together.
 # Historical, for the 14b/Q5 that shipped until 19-08-2026: it spilled to CPU at
@@ -59,20 +60,49 @@ keep_alive = "-1"
 #   qwen2.5:7b-instruct         -> 32768. Fully resident, ZERO spill (7830 MiB
 #     total). Model REMOVED from disk 19-08-2026 (qwen3:4b is smaller and
 #     scores better); row kept because it is what the 32k datapoint came from.
-# Measured 19-08-2026, same card, via /api/ps at the shipped 8192:
-#   qwen3:8b (SHIPPED) -> 6.61 GB, size == size_vram, i.e. ZERO spill. This is
-#     the value the 21/22 bake-off ran at; raising it is UNMEASURED.
-#   qwen3:4b           -> 4.18 GB, size == size_vram, ZERO spill.
+# Measured 19-08-2026, same card, via /api/ps at 8192:
+#   qwen3:8b -> 6.61 GB, size == size_vram, i.e. ZERO spill. The 21/22 bake-off
+#     was scored at this value.
+#   qwen3:4b -> 4.18 GB, size == size_vram, ZERO spill.
 #   Both qwen3 tags fit the 12 GB card whole, unlike the 14b/Q5 they replace --
 #     which never had a spill-free setting here at any context size.
+# Measured 20-08-2026 at the now-shipped 12288, same card:
+#   qwen3:8b (SHIPPED) -> 7.23 GB, ZERO spill. +0.62 GB over 8192.
+#   qwen3:4b (default) -> 4.80 GB, ZERO spill. +0.62 GB over 8192.
+#
+# COUPLED TO num_predict -- NEVER TUNE ONE ALONE. Generated tokens occupy this
+# same window, so the invariant is:
+#     max_assembled_prompt + num_predict <= num_ctx
+# Measured 20-08-2026 over a 9-turn search-heavy session, the assembled prompt
+# plateaus at ~4.7k (history_max_turns bounds it; large tool payloads are not
+# retained whole). At the OLD 8192 that left 4662 + 4096 = 8758, i.e. the cap
+# permitted a reply ~570 tokens LARGER than the window could hold -- silent
+# front-truncation waiting to happen, and front-truncation evicts the system
+# prompt FIRST. It never fired only because real replies top out near 800
+# tokens. 12288 restores the margin with room for history growth.
+#
+# The context-pressure warning does NOT enforce that invariant. It fires on
+# prompt_tokens alone at 0.8 * num_ctx (brain/llm/ollama.py), i.e. 9830 here,
+# while the invariant caps the prompt at num_ctx - num_predict = 8192. So there
+# is a ~1.6k band where the coupling is violated and nothing warns. Checking
+# `prompt_tokens + num_predict > num_ctx` would close it.
+#
+# CO-RESIDENCY WARNING: 7.23 + 4.80 = 12.03 GB, which no longer fits the 12 GB
+# card. At 8192 the pair fitted (6.61 + 4.18 = 10.79). Harmless as shipped --
+# `local_smart_model = ""` means the specialist ALIASES the primary, so only one
+# model is resident -- but the router section below suggests running qwen3:8b as
+# a specialist while [llm] runs qwen3:4b, and with keep_alive="-1" neither
+# evicts. That documented split now spills at 12288. Drop to 8192, or accept the
+# spill, if you ever actually run two distinct models.
+#
 # DO NOT comment this out expecting Ollama's default -- this line said exactly
 # that until 19-08-2026 and it was FALSE. `core/config.py` carries a schema
-# default of 8192, so removing the line changes nothing; TOML has no null, so
+# default (12288 since 20-08-2026), so removing the line changes nothing; TOML has no null, so
 # there is no way to unset it from this file at all. To genuinely send no
 # num_ctx you must change the schema default in core/config.py to None. The
 # false comment silently voided one arm of the 19-08-2026 A/B before anyone
 # noticed the log still read num_ctx=8192.
-num_ctx = 8192
+num_ctx = 12288
 # Cap on generated tokens per pass. Unbounded generation let the observed
 # repetition loop (2026-06-18) run until it filled the context; this bounds that
 # failure to a single turn. Keep well above the longest real spoken reply.

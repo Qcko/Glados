@@ -181,6 +181,40 @@ timeout_s = 35.0
 mutating = true
 timeout_s = 35.0
 
+# Added 20-08-2026. This tool had NO overlay at all, which cost two things:
+#   1. `mutating` defaulted to false, so the escalation guard could not see it.
+#      That guard exists to stop a `failed` turn being re-driven on the
+#      specialist and firing the side effect twice -- and this is the single
+#      highest-blast-radius write we have, since it adds an ENTIRE RECIPE in one
+#      call. Exactly the failure the add_by_volume comment above describes.
+#   2. `timeout_s` fell back to the 8 s dispatch default (mcp/registry.py
+#      `dispatch(timeout=8.0)`) while every sibling cart tool gets 35 s. It
+#      performs N sequential Selenium cart writes in ONE call, so 8 s is not
+#      survivable: a 13-item add measured 20-08-2026 timed out on both models.
+# Same class as the 04-06-2026 escalation double-fire fix. The tool arrived
+# 16-06-2026 as an INBOUND handoff from the DunnesStoresMCP repo, which is how
+# it missed the overlay pass -- worth knowing, because the next inbound tool
+# will miss it the same way.
+#
+# TWO KNOWN LIMITS OF THIS FIX, both deliberate, neither closed here:
+#   a) `mutating` only protects the SUCCESS path. The guard is
+#      `t.ok and t.mutating` (core/turn_outcome.py `_has_successful_mutation`),
+#      and a dispatch timeout returns `ok=False` (mcp/registry.py). So a recipe
+#      add that times out HALFWAY still classifies `failed` and can still be
+#      re-driven on the specialist -- and the Dunnes contract is ADDITIVE
+#      (SESSION 16-06-2026), so a re-run DOUBLES the quantities already written.
+#      180 s makes that rare; it does not make it impossible. Closing it needs
+#      an "attempted mutation" signal, not just a successful one.
+#   b) 180 s of an UNGATED, model-invoked call blocks the room worker
+#      (core/room_queues.py runs one worker per room), so later utterances in
+#      that room queue behind it. `bootstrap_login` below takes the other route
+#      -- 300 s but confirmation-gated, explicitly so it cannot starve a room
+#      unattended. Barge-in still cancels the in-flight action, which is the
+#      only reason this is tolerable.
+[server.tool_overlays.add_recipe_ingredients]
+mutating = true
+timeout_s = 180.0
+
 [server.tool_overlays.view_favorites]
 timeout_s = 35.0
 
