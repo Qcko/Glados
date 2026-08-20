@@ -209,8 +209,18 @@ class VADConfig(BaseModel):
     # utterance done; speech_pad_ms widens the emitted slice on each
     # side so Whisper sees a tiny breath of context.
     silero_threshold: float = 0.5
-    silero_min_silence_ms: int = 200
-    silero_speech_pad_ms: int = 30
+    # These ARE the end-of-utterance hangover and the pre-roll -- both already
+    # existed, they were just set too tight. Retuned 20-08-2026 offline (Piper
+    # speech, silence-trimmed, spliced gap, fed through the real SileroVAD).
+    # min_silence 200 split a sentence on a 300 ms gap; a breath is 300-600 ms.
+    # 500 holds gaps to 400 ms. It is NOT free -- it adds ~300 ms before GLaDOS
+    # starts replying, on every turn.
+    # speech_pad is a HEDGE, not a measured fix: on clean speech the old 30 ms
+    # already lost nothing, so the dropped-onset symptom did not reproduce here
+    # and most likely lives in the capture/AEC path, which no VAD value can fix.
+    # Raising it is free (SileroVAD holds every chunk for up to 60 s anyway).
+    silero_min_silence_ms: int = 500
+    silero_speech_pad_ms: int = 200
 
 
 class STTConfig(BaseModel):

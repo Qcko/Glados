@@ -186,8 +186,39 @@ wav_traces = true
 backend = "silero"
 fake_utterance_samples = 16000  # 1 s at 16 kHz
 silero_threshold = 0.5
-silero_min_silence_ms = 200
-silero_speech_pad_ms = 30
+# min_silence_ms IS the end-of-utterance hangover, and speech_pad_ms IS the
+# pre-roll -- neither needs building, they only needed tuning. Retuned
+# 20-08-2026 from measurements in <lab-root>/glados/vad_probe.py, which feeds
+# Piper-synthesised speech with a spliced-in "breath" through the real
+# SileroVAD (no microphone involved).
+#
+# MEASURED, on silence-trimmed clips so the stated gap is the REAL gap:
+#   gap    200 (old)   500 (new)   600
+#   300ms    SPLIT       held      held
+#   400ms    SPLIT       held      held
+#   600ms    SPLIT       split     held
+# The old 200 ms split a sentence on a 300 ms gap, and a normal breath is
+# 300-600 ms -- that is the reported "GLaDOS cuts me off when I breathe". 500 ms
+# holds gaps up to 400 ms. 600 ms would hold everything tested but costs another
+# 100 ms of end-of-turn latency on EVERY turn; 500 is the compromise.
+silero_min_silence_ms = 500
+# NOT MEASURED TO HELP -- this is a deliberate hedge, and the distinction matters.
+# On clean synthesised speech the old 30 ms already delivered the FULL utterance
+# (0 ms lost at every pad tested), so the offline probe does NOT reproduce the
+# reported dropped-onset symptom at all. That points at the capture/AEC path
+# dropping audio before it ever reaches the server -- which no VAD setting can
+# fix, because you cannot pad audio you never received.
+# Raised anyway because it is genuinely free: SileroVAD retains every inbound
+# chunk in `_history` regardless of speech state, capped at 60 SECONDS, so this
+# only decides how much of already-held audio is handed over. It buys margin for
+# a real mic, where onsets ramp rather than starting abruptly.
+# If dropped onsets persist on hardware, THIS IS NOT THE FIX -- look at capture.
+silero_speech_pad_ms = 200
+# THE TRADE, so it is not rediscovered as a regression: a longer hangover means
+# the user waits ~300 ms longer after finishing before GLaDOS starts replying.
+# That is a real cost against barge-in/responsiveness, accepted deliberately --
+# being cut off mid-sentence is worse than a slightly later reply. If end-of-turn
+# latency ever becomes the complaint, this is the first value to look at.
 
 [stt]
 # "fake": returns `fake_text`. "faster-whisper": real STT (first run
