@@ -186,17 +186,44 @@ def _escape_kind(text: str) -> EscapeKind | None:
 _MD_BOLD_ITALIC_RE = re.compile(r"\*{1,3}([^*\n]+?)\*{1,3}")
 _MD_UNDERSCORE_EMPH_RE = re.compile(r"(?<!\w)_{1,2}([^_\n]+?)_{1,2}(?!\w)")
 _MD_CODE_RE = re.compile(r"`+([^`\n]+?)`+")
-_MD_BULLET_RE = re.compile(r"^[ \t]*[-*+][ \t]+", flags=re.MULTILINE)
-_MD_HEADING_RE = re.compile(r"^#{1,6}[ \t]+", flags=re.MULTILINE)
+_MD_BULLET_RE = re.compile(r"^[ \t]*[-*+][ \t]+")
+_MD_HEADING_RE = re.compile(r"^[ \t]*#{1,6}[ \t]+")
+_FULL_STOP_CHARS = ".!?:"
+_GLUE_CHARS = ",;"
 
 
 def _strip_markdown_for_tts(text: str) -> str:
     text = _MD_BOLD_ITALIC_RE.sub(r"\1", text)
     text = _MD_UNDERSCORE_EMPH_RE.sub(r"\1", text)
     text = _MD_CODE_RE.sub(r"\1", text)
-    text = _MD_BULLET_RE.sub("", text)
-    text = _MD_HEADING_RE.sub("", text)
-    return text
+    return "\n".join(_speakable_line(line) for line in text.split("\n"))
+
+
+def _speakable_line(line: str) -> str:
+    """Drop a bullet or heading marker and give the surviving line a full
+    stop. Piper prosodies off punctuation, not line breaks, so an item with
+    no stop -- or one ending in list glue like a comma -- runs into the next
+    one and the pause lands mid-phrase."""
+    marked = _strip_line_marker(line)
+    if marked is None:
+        return line
+    if not marked:
+        return ""
+    if marked[-1] in _FULL_STOP_CHARS:
+        return marked
+    if marked[-1] in _GLUE_CHARS:
+        return marked[:-1] + "."
+    return marked + "."
+
+
+def _strip_line_marker(line: str) -> str | None:
+    """The line with its bullet or heading marker removed and trailing
+    whitespace trimmed, or None when it carried no marker at all."""
+    for marker in (_MD_BULLET_RE, _MD_HEADING_RE):
+        stripped = marker.sub("", line, count=1)
+        if stripped != line:
+            return stripped.rstrip()
+    return None
 
 
 class Organizer:

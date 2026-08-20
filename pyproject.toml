@@ -35,5 +35,7 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 # Make the top-level `client_room/` package importable in tests (it lives at
-# the repo root, beside `client_web/`, not under `src/`).
-pythonpath = ["."]
+# the repo root, beside `client_web/`, not under `src/`). `src` is listed too
+# so a run inside a git worktree tests THAT tree -- without it the editable
+# install wins and every worktree test run silently validates the main tree.
+pythonpath = ["src", "."]
