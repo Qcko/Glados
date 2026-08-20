@@ -218,8 +218,16 @@ timeout_s = 180.0
 [server.tool_overlays.view_favorites]
 timeout_s = 35.0
 
+# A voice reply is read start to finish -- the listener cannot skim -- so a
+# dozen sale items is a dozen items of speech. The server ranks and filters
+# (it owns the price history); GLaDOS only slices, which is why these three
+# keys name a shape and a count and never a field of Dunnes' schema.
+# `flex_to` covers the absurd case: withholding one item to offer it back.
 [server.tool_overlays.scan_favorites_for_sales]
 timeout_s = 35.0
+max_items = 5
+flex_to = 7
+items_key = "items"
 
 # --- Cart --------------------------------------------------------------
 

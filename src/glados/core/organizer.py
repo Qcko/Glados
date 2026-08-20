@@ -43,6 +43,7 @@ from .protocols import (
 )
 from .room_queues import RoomQueueManager
 from .sessions import SessionRegistry
+from .tool_payload_cap import PayloadCap, cap_tool_payload
 from .traces import TraceStore
 from .turn_outcome import TurnRecord, classify, is_action_request, is_time_request
 
@@ -1324,7 +1325,12 @@ class Organizer:
             if not denied:
                 mutating = bool(spec is not None and (spec.mutating or spec.requires_confirmation))
                 outcome.record_tool(f"{tc.server}.{tc.name}", result.ok, mutating=mutating)
-            raw = json.dumps(result.content) if result.ok else (result.error or "error")
+            # Cap AFTER the broadcast and the trace event above, so the desk
+            # client and `traces/` keep the whole result and only the SPOKEN
+            # channel is narrowed. A cap upstream of those would destroy data
+            # rather than abbreviate speech.
+            content = self._capped_for_speech(spec, result)
+            raw = json.dumps(content) if result.ok else (result.error or "error")
             # `spec` already fetched above for the requires_confirmation
             # check -- reuse rather than another registry lookup.
             if spec is not None and spec.untrusted:
@@ -1344,6 +1350,41 @@ class Organizer:
                     content=wrapped,
                 )
             )
+
+    def _capped_for_speech(
+        self, spec: "ToolSpec | None", result: MCPCallResult
+    ) -> object:
+        """The payload the model should see. Never raises: a cap that cannot be
+        applied returns the result untouched, because the tolerable failure is
+        the long list we already have, not a dead turn or a silent "nothing
+        found" that reads exactly like the truth."""
+        if not result.ok or spec is None or spec.max_items is None:
+            return result.content
+        try:
+            capped = cap_tool_payload(
+                result.content,
+                PayloadCap(
+                    max_items=spec.max_items,
+                    flex_to=spec.flex_to,
+                    items_key=spec.items_key,
+                ),
+            )
+        except Exception:
+            log.exception(
+                "payload cap failed for %s; speaking the whole result",
+                spec.qualified,
+            )
+            return result.content
+        if not capped.recognised:
+            # A configured cap that recognised nothing is schema drift whose
+            # only other symptom is the old over-long reply -- silent exactly
+            # where it looks like nothing changed.
+            log.warning(
+                "payload cap for %s found no list at items_key=%r; result uncapped",
+                spec.qualified,
+                spec.items_key,
+            )
+        return capped.content
 
     async def _broadcast(self, room_id: str, msg: BaseModel) -> None:
         for cid in self.clients_in_room(room_id):

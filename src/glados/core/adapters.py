@@ -49,6 +49,13 @@ class ToolSpec(BaseModel):
     # need ~30s for a page load -- bake the override into the tool's spec
     # rather than threading a timeout argument through every call site.
     timeout_s: float | None = None
+    # Spoken-length cap, set via the servers.toml overlay. None leaves the
+    # result whole. See core/tool_payload_cap.py for the semantics; the
+    # Organizer applies it after the result has been broadcast and traced, so
+    # the cap narrows what is SPOKEN without narrowing what is recorded.
+    max_items: int | None = None
+    flex_to: int | None = None
+    items_key: str | None = None
 
     @property
     def qualified(self) -> str:

@@ -301,6 +301,15 @@ class ToolOverlay(BaseModel):
     # un-gated writes.
     mutating: bool = False
     timeout_s: float | None = None
+    # Spoken-length cap on the result (core/tool_payload_cap.py). `max_items`
+    # is how many reach the model; `flex_to` speaks the whole list up to that
+    # size rather than withholding a trivial remainder; `items_key` names the
+    # key holding the list when the payload is an object rather than a bare
+    # array. Structural only -- no server's field names live here, and the
+    # ORDER is the server's to decide, since it owns the data it ranked.
+    max_items: int | None = None
+    flex_to: int | None = None
+    items_key: str | None = None
 
 
 class ServerEntry(BaseModel):
@@ -377,6 +386,9 @@ class ServerEntry(BaseModel):
                 "requires_confirmation": overlay.requires_confirmation,
                 "mutating": overlay.mutating,
                 "timeout_s": overlay.timeout_s,
+                "max_items": overlay.max_items,
+                "flex_to": overlay.flex_to,
+                "items_key": overlay.items_key,
             }
         )
 
