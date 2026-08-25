@@ -165,9 +165,18 @@ class ToolRecord:
 
     tool: str  # qualified name, e.g. "dunnes.add_to_cart_by_name"
     ok: bool
-    # Side-effecting calls (cart writes, checkout, login, money). Mirrors
-    # ToolSpec.requires_confirmation -- the existing per-tool flag for
-    # "this mutates external state".
+    # Side-effecting calls (cart writes, checkout, login, money). Set by the
+    # organizer as `spec.mutating or spec.requires_confirmation`: a gated tool
+    # always mutates, but confirmation alone is not sufficient -- the Dunnes
+    # cart writes are un-gated side effects and carry `mutating` directly.
+    #
+    # Both halves are per-deployment OVERLAY, declared per tool name in
+    # `servers.toml` and applied after a real MCP `tools/list` (the wire schema
+    # has no slot for trust flags). It is not derived from anything, so it is
+    # only as complete as that file: a side-effecting tool nobody flagged reads
+    # here as a read, and every guard keyed on "did a mutation land" stays
+    # asleep for it. Widening what counts as an action request widens what this
+    # flag has to be right about -- check the overlay before leaning on it.
     mutating: bool = False
     # Lowercased free-text argument values -- what the call was ABOUT
     # ("milk", "bananas"). Ids and numbers are excluded: they never appear in a
