@@ -4,6 +4,14 @@ import type { ServerMessage } from "./protocol";
 
 type RowKind = "user" | "assistant" | "tool" | "system" | "error";
 
+type BadgedOutcome = "needs-user" | "failed" | "confabulated";
+
+const OUTCOME_LABELS: Record<BadgedOutcome, string> = {
+  "needs-user": "awaiting your input",
+  failed: "task not completed",
+  confabulated: "claimed, didn't happen",
+};
+
 function summariseArgs(args: Record<string, unknown> | undefined): string {
   if (!args || Object.keys(args).length === 0) return "";
   const parts = Object.entries(args).map(([k, v]) => `${k}=${summariseValue(v)}`);
@@ -106,8 +114,8 @@ export class Transcript {
       case "turn_outcome":
         // Deterministic verdict on how the turn ended (see
         // core/turn_outcome.py). A `done` turn is the silent default -- no
-        // badge. `needs-user` / `failed` get a badge so a turn the model
-        // narrated cheerfully but didn't finish is visible at a glance.
+        // badge. Every other kind gets a badge so a turn the model narrated
+        // cheerfully but didn't finish is visible at a glance.
         if (msg.outcome !== "done") this.outcomeBadge(msg.session_id, msg.outcome);
         break;
       case "done":
@@ -129,8 +137,8 @@ export class Transcript {
     this.row("system", text);
   }
 
-  private outcomeBadge(sessionId: string, outcome: "needs-user" | "failed"): void {
-    const label = outcome === "failed" ? "task not completed" : "awaiting your input";
+  private outcomeBadge(sessionId: string, outcome: BadgedOutcome): void {
+    const label = OUTCOME_LABELS[outcome];
     const badge = document.createElement("span");
     badge.className = `outcome-badge outcome-${outcome}`;
     badge.textContent = label;

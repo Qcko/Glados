@@ -91,7 +91,7 @@ export interface Cancelled {
 export interface TurnOutcome {
   type: "turn_outcome";
   session_id: string;
-  outcome: "done" | "needs-user" | "failed";
+  outcome: "done" | "needs-user" | "failed" | "confabulated";
 }
 
 export interface ServerError {

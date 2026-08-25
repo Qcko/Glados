@@ -94,6 +94,9 @@ header button.disconnect { background: var(--error); color: #fff; }
 .outcome-badge.outcome-needs-user {
   background: rgba(212,164,55,.16); border: 1px solid rgba(212,164,55,.45); color: var(--warn);
 }
+.outcome-badge.outcome-confabulated {
+  background: rgba(184,140,255,.16); border: 1px solid rgba(184,140,255,.45); color: var(--specialist);
+}
 .row.system .outcome-badge { margin-top: 0; }
 .tool-bubble summary { cursor: pointer; list-style: revert; }
 .tool-bubble summary::-webkit-details-marker { color: var(--muted); }
