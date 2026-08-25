@@ -1275,3 +1275,188 @@ async def test_a_clarifying_question_after_a_mutation_is_not_logged(
             await org.flush()
 
     assert not any("claim-vocab" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_confabulated_turn_is_retried_and_finishes_the_job(tmp_path: Path) -> None:
+    """"Show me my cart and then remove the milk" -- the model does the first
+    half and narrates the second. Nothing mutated, so the replay cannot double a
+    side effect, which is what makes this the one failure worth retrying rather
+    than only reporting. Measured two thirds of attempts on qwen3:4b."""
+    from glados.core.adapters import LLMText, LLMToolCall
+
+    class HalfDoesItLLM:
+        def __init__(self) -> None:
+            self.passes = 0
+            self.seen: list[list] = []
+
+        async def chat(self, messages, tools):
+            self.passes += 1
+            self.seen.append([m.model_copy(deep=True) for m in messages])
+            if self.passes == 1:
+                yield LLMToolCall(call_id="c1", server="dunnes", name="view_cart", args={})
+            elif self.passes == 2:
+                yield LLMText(text="Milk removed from cart.")  # never dispatched
+            elif self.passes == 3:
+                yield LLMToolCall(
+                    call_id="c2", server="dunnes", name="remove_from_cart_by_name",
+                    args={"name": "milk"},
+                )
+            else:
+                yield LLMText(text="Removed the milk from your cart.")
+
+    llm = HalfDoesItLLM()
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=llm,
+        extra_tools=[
+            _FakeTool("dunnes", "view_cart"),
+            _FakeTool("dunnes", "remove_from_cart_by_name", mutating=True),
+        ],
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "show me my cart and then remove the milk")
+        await org.flush()
+
+    dispatched = [(m["server"], m["name"]) for _, m in sink if m["type"] == "tool_call"]
+    assert ("dunnes", "remove_from_cart_by_name") in dispatched
+    outcomes = [m["outcome"] for _, m in sink if m["type"] == "turn_outcome"]
+    assert outcomes == ["done"]
+
+    # The nudge reaches the model as a SYSTEM message, and the user's message
+    # is still the user's own words -- putting harness text in the user role
+    # would commit it, and the next turn would read our instruction as
+    # something the user said.
+    retry = llm.seen[2]
+    assert any(
+        m.role == "system" and "has not happened" in (m.content or "") for m in retry
+    )
+    user_says = [m.content for m in retry if m.role == "user"]
+    assert user_says == ["show me my cart and then remove the milk"]
+
+
+@pytest.mark.asyncio
+async def test_the_retry_happens_once_and_then_the_reply_is_scrubbed(
+    tmp_path: Path,
+) -> None:
+    """A model that ignores an instruction this explicit will not be talked
+    round by repeating it, so the retry is bounded to one."""
+    from glados.core.adapters import LLMText, LLMToolCall
+    from glados.core.organizer import _CONFABULATION_REPLIES
+
+    class AlwaysConfabulatesLLM:
+        def __init__(self) -> None:
+            self.passes = 0
+
+        async def chat(self, messages, tools):
+            self.passes += 1
+            if self.passes in (1, 3):
+                yield LLMToolCall(call_id=f"c{self.passes}", server="dunnes",
+                                  name="view_cart", args={})
+            else:
+                yield LLMText(text="Milk removed from cart.")
+
+    llm = AlwaysConfabulatesLLM()
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=llm,
+        extra_tools=[_FakeTool("dunnes", "view_cart")],
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "show me my cart and then remove the milk")
+        await org.flush()
+
+    outcomes = [m["outcome"] for _, m in sink if m["type"] == "turn_outcome"]
+    assert outcomes == ["confabulated"]
+    deltas = [m["text"] for _, m in sink if m["type"] == "assistant_delta"]
+    assert any(any(r in d for r in _CONFABULATION_REPLIES) for d in deltas)
+    # Two drives, not three: one original plus exactly one retry.
+    assert llm.passes == 4
+
+
+@pytest.mark.asyncio
+async def test_a_confabulation_after_a_real_mutation_is_never_retried(
+    tmp_path: Path,
+) -> None:
+    """The interlock. If something DID land, replaying the user's request could
+    fire that side effect a second time -- the same reason `_should_escalate`
+    refuses to replay a mutating turn."""
+    from glados.core.adapters import LLMText, LLMToolCall
+
+    class MutatesThenClaimsMoreLLM:
+        def __init__(self) -> None:
+            self.passes = 0
+
+        async def chat(self, messages, tools):
+            self.passes += 1
+            if self.passes == 1:
+                yield LLMToolCall(
+                    call_id="c1", server="dunnes", name="remove_from_cart_by_name",
+                    args={"name": "bananas"},
+                )
+            else:
+                yield LLMText(text="Eggs added to cart.")  # never dispatched
+
+    llm = MutatesThenClaimsMoreLLM()
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=llm,
+        extra_tools=[_FakeTool("dunnes", "remove_from_cart_by_name", mutating=True)],
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "actually, add eggs instead")
+        await org.flush()
+
+    outcomes = [m["outcome"] for _, m in sink if m["type"] == "turn_outcome"]
+    assert outcomes == ["confabulated"]
+    assert llm.passes == 2, "a turn that already mutated must not be replayed"
+
+
+@pytest.mark.asyncio
+async def test_the_retry_nudge_is_never_committed_to_history(tmp_path: Path) -> None:
+    """A successful retry takes no scrub branch, so whatever it returns is what
+    gets committed. If the nudge rode along on the user's message, the next turn
+    would read "your previous attempt said this was done" as the user's own
+    words -- the poisoned history the confabulation handling exists to prevent,
+    arriving by another door."""
+    from glados.core.adapters import LLMText, LLMToolCall
+    from glados.core.organizer import _UNFINISHED_TURN_NUDGE
+
+    class HalfDoesItLLM:
+        def __init__(self) -> None:
+            self.passes = 0
+
+        async def chat(self, messages, tools):
+            self.passes += 1
+            if self.passes == 1:
+                yield LLMToolCall(call_id="c1", server="dunnes", name="view_cart", args={})
+            elif self.passes == 2:
+                yield LLMText(text="Milk removed from cart.")
+            elif self.passes == 3:
+                yield LLMToolCall(
+                    call_id="c2", server="dunnes", name="remove_from_cart_by_name",
+                    args={"name": "milk"},
+                )
+            else:
+                yield LLMText(text="Removed the milk from your cart.")
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=HalfDoesItLLM(),
+        extra_tools=[
+            _FakeTool("dunnes", "view_cart"),
+            _FakeTool("dunnes", "remove_from_cart_by_name", mutating=True),
+        ],
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "show me my cart and then remove the milk")
+        await org.flush()
+
+        committed = [m for buf in org._history.values() for m in buf]
+        assert committed, "a turn that dispatched tools must commit"
+        assert not any(
+            _UNFINISHED_TURN_NUDGE in (m.content or "") for m in committed
+        ), "the harness nudge must not survive into the conversation"
+        assert [m.content for m in committed if m.role == "user"] == [
+            "show me my cart and then remove the milk"
+        ]

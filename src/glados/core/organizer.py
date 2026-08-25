@@ -136,6 +136,19 @@ _CONFABULATION_REPLIES = (
 # something ran and did not do what the reply says. So these never say
 # "nothing was logged", and they point at checking rather than repeating,
 # because a failed call can still have changed something.
+# Appended to the user's own words on the one retry a confabulated turn gets.
+# It states the observable fact -- no tool ran -- rather than scolding, and it
+# offers the honest way out, because a model that cannot do the thing should
+# say so instead of claiming it a second time. A compound instruction is the
+# usual cause ("show me the cart AND THEN remove the milk"): the first half
+# gets dispatched and the second gets narrated.
+_UNFINISHED_TURN_NUDGE = (
+    "Your previous attempt said this was done, but no tool was called that "
+    "does it, so nothing has changed yet. Carry out the part that has not "
+    "happened by calling the tool for it now. If you cannot, say so plainly "
+    "instead of saying it is done."
+)
+
 _UNBACKED_CLAIM_REPLIES = (
     "I said that went through, but I can't confirm it did -- check before repeating it.",
     "What I just said doesn't match what actually ran. Ask me whether it worked rather than saying it again.",
@@ -631,6 +644,7 @@ class Organizer:
                     trace, history, all_specs,
                 )
                 specs = all_specs
+            answered_by = llm
             if self._should_escalate(target, outcome):
                 # Difficulty retry: re-drive cold from the SAME prior history,
                 # never the failed attempt's messages -- the specialist gets a
@@ -639,7 +653,36 @@ class Organizer:
                     session.session_id, session.room_id, envelope, text, trace,
                     history, specs,
                 )
+                # Whatever comes after must run on the brain that produced this
+                # outcome, not the one that already failed.
+                answered_by = self._specialist_llm or llm
             kind = classify(outcome)
+            if kind == "confabulated" and not outcome.made_successful_mutation():
+                # Nothing landed, so nothing can fire twice -- the same
+                # interlock the scope fallback and the specialist retry use,
+                # and the reason a confabulated turn is the one failure that is
+                # SAFE to replay. Measured 25-08-2026 on "show me my cart and
+                # then remove the milk": the model does the first half, then
+                # narrates the second instead of calling it. Two thirds of
+                # attempts on qwen3:4b.
+                final_text, outcome, new_history = await self._finish_the_job(
+                    answered_by, session.session_id, session.room_id, envelope,
+                    text, trace, history, specs,
+                )
+                kind = classify(outcome)
+                if kind != "confabulated":
+                    # The claim already streamed to the chat surface before the
+                    # retry ran, and a successful retry takes no scrub branch --
+                    # so without this the transcript shows the false line and
+                    # then a true one, with nothing marking the first as dead.
+                    # Voice is unaffected; only `final_text` is spoken.
+                    await self._broadcast(
+                        session.room_id,
+                        AssistantDelta(
+                            session_id=session.session_id,
+                            text=" (Correction -- that had not happened when I said it.) ",
+                        ),
+                    )
             # BEFORE the scrub chain below, so this sees the MODEL's reply.
             # Three of those branches replace it with a line of ours, and none
             # of our lines match _CLAIM_RE -- logging after them would harvest
@@ -1027,6 +1070,47 @@ class Organizer:
             and classify(outcome) == "failed"
         )
 
+    async def _finish_the_job(
+        self,
+        llm: LLM,
+        session_id: str,
+        room_id: str,
+        envelope: CallEnvelope,
+        text: str,
+        trace,
+        history: list[LLMMessage],
+        specs: list[ToolSpec],
+    ) -> tuple[str, TurnRecord, list[LLMMessage]]:
+        """Re-drive a turn that announced an action it never dispatched.
+
+        Only ever reached when NOTHING mutated, so the replay cannot double a
+        side effect -- which is what makes this failure the one worth retrying
+        rather than merely reporting. Bounded to a single extra drive: a model
+        that ignores an instruction this explicit will not be talked round by
+        repetition, and the caller still scrubs the reply if this comes back
+        confabulated again.
+
+        Replays from the SAME prior history as the first attempt, not from the
+        failed attempt's messages, so the model is not reasoning on top of its
+        own false claim.
+
+        The nudge rides as a SYSTEM message and is stripped from the history
+        this returns. Concatenating it onto the user's text instead would put
+        harness words in the user's mouth and commit them: the next turn would
+        read "your previous attempt said this was done" as something the user
+        said, which is the poisoned history `_handle_confabulation` exists to
+        prevent, arriving by another door. It would also make `action_intent`
+        depend on our imperative rather than the user's, so the same utterance
+        would classify under different rules on the retry than on the first
+        attempt."""
+        trace.event("confabulation_retry")
+        nudge = LLMMessage(role="system", content=_UNFINISHED_TURN_NUDGE)
+        final_text, outcome, new_history = await self._drive(
+            llm, session_id, room_id, envelope, text, trace,
+            [*history, nudge], specs,
+        )
+        return final_text, outcome, [m for m in new_history if m is not nudge]
+
     async def _escalate_to_specialist(
         self,
         session_id: str,
@@ -1160,7 +1244,9 @@ class Organizer:
         turns away from tool-calls). The chat surface already streamed the false
         deltas live, so push a correction delta after them rather than trying to
         unsay them; the UI also receives the `confabulated` outcome to flag it.
-        v1 stops here -- no recovery/replay (deferred slice)."""
+        Recovery is no longer deferred: a confabulated turn that mutated
+        nothing is re-driven once before this runs (see `_finish_the_job`), so
+        reaching here means the model claimed it twice."""
         reply = _CONFABULATION_REPLIES[
             self._confab_reply_idx % len(_CONFABULATION_REPLIES)
         ]
