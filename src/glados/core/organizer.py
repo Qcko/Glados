@@ -59,10 +59,9 @@ from .turn_outcome import (
     asserts_a_change,
     claimed_a_change_it_did_not_make,
     classify,
-    is_action_request,
-    is_time_request,
     said_nothing,
 )
+from .utterance import is_action_request, is_time_request
 
 log = logging.getLogger(__name__)
 

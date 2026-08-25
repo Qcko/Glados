@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from ...core.turn_outcome import is_action_request
+from ...core.utterance import is_action_request
 
 RouteTarget = Literal["primary", "specialist"]
 RouteConfidence = Literal["high", "low"]

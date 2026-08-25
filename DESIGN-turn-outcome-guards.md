@@ -95,7 +95,10 @@ the request.
    accuses a turn that did exactly what it said.
 4. **The `^` anchor on the action heuristic is the entire safety argument.**
    Whole utterances rarely *begin* with an action verb by accident. Everything
-   the heuristic is allowed to do must preserve that property.
+   the heuristic is allowed to do must preserve that property. The heuristic
+   itself lives in `core/utterance.py` (`is_action_request`) — it reads the
+   user's request, not the turn's record, and the organizer passes its answer
+   in as `TurnRecord.action_intent`.
 5. **Nothing replays after a successful mutation.** Every re-drive path checks
    it, or the side effect (cart write, checkout, send) fires twice.
 6. **Four drives per utterance, enforced.** Base drive, capability fallback,
