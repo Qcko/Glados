@@ -117,6 +117,12 @@ class ToolRecord:
     # ToolSpec.requires_confirmation -- the existing per-tool flag for
     # "this mutates external state".
     mutating: bool = False
+    # Lowercased free-text argument values -- what the call was ABOUT
+    # ("milk", "bananas"). Ids and numbers are excluded: they never appear in a
+    # spoken reply, so they cannot corroborate or contradict one. Used only by
+    # the claim check below, which asks whether the thing the reply says was
+    # changed is the thing any successful call actually touched.
+    subjects: tuple[str, ...] = ()
 
 
 @dataclass
@@ -131,8 +137,17 @@ class TurnRecord:
     # goal-check: such a turn is only `done` if a mutating call actually landed.
     action_intent: bool = False
 
-    def record_tool(self, tool: str, ok: bool, *, mutating: bool = False) -> None:
-        self.tools.append(ToolRecord(tool=tool, ok=ok, mutating=mutating))
+    def record_tool(
+        self,
+        tool: str,
+        ok: bool,
+        *,
+        mutating: bool = False,
+        args: dict | None = None,
+    ) -> None:
+        self.tools.append(
+            ToolRecord(tool=tool, ok=ok, mutating=mutating, subjects=_subjects(args))
+        )
 
     def made_successful_mutation(self) -> bool:
         """True if a side-effecting tool call landed this turn. The specialist
@@ -154,14 +169,22 @@ def classify(turn: TurnRecord) -> TurnOutcomeKind:
         return "failed"
     if said_nothing(turn):
         return "failed"
+    if _confabulated(turn) or _claimed_a_change_it_did_not_make(turn):
+        # Ahead of the drift check on purpose. A turn can be both drifted AND
+        # making a false claim, and only `confabulated` gets the reply replaced
+        # and kept out of history (see Organizer._handle_confabulation);
+        # `failed` would leave the false "Milk removed from cart." both spoken
+        # and committed, which is the poisoning this whole module exists to
+        # stop. The two are otherwise disjoint -- `_confabulated` needs a
+        # zero-tool turn, `_action_drifted` needs tools -- so nothing else
+        # changes order here.
+        return "confabulated"
     if _action_drifted(turn):
         # Asked to act, ran tools, but never landed the mutation. Ending on a
         # question is a hand-back (the model punted instead of acting);
         # ending on a statement is silent drift (bake-off T2: searched,
         # narrated the JSON, never added). Both mean the action didn't happen.
         return "needs-user" if _ends_on_question(turn.final_text) else "failed"
-    if _confabulated(turn):
-        return "confabulated"
     if _ends_on_question(turn.final_text) and not _has_successful_call(turn.tools):
         return "needs-user"
     return "done"
@@ -195,6 +218,125 @@ def _confabulated(turn: TurnRecord) -> bool:
         and not turn.tools
         and bool(turn.final_text.strip())
         and not _ends_on_question(turn.final_text)
+    )
+
+
+# Past-tense assertions that a change HAPPENED. Present and future forms are
+# absent on purpose ("I'll add", "to add", "shall I remove") -- those are
+# intentions, and only a completed claim can be a false one.
+_CLAIM_RE = re.compile(
+    r"\b(added|removed|deleted|cleared|emptied|updated|changed)\b"
+    # "set ... to 2" is a quantity claim; "set to expire in 30 minutes" is not,
+    # so the number is required rather than optional.
+    r"|\bset\b[^.!?]{0,20}?\bto\s+\d",
+    re.IGNORECASE,
+)
+
+# A claim inside one of these is not this turn reporting its own work:
+# a denial, a report of what someone else did, or a reference back to an
+# earlier turn. Each was a real false positive before it was excluded.
+_NOT_THIS_TURNS_DOING = re.compile(
+    r"\b(not|n't|nothing|never|no)\b"  # "I have not added it", "Nothing was removed"
+    r"|\balready\b|\bearlier\b|\bpreviously\b|\blast night\b"  # a prior turn
+    r"|\bby\s+the\s+\w+",  # "was updated by the store"
+    re.IGNORECASE,
+)
+
+# Words too common to prove a reply is talking about a given tool argument.
+_UNDISTINCTIVE = frozenset(
+    {
+        "a", "an", "and", "the", "to", "of", "for", "in", "on", "at", "it",
+        "my", "your", "cart", "item", "items", "one", "two", "some", "all",
+        "please", "thing", "things", "product", "products",
+    }
+)
+
+
+def _claimed_a_change_it_did_not_make(turn: TurnRecord) -> bool:
+    """The reply says something was added/removed/set, and the dispatch record
+    does not support it.
+
+    This is the sibling of `_confabulated` for turns that DID call tools -- and
+    it is the one that fires in practice, because it never consults
+    `action_intent`. Measured 25-08-2026: four of five real mutation requests
+    ("Actually, add eggs instead", "...and then remove the milk", "Take one of
+    the milks off") do not match `is_action_request` at all, so every guard
+    keyed on it stays asleep. The reply is where the claim lives, and the
+    dispatch record is the ground truth; neither depends on how the user
+    phrased the request.
+
+    Two real failures from the same day's bake-off, both previously `done`:
+    the model removed the bananas, never called add(eggs), and said "Eggs added
+    to cart"; and it called view_cart, removed nothing, and said "Milk removed
+    from cart".
+
+    It FAILS OPEN wherever it cannot judge, because a false positive replaces a
+    correct spoken reply with a canned "no record of that" line -- telling a
+    user their shopping did not happen when it did is its own kind of lie."""
+    if _ends_on_question(turn.final_text):
+        # "Shall I have the milk removed?" is an offer, not a report.
+        return False
+    if not any(_asserts_a_change(s) for s in _sentences(turn.final_text)):
+        return False
+
+    landed = [t for t in turn.tools if t.ok and t.mutating]
+    if not landed:
+        # Claimed a change with nothing side-effecting behind it at all.
+        return True
+
+    subject_words = {w for tool in landed for s in tool.subjects for w in _words(s)}
+    if not subject_words:
+        # Every successful call identified its target by an id, a number or an
+        # enum -- none of which a spoken reply repeats. Nothing comparable, so
+        # do not accuse. Note this tests for usable WORDS, not merely for the
+        # presence of arguments: a call with only `state="on"` has arguments and
+        # still gives us nothing to check against.
+        return False
+    return not (subject_words & _words(turn.final_text))
+
+
+def _asserts_a_change(sentence: str) -> bool:
+    return bool(
+        _CLAIM_RE.search(sentence) and not _NOT_THIS_TURNS_DOING.search(sentence)
+    )
+
+
+def _sentences(text: str) -> list[str]:
+    # Judged per sentence so one honest clause cannot excuse a false one, and
+    # a negation in a neighbouring sentence cannot excuse a claim in this one.
+    return [s for s in re.split(r"[.!?]+", text) if s.strip()]
+
+
+def _words(text: str) -> set[str]:
+    return {
+        w for w in re.findall(r"[a-z0-9]+", text.lower())
+        if w not in _UNDISTINCTIVE and len(w) > 2
+    }
+
+
+def _subjects(args: dict | None) -> tuple[str, ...]:
+    """The free-text values a call was aimed at.
+
+    Identifiers are excluded even though they arrive as strings: a spoken reply
+    names the product, never its id, so keeping them made every id-based call
+    look like a contradicted claim. The test is "contains a run of letters",
+    not "is not all digits" -- `prod-123` and a UUID are just as absent from
+    speech as `100806893`, and only Dunnes happens to use bare digits.
+
+    A call carrying a list or dict argument yields nothing at all. Those are
+    the batch flows (a recipe's worth of items), where the top-level strings
+    describe the request rather than any one item, and judging a twelve-item
+    add by the word "lasagne" would be worse than not judging it."""
+    if not args:
+        return ()
+    if any(isinstance(v, (list, dict, tuple)) for v in args.values()):
+        return ()
+    return tuple(
+        value
+        for v in args.values()
+        if isinstance(v, str)
+        and (value := v.strip().lower())
+        and re.search(r"[a-z]{3}", value)
     )
 
 

@@ -232,3 +232,187 @@ def test_empty_reply_after_a_successful_mutation_is_failed_but_not_retryable() -
     turn.record_tool("dunnes.add_to_cart_by_name", ok=True, mutating=True)
     assert classify(turn) == "failed"
     assert turn.made_successful_mutation() is True
+
+
+# ---- Claimed a change it did not make -----------------------------------
+#
+# Every case below is a real turn from the 25-08-2026 bake-off. The two
+# confabulations were classified `done` before this guard existed, because
+# `_confabulated` only fires on a turn with ZERO tool calls and these called a
+# DIFFERENT tool. The `done` cases are the false-positive net: a wrong
+# accusation replaces a correct spoken reply with a canned failure line.
+
+
+def _claim(final_text: str, calls) -> TurnRecord:
+    turn = _turn(final_text=final_text)
+    for tool, ok, mutating, args in calls:
+        turn.record_tool(tool, ok, mutating=mutating, args=args)
+    return turn
+
+
+def test_claimed_add_with_only_a_remove_dispatched_is_confabulated() -> None:
+    # Bake-off T4 on qwen3:8b with reasoning suppressed: it removed the
+    # bananas, never called add(eggs), and announced the eggs anyway.
+    turn = _claim(
+        "Eggs added to cart.",
+        [("dunnes.remove_from_cart_by_name", True, True, {"name": "bananas"})],
+    )
+    assert classify(turn) == "confabulated"
+
+
+def test_claimed_removal_with_only_a_read_dispatched_is_confabulated() -> None:
+    # Bake-off T6: view_cart ran, nothing was removed, and the reply said it
+    # had been. Fails on both 4b arms and on 8b without reasoning.
+    turn = _claim(
+        "Milk removed from cart.",
+        [("dunnes.view_cart", True, False, {})],
+    )
+    assert classify(turn) == "confabulated"
+
+
+def test_claim_backed_by_a_matching_dispatch_is_done() -> None:
+    turn = _claim(
+        "Removed bananas, added 18 Irish Eggs Medium to your cart.",
+        [
+            ("dunnes.remove_from_cart_by_name", True, True, {"name": "bananas"}),
+            ("dunnes.add_to_cart_by_name", True, True, {"quantity": 1, "query": "eggs"}),
+        ],
+    )
+    assert classify(turn) == "done"
+
+
+def test_id_only_dispatch_cannot_contradict_a_claim() -> None:
+    # A productId never appears in a spoken reply, so it is no evidence either
+    # way. Accusing here would fail every correct id-based removal.
+    turn = _claim(
+        "Removed Irish Low Fat Milk 3L from your cart. Your cart is now empty.",
+        [
+            ("dunnes.view_cart", True, False, {}),
+            ("dunnes.remove_from_cart", True, True, {"productId": "100806893"}),
+        ],
+    )
+    assert classify(turn) == "done"
+
+
+def test_a_relative_adjust_may_be_narrated_as_a_removal() -> None:
+    # The verb and the tool name disagree and that is FINE -- delta -1 from 1
+    # really is a removal. Matching claim verbs against tool names would fail
+    # this passing turn, which is why the check compares subjects instead.
+    turn = _claim(
+        "Removed 1 carton of Irish Low Fat Milk 3L. Your cart now has 1 milk.",
+        [("dunnes.adjust_cart_quantity_by_name", True, True, {"name": "milk", "delta": -1})],
+    )
+    assert classify(turn) == "done"
+
+
+def test_paraphrased_product_still_counts_as_backed() -> None:
+    # The reply names the product, the argument named the query; they only have
+    # to share a distinctive word.
+    turn = _claim(
+        "Added Kerrygold Pure Irish Butter 227g to your cart.",
+        [("dunnes.add_to_cart_by_name", True, True, {"query": "irish butter"})],
+    )
+    assert classify(turn) == "done"
+
+
+def test_a_read_turn_making_no_claim_is_untouched() -> None:
+    turn = _claim(
+        "Coca-Cola Original Taste 24 x 330ml and four more are on sale.",
+        [("dunnes.scan_favorites_for_sales", True, False, {})],
+    )
+    assert classify(turn) == "done"
+
+
+def test_an_offer_to_act_is_not_a_claim_of_having_acted() -> None:
+    # Future tense is an intention. Only a completed claim can be a false one.
+    turn = _claim("Shall I add milk to your cart?", [])
+    assert classify(turn) == "needs-user"
+
+
+def test_claim_check_does_not_need_action_intent() -> None:
+    # The point of the guard: it never consults action_intent, because four of
+    # five real mutation requests do not match is_action_request at all
+    # ("Actually, add eggs instead", "...and then remove the milk").
+    turn = _claim(
+        "Milk removed from cart.",
+        [("dunnes.view_cart", True, False, {})],
+    )
+    assert turn.action_intent is False
+    assert classify(turn) == "confabulated"
+
+
+# ---- Not this turn's doing: the false-positive net -----------------------
+#
+# Each of these was a REAL false positive before the guard learned to decline.
+# They all silence a correct spoken reply and rewrite history, so they matter
+# more than the catches do.
+
+
+def test_a_denial_is_not_a_claim() -> None:
+    turn = _claim("I have not added it to your cart yet.",
+                  [("dunnes.view_cart", True, False, {})])
+    assert classify(turn) == "done"
+
+
+def test_reporting_that_nothing_changed_is_not_a_claim() -> None:
+    turn = _claim("Nothing was removed -- your cart still has both milks.",
+                  [("dunnes.view_cart", True, False, {})])
+    assert classify(turn) == "done"
+
+
+def test_a_change_someone_else_made_is_not_a_claim() -> None:
+    turn = _claim("The sale price was updated by the store last night.",
+                  [("dunnes.view_cart", True, False, {})])
+    assert classify(turn) == "done"
+
+
+def test_a_reference_to_an_earlier_turn_is_not_a_claim() -> None:
+    turn = _claim("I already removed the bananas earlier; your cart has milk and eggs.",
+                  [("dunnes.view_cart", True, False, {})])
+    assert classify(turn) == "done"
+
+
+def test_set_to_needs_a_number_to_be_a_quantity_claim() -> None:
+    # "set to expire in 30 minutes" is not a quantity change.
+    turn = _claim("Your cart is set to expire in 30 minutes.",
+                  [("dunnes.view_cart", True, False, {})])
+    assert classify(turn) == "done"
+
+
+def test_an_offer_ending_in_a_question_is_never_confabulated() -> None:
+    turn = _claim("Shall I have the milk removed?",
+                  [("dunnes.view_cart", True, False, {})])
+    assert classify(turn) != "confabulated"
+
+
+def test_an_enum_only_argument_gives_nothing_to_compare() -> None:
+    # Arguments exist but yield no speakable word, so there is no evidence
+    # either way -- the guard must decline rather than accuse.
+    turn = _claim("Kitchen light set to on.",
+                  [("home.set_power", True, True, {"state": "on"})])
+    assert classify(turn) == "done"
+
+
+def test_a_non_digit_id_is_still_an_id() -> None:
+    # Only Dunnes happens to use bare digits; a SKU or UUID is just as absent
+    # from a spoken reply.
+    turn = _claim("Removed it.",
+                  [("dunnes.remove_from_cart", True, True, {"productId": "A100806893"})])
+    assert classify(turn) == "done"
+
+
+def test_a_batch_call_is_not_judged_by_its_recipe_name() -> None:
+    turn = _claim(
+        "Added 12 of 13 items.",
+        [("dunnes.add_recipe_ingredients", True, True,
+          {"recipe": "lasagne", "items": ["mince", "tomatoes"]})],
+    )
+    assert classify(turn) == "done"
+
+
+def test_a_false_claim_beats_drift_so_the_reply_is_scrubbed() -> None:
+    # Both drifted AND falsely claiming. `failed` would leave the false line
+    # spoken and committed to history; only `confabulated` replaces it.
+    turn = _turn(final_text="Milk removed from cart.", action_intent=True)
+    turn.record_tool("dunnes.view_cart", ok=True, mutating=False, args={})
+    assert classify(turn) == "confabulated"

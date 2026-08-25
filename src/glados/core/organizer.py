@@ -1460,7 +1460,9 @@ class Organizer:
             # goal-check would wrongly fail a turn that actually added.
             if not denied:
                 mutating = bool(spec is not None and (spec.mutating or spec.requires_confirmation))
-                outcome.record_tool(f"{tc.server}.{tc.name}", result.ok, mutating=mutating)
+                outcome.record_tool(
+                    f"{tc.server}.{tc.name}", result.ok, mutating=mutating, args=tc.args
+                )
             # Cap AFTER the broadcast and the trace event above, so the desk
             # client and `traces/` keep the whole result and only the SPOKEN
             # channel is narrowed. A cap upstream of those would destroy data
