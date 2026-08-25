@@ -125,6 +125,42 @@ _CONFABULATION_REPLIES = (
     "I can't confirm that went through. Repeat it and I'll do it properly this time.",
 )
 
+# Spoken when a turn produced no reply at all (classified `failed` via
+# `said_nothing`). The cause is usually the model spending its whole
+# num_predict budget on reasoning tokens and being cut before it started
+# answering.
+#
+# They invite the user to ask again, and that is NOT the retry the scope
+# fallback refuses a few lines above. That one re-drives the identical history
+# immediately on a wider tool set, so greedy decoding reproduces the same
+# exhaustion. A user asking again is a different prompt: the history has moved
+# on and any tool payload is re-scraped. Observed 2026-08-25 -- the turn
+# following the original silent one answered normally (reply_tokens=3722,
+# done_reason=stop). Do not "fix" these into telling the user to ask for less:
+# the real trigger was an ordinary in-scope question whose TOOL RESULT was
+# large, which is nothing the user can make smaller.
+#
+# Rotated like the confabulation lines: the failure arrives in runs, and a
+# repeated identical line reads as a stuck recording.
+_SILENT_TURN_REPLIES = (
+    "I ran out of room before I got an answer out. Ask me again and I'll keep it shorter.",
+    "That one took all my thinking and left nothing to say. Try me once more.",
+    "I didn't get an answer out in time. Say it again and I'll have another go.",
+)
+
+# Spoken when a silent turn had ALREADY landed a mutating call and only failed
+# to narrate it. These must never end in "ask me again": re-issuing "add milk"
+# after a successful add is a double cart-add -- the exact side effect
+# `_should_escalate` refuses to risk by replaying such a turn itself, which
+# would be pointless to guard in code while inviting the user to do it by
+# voice. They point at the deterministic recheck instead, which answers from
+# the dispatch record rather than from the model.
+_SILENT_TURN_AFTER_MUTATION_REPLIES = (
+    "That went through, but I ran out of room to say what happened. Ask me if it worked, rather than repeating it.",
+    "I did it, then lost the words for it. Ask whether that actually worked instead of saying it again.",
+    "It landed, but I couldn't get the words out. Check whether it worked rather than repeating it.",
+)
+
 # Upper bound on how many sessions' conversation buffers are held in RAM at
 # once. Far above any realistic concurrent-session count; exists only so a long
 # uptime accumulating dead sessions can't grow the history dict without limit.
@@ -297,6 +333,7 @@ class Organizer:
         # Rotates the honest-failure line spoken on a `confabulated` turn so a
         # cascade of fabricated turns doesn't repeat one phrase verbatim.
         self._confab_reply_idx = 0
+        self._silent_reply_idx = 0
         # session_id -> dispatch-grounded summary of its last real turn, for the
         # "did that actually work?" escape hatch. LRU-bounded by
         # _MAX_TRACKED_SESSIONS like _history, so a long uptime can't grow it.
@@ -591,6 +628,21 @@ class Organizer:
                 # it would be moot (and would re-rewrite the same slot).
                 final_text = await self._handle_confabulation(
                     session.session_id, session.room_id, new_history, trace
+                )
+            elif said_nothing(outcome) and text.strip():
+                # The turn is already classified `failed`; this only decides
+                # what the user HEARS. Without it the failure is visible in the
+                # UI and in `traces/` but is pure silence on the voice path,
+                # which is the one surface where "nothing happened" and "it
+                # broke" look identical.
+                #
+                # The guard skips a BLANK transcript only -- nothing was said,
+                # so there is nothing to answer. It is deliberately not a
+                # garble filter: a clipped or misheard capture arrives as real
+                # words, not whitespace, and those still get the fallback.
+                final_text = await self._handle_silent_turn(
+                    session.session_id, session.room_id, new_history, outcome,
+                    trace,
                 )
             elif final_text:
                 final_text = await self._handle_language_drift(
@@ -1091,6 +1143,49 @@ class Organizer:
         trace.event("confabulation_suppressed", replacement=reply)
         await self._broadcast(
             room_id, AssistantDelta(session_id=session_id, text=" " + reply)
+        )
+        return reply
+
+    async def _handle_silent_turn(
+        self,
+        session_id: str,
+        room_id: str,
+        history: list[LLMMessage],
+        outcome: TurnRecord,
+        trace,
+    ) -> str:
+        """The model produced no reply. Speak an honest line instead of nothing,
+        and put the same line where the empty reply would have gone in history.
+
+        Which line depends on whether the turn already CHANGED something. A
+        silent turn can have landed a successful mutating call and merely failed
+        to narrate it. The ordinary lines invite the user to ask again, which is
+        exactly the wrong advice there -- reissuing "add milk" adds it twice --
+        so those turns get lines that point at the recheck escape hatch instead,
+        which answers from the dispatch record. Hence the split.
+
+        Committing the line matters as much as speaking it: the user HEARD this,
+        so a history recording an empty assistant turn no longer matches the
+        conversation the user is in -- and an empty assistant message is itself a
+        poor prior, teaching the model that saying nothing is a normal turn. It
+        does cost prompt tokens on the next turn, which is the very pressure that
+        starves a reply, so a long run of silent turns compounds; bounded in
+        practice by `_cap_history`.
+
+        Unlike `_handle_confabulation` there are no already-streamed deltas to
+        correct, so this delta stands alone and needs no leading space."""
+        replies = (
+            _SILENT_TURN_AFTER_MUTATION_REPLIES
+            if outcome.made_successful_mutation()
+            else _SILENT_TURN_REPLIES
+        )
+        reply = replies[self._silent_reply_idx % len(replies)]
+        self._silent_reply_idx += 1
+        if history and history[-1].role == "assistant":
+            history[-1] = LLMMessage(role="assistant", content=reply)
+        trace.event("silent_turn_fallback", replacement=reply)
+        await self._broadcast(
+            room_id, AssistantDelta(session_id=session_id, text=reply)
         )
         return reply
 

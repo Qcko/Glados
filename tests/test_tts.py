@@ -94,21 +94,55 @@ async def test_organizer_emits_tts_chunk_after_assistant_delta(tmp_path: Path) -
         assert tts.calls == ["echo: hello there"]
 
 
-@pytest.mark.asyncio
-async def test_organizer_skips_tts_when_no_text(tmp_path: Path) -> None:
-    """Empty final_text (rare -- would need an LLM that emits no text and no
-    tool calls) must not blow up the turn or emit empty tts_chunks."""
-    from glados.core.adapters import LLMText
+class _SilentLLM:
+    """A stream with no text events at all -- what a real silent turn looks
+    like. The adapter never yields an empty LLMText; it only emits content when
+    there is some."""
 
-    class SilentLLM:
-        async def chat(self, messages, tools):
-            yield LLMText(text="")
+    async def chat(self, messages, tools):
+        return
+        yield  # pragma: no cover -- makes this an async generator
+
+
+@pytest.mark.asyncio
+async def test_organizer_speaks_a_fallback_when_the_model_says_nothing(
+    tmp_path: Path,
+) -> None:
+    """A turn that produced no reply used to be pure silence on the voice path,
+    where "nothing happened" and "it broke" are indistinguishable. It now speaks
+    an honest line instead (2026-08-25)."""
+    from glados.core.organizer import _SILENT_TURN_REPLIES
 
     tts = FakeTTS()
     async with _make_organizer_with_tts(tts, tmp_path) as (org, sink):
-        org.llm = SilentLLM()
+        org.llm = _SilentLLM()
 
         await org.handle_user_text("desk-ui", "hi")
+        await org.flush()
+        types = [m["type"] for _, m in sink]
+        assert "tts_chunk" in types
+        deltas = [m["text"] for _, m in sink if m["type"] == "assistant_delta"]
+        assert deltas == [_SILENT_TURN_REPLIES[0]]
+        assert tts.calls == [_SILENT_TURN_REPLIES[0]]
+        # Still a failure -- speaking about it does not make the turn a success.
+        outcomes = [m["outcome"] for _, m in sink if m["type"] == "turn_outcome"]
+        assert outcomes == ["failed"]
+
+
+@pytest.mark.asyncio
+async def test_organizer_skips_tts_when_there_is_nothing_to_say(
+    tmp_path: Path,
+) -> None:
+    """The fallback above is gated on the user having actually said something,
+    so a dropped/garbled utterance stays a silent no-op instead of making
+    GLaDOS answer noise -- and the empty-text guard in `_speak` still holds, so
+    no empty tts_chunk is emitted."""
+
+    tts = FakeTTS()
+    async with _make_organizer_with_tts(tts, tmp_path) as (org, sink):
+        org.llm = _SilentLLM()
+
+        await org.handle_user_text("desk-ui", "   ")
         await org.flush()
         types = [m["type"] for _, m in sink]
         assert "tts_chunk" not in types
@@ -361,3 +395,77 @@ async def test_piper_smoke_synthesizes_pcm() -> None:
     assert chunks, "piper produced no chunks"
     assert all(len(c.pcm) > 0 for c in chunks)
     assert all(c.sample_rate == 22_050 for c in chunks)
+
+
+@pytest.mark.asyncio
+async def test_silent_turn_that_already_mutated_does_not_invite_a_repeat(
+    tmp_path: Path,
+) -> None:
+    """A silent turn may have landed a real mutating call and only failed to
+    narrate it. Telling the user to ask again would add the thing twice -- the
+    same double-fire `_should_escalate` refuses to risk by replaying the turn
+    itself. Such turns get a line pointing at the recheck instead."""
+    from glados.core.adapters import LLMToolCall
+    from glados.core.organizer import (
+        _SILENT_TURN_AFTER_MUTATION_REPLIES,
+        _SILENT_TURN_REPLIES,
+    )
+
+    class MutatingThenSilentLLM:
+        def __init__(self) -> None:
+            self.passes = 0
+
+        async def chat(self, messages, tools):
+            self.passes += 1
+            if self.passes == 1:
+                yield LLMToolCall(
+                    call_id="c1", server="time", name="now", args={}
+                )
+            # Second pass: the model reasons itself out of budget and says
+            # nothing, after the dispatch already happened.
+
+    tts = FakeTTS()
+    async with _make_organizer_with_tts(tts, tmp_path) as (org, sink):
+        org.llm = MutatingThenSilentLLM()
+        org.mcp.specs()[0].mutating = True
+
+        await org.handle_user_text("desk-ui", "add milk to the cart")
+        await org.flush()
+
+    spoken = [m["text"] for _, m in sink if m["type"] == "assistant_delta"]
+    assert spoken == [_SILENT_TURN_AFTER_MUTATION_REPLIES[0]]
+    assert spoken[0] not in _SILENT_TURN_REPLIES
+
+
+@pytest.mark.asyncio
+async def test_silent_turn_fallback_is_committed_to_history(tmp_path: Path) -> None:
+    """The user HEARD the line, so history must carry it -- otherwise the
+    model's view of the conversation diverges from the user's, and an empty
+    assistant message teaches it that saying nothing is a normal turn."""
+    from glados.core.organizer import _SILENT_TURN_REPLIES
+
+    async with _make_organizer_with_tts(FakeTTS(), tmp_path) as (org, sink):
+        org.llm = _SilentLLM()
+        await org.handle_user_text("desk-ui", "hi")
+        await org.flush()
+
+        committed = [
+            m for buf in org._history.values() for m in buf if m.role == "assistant"
+        ]
+        assert [m.content for m in committed] == [_SILENT_TURN_REPLIES[0]]
+
+
+@pytest.mark.asyncio
+async def test_silent_turn_replies_rotate_and_wrap(tmp_path: Path) -> None:
+    """A run of silent turns must not read as a stuck recording, and the
+    counter must wrap rather than run off the end."""
+    from glados.core.organizer import _SILENT_TURN_REPLIES
+
+    async with _make_organizer_with_tts(FakeTTS(), tmp_path) as (org, sink):
+        org.llm = _SilentLLM()
+        for _ in range(len(_SILENT_TURN_REPLIES) + 1):
+            await org.handle_user_text("desk-ui", "hi")
+            await org.flush()
+
+    spoken = [m["text"] for _, m in sink if m["type"] == "assistant_delta"]
+    assert spoken == list(_SILENT_TURN_REPLIES) + [_SILENT_TURN_REPLIES[0]]
