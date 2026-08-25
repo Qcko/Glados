@@ -15,7 +15,7 @@ label. The `--slot` arg only tags the output; it does not change the model.
 
 Usage:
     uv run python scripts/bakeoff_run.py --slot B
-    uv run python scripts/bakeoff_run.py --slot A --url ws://127.0.0.1:8765/ws/v1
+    uv run python scripts/bakeoff_run.py --slot A --url wss://127.0.0.1:8765/ws/v1
 
 Auth: the token is read from the OS keyring (scope `glados.client-tokens`,
 username = client id), the same store the server uses. Override with --token
@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import ssl
 import sys
 from dataclasses import dataclass, field
 
@@ -232,6 +233,18 @@ def _print_turn(rep: TurnReport) -> None:
     print(f"    OUTCOME: {rep.outcome or '(none)'}{flag}")
 
 
+def _ssl_context(url: str):
+    """The server is TLS-only with a self-signed cert, so a wss:// URL needs a
+    context that does not verify it. Returns None for ws:// so a plain-HTTP
+    server (or a test double) still connects."""
+    if not url.startswith("wss://"):
+        return None
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 async def run(args: argparse.Namespace) -> None:
     token = args.token or KeyringSecrets().get("client-tokens", args.client_id)
     if not token:
@@ -252,7 +265,9 @@ async def run(args: argparse.Namespace) -> None:
     # Dunnes search_results frames run >1 MB (30 full product records), past
     # the websockets client default max_size. The browser client has no such
     # cap; lift it here so the runner doesn't 1009-close mid-suite.
-    async with websockets.connect(args.url, max_size=16 * 1024 * 1024) as ws:
+    async with websockets.connect(
+        args.url, max_size=16 * 1024 * 1024, ssl=_ssl_context(args.url)
+    ) as ws:
         await ws.send(json.dumps({
             "type": "hello",
             "client_id": args.client_id,
@@ -288,7 +303,7 @@ def main() -> None:
             reconfigure(encoding="utf-8", errors="replace")
     p = argparse.ArgumentParser(description="GLaDOS model bake-off runner")
     p.add_argument("--slot", default="?", help="label for this run (A/B/C) -- does not change the model")
-    p.add_argument("--url", default="ws://127.0.0.1:8765/ws/v1")
+    p.add_argument("--url", default="wss://127.0.0.1:8765/ws/v1")
     p.add_argument("--client-id", default="desk-ui")
     p.add_argument("--room", default="desk")
     p.add_argument("--token", default=None, help="override the keyring token (dev fixture)")

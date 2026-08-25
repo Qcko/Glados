@@ -52,6 +52,7 @@ class OllamaLLM:
         # duplicating numbers that would then drift out of step with it.
         num_ctx: int | None = None,
         num_predict: int | None = None,
+        think: bool | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._host = host.rstrip("/")
@@ -60,6 +61,7 @@ class OllamaLLM:
         self._timeout = timeout
         self._num_ctx = num_ctx
         self._num_predict = num_predict
+        self._think = think
         # Context pressure is a standing condition, not an event: on a workload
         # whose tool block is genuinely large it would be true on EVERY turn,
         # and a warning that fires every turn stops being read -- which is how
@@ -135,6 +137,8 @@ class OllamaLLM:
             "keep_alive": self._keep_alive,
             "options": self._build_options(),
         }
+        if self._think is not None:
+            payload["think"] = self._think
         if name_map:
             payload["tools"] = [self._to_ollama_tool(k, v) for k, v in name_map.items()]
 

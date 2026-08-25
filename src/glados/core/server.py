@@ -274,6 +274,7 @@ def _build_llm(cfg: LLMConfig) -> LLM:
             keep_alive=cfg.keep_alive,
             num_ctx=cfg.num_ctx,
             num_predict=cfg.num_predict,
+            think=cfg.think,
         )
     return FakeLLM()
 
@@ -310,6 +311,11 @@ def _build_specialist_llm(
             keep_alive=llm_cfg.keep_alive,
             num_ctx=llm_cfg.num_ctx,
             num_predict=llm_cfg.num_predict,
+            # `think` is deliberately NOT inherited: it is a per-model
+            # capability, and this branch runs a DIFFERENT tag from the primary.
+            # A model that relocates its reasoning into `content` instead of
+            # suppressing it would read that reasoning aloud, so the specialist
+            # keeps its own default until measured on its own.
         )
     if not cfg.cloud_enabled:
         return None

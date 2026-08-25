@@ -127,6 +127,20 @@ class LLMConfig(BaseModel):
     # looser. Accepted deliberately: a wedged turn is recoverable, a silently
     # blanked assistant is not.
     num_predict: int | None = Field(default=4096, ge=1)
+    # Sent as /api/chat `think`. `None` omits the key and leaves the model's own
+    # default alone; `False` asks a reasoning model not to reason.
+    #
+    # STRICTLY PER-MODEL -- do NOT promote this to a global default. Measured
+    # 2026-08-25 on the same request: qwen3:8b honours it properly (tool-pick
+    # 2.4s -> 0.4s, final answer 7.8s -> 0.9s, no reasoning emitted anywhere),
+    # while qwen3:4b does NOT suppress the reasoning at all -- it relocates it
+    # into `content`, which is the SPOKEN channel, stray "</think>" tag
+    # included. Turning this on for 4b makes GLaDOS read its own chain of
+    # thought aloud.
+    #
+    # Qwen's own "/no_think" prompt marker is not an alternative: Ollama's chat
+    # template overrides it and the model reasons anyway (measured, both tags).
+    think: bool | None = None
     # Language GLaDOS must reply in. The language guard (core/language_guard.py)
     # rewrites a free-form reply whose dominant script is not this language's --
     # a deterministic backstop for the cold-model drift the prompt rule alone
