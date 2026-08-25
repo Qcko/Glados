@@ -1186,19 +1186,36 @@ class Organizer:
         # aclosing guarantees the upstream HTTP stream gets aclose()'d on
         # CancelledError -- otherwise the model keeps generating tokens we'll
         # never read (ARCH section 6: cancellation must propagate end-to-end).
-        async with aclosing(llm.chat(messages, specs)) as stream:
-            async for event in stream:
-                if isinstance(event, LLMText):
-                    text_chunks.append(event.text)
-                    await self._broadcast(
-                        room_id, AssistantDelta(session_id=session_id, text=event.text)
-                    )
-                    trace.event("assistant_delta", text=event.text)
-                elif isinstance(event, LLMThinking):
-                    thinking_chunks.append(event.text)
-                elif isinstance(event, LLMToolCall):
-                    pending.append(event)
-        self._trace_thinking(trace, thinking_chunks)
+        try:
+            async with aclosing(llm.chat(messages, specs)) as stream:
+                async for event in stream:
+                    if isinstance(event, LLMText):
+                        text_chunks.append(event.text)
+                        await self._broadcast(
+                            room_id,
+                            AssistantDelta(session_id=session_id, text=event.text),
+                        )
+                        trace.event("assistant_delta", text=event.text)
+                    elif isinstance(event, LLMThinking):
+                        thinking_chunks.append(event.text)
+                    elif isinstance(event, LLMToolCall):
+                        pending.append(event)
+        finally:
+            # In a `finally` because a barge-in cancels the `async for` above,
+            # and a plain call after the block would never run -- so the turn
+            # whose reasoning we most want to read was the one that left no
+            # record of it.
+            #
+            # Swallowing the write error is the point of the guard: this runs
+            # during cancellation unwind, and the only handler upstream is
+            # `except CancelledError`. An OSError escaping here would REPLACE
+            # the CancelledError, so `cancelled` would stay False and the
+            # shielded `Cancelled` broadcast would never fire -- costing the
+            # room a hung turn to save a trace line.
+            try:
+                self._trace_thinking(trace, thinking_chunks)
+            except Exception:
+                log.exception("failed to record reasoning for %s", session_id)
         return pending, "".join(text_chunks)
 
     @staticmethod
