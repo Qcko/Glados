@@ -67,6 +67,19 @@ class LLMText(BaseModel):
     text: str
 
 
+class LLMThinking(BaseModel):
+    """Reasoning a model emits alongside its answer, carried separately so it
+    never reaches the spoken channel. Reasoning models bill these tokens against
+    `num_predict` exactly like content, so a turn can exhaust its whole budget
+    thinking and emit no content at all -- silent, and indistinguishable from
+    success unless the reasoning is observable. Kept as its own event (rather
+    than folded into `LLMText`) so a future feature can consume it without the
+    adapter having to start telling the two apart after the fact."""
+
+    type: Literal["thinking"] = "thinking"
+    text: str
+
+
 class LLMToolCall(BaseModel):
     type: Literal["tool_call"] = "tool_call"
     call_id: str
@@ -75,7 +88,9 @@ class LLMToolCall(BaseModel):
     args: dict
 
 
-LLMEvent = Annotated[LLMText | LLMToolCall, Field(discriminator="type")]
+LLMEvent = Annotated[
+    LLMText | LLMThinking | LLMToolCall, Field(discriminator="type")
+]
 
 
 class LLMMessage(BaseModel):

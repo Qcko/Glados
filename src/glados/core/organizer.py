@@ -24,7 +24,15 @@ from ..brain.prompts import EXTERNAL_CONTENT_RULE, SYSTEM_PROMPT
 from ..brain.router import Router
 from ..mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
 from ..brain.tool_router import ToolRouter
-from .adapters import LLM, TTS, LLMMessage, LLMText, LLMToolCall, ToolSpec
+from .adapters import (
+    LLM,
+    TTS,
+    LLMMessage,
+    LLMText,
+    LLMThinking,
+    LLMToolCall,
+    ToolSpec,
+)
 from .config import ClientBinding
 from .language_guard import build_repair_messages, detect_drift, fallback_line
 from .protocols import (
@@ -45,7 +53,13 @@ from .room_queues import RoomQueueManager
 from .sessions import SessionRegistry
 from .tool_payload_cap import PayloadCap, cap_tool_payload
 from .traces import TraceStore
-from .turn_outcome import TurnRecord, classify, is_action_request, is_time_request
+from .turn_outcome import (
+    TurnRecord,
+    classify,
+    is_action_request,
+    is_time_request,
+    said_nothing,
+)
 
 log = logging.getLogger(__name__)
 
@@ -538,6 +552,7 @@ class Organizer:
                 scoped
                 and classify(outcome) == "failed"
                 and not outcome.made_successful_mutation()
+                and not said_nothing(outcome)
             ):
                 # Capability recovery (ARCH section 13) runs BEFORE difficulty
                 # escalation: a scoped failure most likely hid the tool the turn
@@ -547,6 +562,14 @@ class Organizer:
                 # Bounded: only on `failed` with no mutation (so a real side
                 # effect can't double-fire). A later escalation then retries the
                 # full set, not the scoped one.
+                #
+                # A turn that said NOTHING is excluded: that failure is the
+                # model exhausting its token budget before it started replying,
+                # which is deterministic for a given prompt -- and re-driving on
+                # the FULL tool set makes the prompt bigger, so the retry fails
+                # harder for the same reason. Measured 2026-08-25: one such turn
+                # burned two dead passes before this guard. Escalation still
+                # runs, because that swaps the model rather than repeating it.
                 trace.event("tool_scope_fallback_full")
                 final_text, outcome, new_history = await self._drive(
                     llm, session.session_id, session.room_id, envelope, text,
@@ -991,6 +1014,7 @@ class Organizer:
         )
         pending: list[LLMToolCall] = []
         text_chunks: list[str] = []
+        thinking_chunks: list[str] = []
         # aclosing guarantees the upstream HTTP stream gets aclose()'d on
         # CancelledError -- otherwise the model keeps generating tokens we'll
         # never read (ARCH section 6: cancellation must propagate end-to-end).
@@ -1002,9 +1026,26 @@ class Organizer:
                         room_id, AssistantDelta(session_id=session_id, text=event.text)
                     )
                     trace.event("assistant_delta", text=event.text)
+                elif isinstance(event, LLMThinking):
+                    thinking_chunks.append(event.text)
                 elif isinstance(event, LLMToolCall):
                     pending.append(event)
+        self._trace_thinking(trace, thinking_chunks)
         return pending, "".join(text_chunks)
+
+    @staticmethod
+    def _trace_thinking(trace, chunks: list[str]) -> None:
+        """Record reasoning to the trace only -- never broadcast it, so it
+        cannot reach TTS. Aggregated into one event PER LLM PASS rather than a
+        per-delta stream (a tool-using turn makes several passes, so expect one
+        of these per pass): reasoning runs to thousands of characters, and a
+        trace nobody can read is the same as no trace. `chars` is the number
+        that matters at a glance, because reasoning that approaches num_predict
+        is what starves the reply."""
+        if not chunks:
+            return
+        text = "".join(chunks)
+        trace.event("assistant_thinking", chars=len(text), text=text)
 
     async def _handle_loop_exhausted(
         self, session_id: str, room_id: str, trace

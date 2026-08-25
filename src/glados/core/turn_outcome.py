@@ -152,6 +152,8 @@ def classify(turn: TurnRecord) -> TurnOutcomeKind:
         return "failed"
     if _has_unrecovered_error(turn.tools):
         return "failed"
+    if said_nothing(turn):
+        return "failed"
     if _action_drifted(turn):
         # Asked to act, ran tools, but never landed the mutation. Ending on a
         # question is a hand-back (the model punted instead of acting);
@@ -163,6 +165,20 @@ def classify(turn: TurnRecord) -> TurnOutcomeKind:
     if _ends_on_question(turn.final_text) and not _has_successful_call(turn.tools):
         return "needs-user"
     return "done"
+
+
+def said_nothing(turn: TurnRecord) -> bool:
+    """The turn ended with no reply text at all. Every other guard here asks
+    whether the model did the RIGHT thing; this one asks whether it answered,
+    and an unanswered turn cannot be `done` however clean its tool calls were.
+
+    Observed 2026-08-25 on qwen3:4b: a reasoning model spent its entire
+    num_predict budget on `thinking` tokens and was cut at `done_reason=length`
+    before emitting a single content token. Tools had all succeeded and nothing
+    errored, so the turn fell through to `done` -- the harness reported success
+    for a turn the user heard nothing from. Silence is the one failure the user
+    cannot tell from a crash, so it must not classify as success."""
+    return not turn.final_text.strip()
 
 
 def _confabulated(turn: TurnRecord) -> bool:

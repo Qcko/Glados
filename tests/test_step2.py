@@ -1036,3 +1036,44 @@ def _hello(client_id: str, room_id: str, token: str) -> dict:
         "role": "ui",
         "token": token,
     }
+
+
+@pytest.mark.asyncio
+async def test_silent_turn_does_not_trigger_the_scope_fallback_redrive(
+    tmp_path: Path,
+) -> None:
+    """A turn that produced no reply classifies `failed`, but re-driving it on
+    the FULL tool set is pointless: the failure is the model exhausting its
+    token budget before it began replying, and a wider tool set only makes the
+    prompt bigger. Measured 2026-08-25 -- one silent turn burned two dead passes
+    before this guard, each ~4096 tokens."""
+    from glados.core.adapters import LLMText  # noqa: F401  (parity with siblings)
+
+    class SilentLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, messages, tools):
+            self.calls += 1
+            return
+            yield  # pragma: no cover -- makes this an async generator
+
+    llm = SilentLLM()
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path, llm=llm, extra_tools=[_FakeTool("weather", "get")],
+        tool_router=_weather_router(),
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "say something nice")
+        await org.flush()
+
+    assert llm.calls == 1, "the silent turn must not be re-driven on the full set"
+    outcomes = [m["outcome"] for _, m in sink if m.get("type") == "turn_outcome"]
+    assert outcomes == ["failed"]
+
+    traced = [
+        json.loads(line)
+        for path in tmp_path.glob("*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert not any(e.get("event") == "tool_scope_fallback_full" for e in traced)

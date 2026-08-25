@@ -20,7 +20,14 @@ from typing import AsyncIterator
 
 import httpx
 
-from ...core.adapters import LLMEvent, LLMMessage, LLMText, LLMToolCall, ToolSpec
+from ...core.adapters import (
+    LLMEvent,
+    LLMMessage,
+    LLMText,
+    LLMThinking,
+    LLMToolCall,
+    ToolSpec,
+)
 
 log = logging.getLogger(__name__)
 
@@ -136,14 +143,27 @@ class OllamaLLM:
             "POST", f"{self._host}/api/chat", json=payload
         ) as resp:
             resp.raise_for_status()
+            # Whether the model ever produced something SPEAKABLE. Reasoning
+            # tokens don't count: they bill against num_predict but never reach
+            # the user, so a turn can burn the whole budget and still owe a
+            # reply. `_log_usage` needs this to tell "cut mid-sentence" from
+            # "cut before it said anything".
+            produced_speakable = False
             async for line in resp.aiter_lines():
                 line = line.strip()
                 if not line:
                     continue
                 chunk = json.loads(line)
+                # Events BEFORE the usage log: the final chunk may itself carry
+                # the content, and judging "did it say anything" without
+                # counting that chunk would report a silent turn that spoke.
+                events = self._events_from_chunk(chunk, name_map)
+                produced_speakable = produced_speakable or any(
+                    isinstance(e, (LLMText, LLMToolCall)) for e in events
+                )
                 if chunk.get("done"):
-                    self._log_usage(chunk)
-                for event in self._events_from_chunk(chunk, name_map):
+                    self._log_usage(chunk, produced_speakable=produced_speakable)
+                for event in events:
                     yield event
 
     def _build_options(self) -> dict:
@@ -154,7 +174,7 @@ class OllamaLLM:
             options["num_predict"] = self._num_predict
         return options
 
-    def _log_usage(self, chunk: dict) -> None:
+    def _log_usage(self, chunk: dict, *, produced_speakable: bool) -> None:
         # The final chunk carries Ollama's own token accounting. Dropping it (as
         # this adapter did until 2026-08-17) is what made front-truncation
         # invisible: the prompt silently loses its head and nothing reports it.
@@ -172,7 +192,21 @@ class OllamaLLM:
             self._num_ctx,
             done_reason,
         )
-        if done_reason == "length":
+        if done_reason == "length" and not produced_speakable:
+            # Worse than a cut sentence: the budget went entirely on reasoning
+            # and the turn owes the user a reply it never started. Says nothing,
+            # yet every other signal reads as success -- so name it separately
+            # rather than let it hide behind the mid-sentence wording below.
+            log.warning(
+                "model %s hit the num_predict=%s cap after %s tokens WITHOUT "
+                "EMITTING ANY REPLY -- the whole budget went on reasoning, so "
+                "this turn is silent, not merely truncated. Raise num_predict, "
+                "or shrink the prompt this turn had to reason over.",
+                self._model,
+                self._num_predict,
+                reply_tokens,
+            )
+        elif done_reason == "length":
             # The reply was cut at num_predict, so the spoken sentence just
             # stops. Without this the slice would trade one silent truncation
             # (the front of the prompt) for another (the tail of the reply).
@@ -254,6 +288,9 @@ class OllamaLLM:
     ) -> list[LLMEvent]:
         events: list[LLMEvent] = []
         msg = chunk.get("message") or {}
+        thinking = msg.get("thinking")
+        if thinking:
+            events.append(LLMThinking(text=thinking))
         content = msg.get("content")
         if content:
             events.append(LLMText(text=content))

@@ -149,11 +149,30 @@ def test_action_request_no_tools_question_is_needs_user() -> None:
     assert classify(turn) == "needs-user"
 
 
-def test_action_request_no_tools_empty_reply_is_done() -> None:
-    # Nothing said, nothing claimed -- no fabrication to flag. (A no-op turn
-    # like this is not committed to history anyway.)
+def test_action_request_no_tools_empty_reply_is_failed() -> None:
+    # Nothing claimed, so there is no fabrication to flag -- but nothing was
+    # SAID either, and an unanswered turn is not a completed one. This used to
+    # classify `done` by fall-through, which is how a silent turn reported
+    # success (see `test_empty_reply_is_failed_even_when_tools_succeeded`).
     turn = _turn(final_text="", action_intent=True)
-    assert classify(turn) == "done"
+    assert classify(turn) == "failed"
+
+
+def test_empty_reply_is_failed_even_when_tools_succeeded() -> None:
+    # The regression this branch exists for: qwen3:4b burned its whole
+    # num_predict budget on reasoning tokens and was cut before emitting any
+    # content. The tool call had succeeded and nothing errored, so every other
+    # guard passed and the turn was reported `done` while the user heard
+    # silence (2026-08-25).
+    turn = _turn(final_text="", action_intent=False)
+    turn.record_tool("dunnes.scan_favorites_for_sales", ok=True)
+    assert classify(turn) == "failed"
+
+
+def test_whitespace_only_reply_is_failed() -> None:
+    # Whitespace is not an answer; TTS would speak nothing.
+    turn = _turn(final_text="   \n  ", action_intent=False)
+    assert classify(turn) == "failed"
 
 
 def test_read_request_no_tools_declarative_is_not_confabulated() -> None:
@@ -201,3 +220,15 @@ def test_is_time_request_rejects_non_time_questions() -> None:
     # A trailing clause means it's a planning question, not "what's the clock".
     assert not is_time_request("What's the time the train leaves?")
     assert not is_time_request("What is the time of the next bus")
+
+
+def test_empty_reply_after_a_successful_mutation_is_failed_but_not_retryable() -> None:
+    # The safety interlock behind the silent-turn branch: such a turn IS a
+    # failure, but it already changed external state, so both recovery paths
+    # (scope fallback and specialist escalation) must refuse to replay it --
+    # they gate on made_successful_mutation(). Without that, a cart-add whose
+    # reply was swallowed would fire twice.
+    turn = _turn(final_text="", action_intent=True)
+    turn.record_tool("dunnes.add_to_cart_by_name", ok=True, mutating=True)
+    assert classify(turn) == "failed"
+    assert turn.made_successful_mutation() is True

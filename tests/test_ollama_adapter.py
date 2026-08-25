@@ -12,7 +12,13 @@ import httpx
 import pytest
 
 from glados.brain.llm.ollama import OllamaLLM
-from glados.core.adapters import LLMMessage, LLMText, LLMToolCall, ToolSpec
+from glados.core.adapters import (
+    LLMMessage,
+    LLMText,
+    LLMThinking,
+    LLMToolCall,
+    ToolSpec,
+)
 
 
 def _ndjson(*chunks: dict) -> bytes:
@@ -414,3 +420,66 @@ async def test_no_truncation_warning_on_normal_stop(caplog) -> None:
         await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
 
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+@pytest.mark.asyncio
+async def test_thinking_is_emitted_as_its_own_event_not_as_text() -> None:
+    """Reasoning must never arrive as LLMText -- that is the spoken channel,
+    and qwen3's reasoning would be read aloud."""
+    body = _ndjson(
+        {"message": {"thinking": "Let me check the tool result.", "content": ""}, "done": False},
+        {"message": {"content": "Onions are on sale."}, "done": True,
+         "done_reason": "stop", "prompt_eval_count": 100, "eval_count": 40},
+    )
+    adapter = OllamaLLM(transport=_mock_transport(body))
+    events = await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+
+    assert [type(e) for e in events] == [LLMThinking, LLMText]
+    assert events[0].text == "Let me check the tool result."
+    assert events[1].text == "Onions are on sale."
+
+
+@pytest.mark.asyncio
+async def test_warns_that_turn_was_silent_when_only_thinking_hit_the_cap(caplog) -> None:
+    """The 2026-08-25 regression: the whole num_predict budget went on
+    reasoning, so the turn is silent rather than cut mid-sentence. The old
+    wording told the operator to look for a half-spoken sentence that never
+    existed."""
+    body = _ndjson(
+        {"message": {"thinking": "Reasoning at length about the payload..."}, "done": False},
+        {
+            "message": {"content": ""},
+            "done": True,
+            "done_reason": "length",
+            "prompt_eval_count": 4805,
+            "eval_count": 4096,
+        },
+    )
+    adapter = OllamaLLM(num_ctx=12288, num_predict=4096, transport=_mock_transport(body))
+    with caplog.at_level("WARNING"):
+        await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+
+    assert any("WITHOUT EMITTING ANY REPLY" in r.message for r in caplog.records)
+    assert not any("cut mid-sentence" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_tool_call_alone_is_not_a_silent_turn(caplog) -> None:
+    """A turn that dispatched a tool has done something observable, so hitting
+    the cap is the mid-sentence case, not the silent one."""
+    body = _ndjson(
+        {
+            "message": {
+                "tool_calls": [{"function": {"name": "time__now", "arguments": {}}}]
+            },
+            "done": True,
+            "done_reason": "length",
+            "prompt_eval_count": 100,
+            "eval_count": 4096,
+        }
+    )
+    adapter = OllamaLLM(num_ctx=12288, num_predict=4096, transport=_mock_transport(body))
+    with caplog.at_level("WARNING"):
+        await _collect(adapter, [LLMMessage(role="user", content="hi")], [_now_spec()])
+
+    assert not any("WITHOUT EMITTING ANY REPLY" in r.message for r in caplog.records)
