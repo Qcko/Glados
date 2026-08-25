@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from glados.core.turn_outcome import (
     TurnRecord,
+    claimed_a_change_it_did_not_make,
     classify,
     is_action_request,
     is_time_request,
@@ -416,3 +417,113 @@ def test_a_false_claim_beats_drift_so_the_reply_is_scrubbed() -> None:
     turn = _turn(final_text="Milk removed from cart.", action_intent=True)
     turn.record_tool("dunnes.view_cart", ok=True, mutating=False, args={})
     assert classify(turn) == "confabulated"
+
+
+def test_discourse_markers_no_longer_hide_a_mutation_request() -> None:
+    """Measured 25-08-2026 over 1372 logged utterances: these four phrasings
+    account for 81 turns whose action guard was asleep, because the utterance
+    opened with a discourse marker or a verb the list lacked."""
+    assert is_action_request("Actually, add eggs instead.")
+    assert is_action_request("Actually, just make it one milk.")
+    assert is_action_request("Take one of the milks off.")
+    assert is_action_request("Now add it back.")
+    assert is_action_request("uh remove the milk")
+    assert is_action_request("i mean add the eggs")
+
+
+def test_polysemous_verbs_do_not_turn_reads_into_actions() -> None:
+    """`take` and `make` were the two verbs worth adding and the two that can
+    lead an ordinary read. Each of these was a verified false positive before
+    the idiom guard."""
+    assert not is_action_request("take a look at my cart")
+    assert not is_action_request("make sure the milk is in there")
+    assert not is_action_request("take your time")
+    assert not is_action_request("make a note of that")
+
+
+def test_a_leading_marker_does_not_make_a_read_an_action() -> None:
+    """The lead-in group is skipped, not treated as an action itself -- the
+    `^` anchor still has to meet a verb, which is what keeps the widening
+    safe."""
+    assert not is_action_request("so what is in my cart")
+    assert not is_action_request("then what did I order")
+    assert not is_action_request("um what time is it")
+
+
+def test_one_true_claim_no_longer_excuses_a_false_one_beside_it() -> None:
+    """The check used to union every landed call's subjects and test the reply
+    as a whole, so "eggs" matching let the invented removal through. Measured
+    25-08-2026: this returned False before the claims were split."""
+    turn = _claim(
+        "Eggs added and the milk removed.",
+        [("dunnes.add_to_cart_by_name", True, True, {"name": "eggs"})],
+    )
+    assert claimed_a_change_it_did_not_make(turn)
+
+
+def test_both_halves_landing_is_not_an_accusation() -> None:
+    turn = _claim(
+        "Eggs added and the milk removed.",
+        [("dunnes.add_to_cart_by_name", True, True, {"name": "eggs"}),
+         ("dunnes.remove_from_cart", True, True, {"name": "milk"})],
+    )
+    assert not claimed_a_change_it_did_not_make(turn)
+
+
+def test_a_conjoined_object_is_one_claim_not_two() -> None:
+    """"the milk" is not a second claim -- it has no verb of its own, and
+    demanding a call for it would accuse a turn that did exactly what it
+    said."""
+    turn = _claim(
+        "I added the eggs and the milk.",
+        [("dunnes.add_to_cart_by_name", True, True, {"name": "eggs milk"})],
+    )
+    assert not claimed_a_change_it_did_not_make(turn)
+
+
+def test_a_claim_naming_nothing_fails_open() -> None:
+    """"Added." carries the claim verb and no subject. Comparing the verb
+    itself against the call's subjects would accuse an honest turn, so the
+    verbs are stripped and an empty remainder declines to judge."""
+    turn = _claim("Added.", [("dunnes.add_to_cart_by_name", True, True, {"name": "eggs"})])
+    assert not claimed_a_change_it_did_not_make(turn)
+
+
+def test_a_marker_does_not_smuggle_an_idiom_past_the_guard() -> None:
+    """The two widenings in this change interact: neither the extra verbs nor
+    the extra lead-ins produces these alone. The idiom guard has to skip the
+    same lead-ins the action regex does, or "actually, take a look at my cart"
+    reads as an imperative to act and arms two guards on a plain read."""
+    assert not is_action_request("actually, take a look at my cart")
+    assert not is_action_request("ok, take a look at my cart")
+    assert not is_action_request("now take a look")
+    assert not is_action_request("just make sure the milk is there")
+    assert not is_action_request("um make sure it is there")
+
+
+def test_a_cart_meta_aside_is_not_an_unsupported_claim() -> None:
+    """Judging claims per clause exposed a false-positive class the older
+    whole-reply check did not have: a trailing clause about the total or the
+    basket carries a claim verb but names something no tool argument can ever
+    contain, so it was unsupported by construction. All four landed a real
+    mutation and were accused before `_UNDISTINCTIVE` grew the cart-meta
+    nouns."""
+    for reply in (
+        "Removed the milk, and the total changed to 12.",
+        "Added the eggs, so your order is updated.",
+        "Added the eggs and updated your basket.",
+        "Milk removed, list updated.",
+    ):
+        turn = _claim(reply, [("dunnes.write", True, True, {"name": "milk eggs"})])
+        assert not claimed_a_change_it_did_not_make(turn), reply
+
+
+def test_a_quantity_claim_is_never_judged_by_its_number() -> None:
+    """`_subjects` keeps only values containing a run of letters, so a bare
+    number can never appear in the subjects a claim is checked against.
+    Judging "set the quantity to 250" by "250" could only ever accuse."""
+    turn = _claim(
+        "Added milk and set the quantity to 250.",
+        [("dunnes.add_to_cart_by_name", True, True, {"name": "milk"})],
+    )
+    assert not claimed_a_change_it_did_not_make(turn)

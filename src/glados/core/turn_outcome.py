@@ -57,10 +57,51 @@ _ACTION_VERBS = (
     "send",
     "play",
     "turn",
+    # Measured 25-08-2026 against 1372 logged utterances: `take` and `make`
+    # each recover a real mutation request the guard slept through ("Take one
+    # of the milks off", "Actually, just make it one milk" -- 44 occurrences
+    # between them). Both are polysemous, so they carry the idiom guard below.
+    # `swap`/`replace` gained nothing on that corpus but have no read sense at
+    # all, so they cost nothing. `drop` is deliberately absent: zero measured
+    # gain, and "drop me a hint" is a read wearing an imperative.
+    "take",
+    "make",
+    "swap",
+    "replace",
 )
+# Politeness forms, discourse markers and ASR filler all sit in front of the
+# verb without changing the request. Shared by the action regex and the idiom
+# guard below: matching only one of them against a marker-prefixed utterance
+# opens a hole neither widening opens alone ("actually, take a look at my
+# cart" read as an imperative to act).
+_LEAD_IN = (
+    r"(?:(?:please|hey|ok(?:ay)?|glados|can you|could you|would you"
+    r"|actually|just|now|then|so|um|uh|er|yeah|i mean"
+    r"|i(?:'d| would) like (?:you )?to|i want (?:you )?to)[\s,]+)*"
+)
+
 _ACTION_INTENT_RE = re.compile(
-    r"^(?:(?:please|hey|ok(?:ay)?|glados|can you|could you|would you|i(?:'d| would) like (?:you )?to|i want (?:you )?to)[\s,]+)*"
-    rf"(?:{'|'.join(_ACTION_VERBS)})\b",
+    # Discourse markers and ASR filler lead an utterance far more often than
+    # the politeness forms did: "Actually, add eggs instead", "Now add it
+    # back", "uh remove the milk" all reached the guard as non-actions. They
+    # are safe to skip because they add no new string-start -- the `^` anchor
+    # still has to meet an action verb, and that is what keeps this regex off
+    # reads.
+    rf"^{_LEAD_IN}(?:{'|'.join(_ACTION_VERBS)})\b",
+    re.IGNORECASE,
+)
+
+
+# `take` and `make` carry a common non-mutating reading in exactly the position
+# the anchor inspects, and the anchor cannot tell them apart -- "take a look at
+# my cart" is a read, "take one of the milks off" is a removal. Every phrase
+# below was a verified false positive when those two verbs were added. Kept as
+# a short closed list rather than a general rule: these are idioms, and an
+# idiom is enumerable where a part-of-speech judgement is not.
+_IDIOMATIC_NON_ACTION = re.compile(
+    rf"^{_LEAD_IN}"
+    r"(?:take\s+(?:a\s+look|your\s+time|care|it\s+easy)"
+    r"|make\s+(?:sure|sense|a\s+note|note))\b",
     re.IGNORECASE,
 )
 
@@ -69,8 +110,19 @@ def is_action_request(text: str) -> bool:
     """True if the user's utterance reads as an imperative to mutate external
     state ("add milk to the cart") rather than a question or a read ("what's
     in my cart?"). Used by the goal-check to demand a successful mutating tool
-    call before calling such a turn ``done``."""
-    return bool(text) and _ACTION_INTENT_RE.match(text.strip()) is not None
+    call before calling such a turn ``done``.
+
+    It stays anchored at the START of the utterance on purpose. Splitting a
+    compound instruction on its coordinators and testing each clause was
+    measured and REJECTED 25-08-2026: splitting manufactures new string-starts,
+    and 11 of these verbs have an ordinary non-imperative reading in that
+    position ("...and change is due on Friday", "...and buy one get one free
+    deals"), so it trades a bounded miss for an unbounded false positive. The
+    anchor is the whole safety argument -- do not remove it."""
+    stripped = text.strip() if text else ""
+    if not stripped or _IDIOMATIC_NON_ACTION.match(stripped):
+        return False
+    return _ACTION_INTENT_RE.match(stripped) is not None
 
 
 # Asking the current time reads as a *question*, not an imperative, so the local
@@ -224,6 +276,13 @@ def _confabulated(turn: TurnRecord) -> bool:
 # Past-tense assertions that a change HAPPENED. Present and future forms are
 # absent on purpose ("I'll add", "to add", "shall I remove") -- those are
 # intentions, and only a completed claim can be a false one.
+# The claim verbs themselves, excluded from a clause's distinctive words: they
+# say that something changed, never WHAT changed, so they can neither
+# corroborate nor contradict a dispatch record.
+_CLAIM_WORDS = frozenset(
+    {"added", "removed", "deleted", "cleared", "emptied", "updated", "changed", "set"}
+)
+
 _CLAIM_RE = re.compile(
     r"\b(added|removed|deleted|cleared|emptied|updated|changed)\b"
     # "set ... to 2" is a quantity claim; "set to expire in 30 minutes" is not,
@@ -248,6 +307,13 @@ _UNDISTINCTIVE = frozenset(
         "a", "an", "and", "the", "to", "of", "for", "in", "on", "at", "it",
         "my", "your", "cart", "item", "items", "one", "two", "some", "all",
         "please", "thing", "things", "product", "products",
+        # Cart-meta nouns. A reply routinely names one right after a real
+        # change ("Added the eggs and updated your basket."), and no tool
+        # argument ever contains one -- so judging a claim by them accuses a
+        # turn that did exactly what it said. Added 25-08-2026 after four
+        # verified false positives of that shape.
+        "total", "order", "basket", "trolley", "list", "quantity", "qty",
+        "everything",
     }
 )
 
@@ -276,7 +342,8 @@ def claimed_a_change_it_did_not_make(turn: TurnRecord) -> bool:
     if _ends_on_question(turn.final_text):
         # "Shall I have the milk removed?" is an offer, not a report.
         return False
-    if not any(_asserts_a_change(s) for s in _sentences(turn.final_text)):
+    claims = [c for s in _sentences(turn.final_text) for c in _claim_clauses(s)]
+    if not claims:
         return False
 
     landed = [t for t in turn.tools if t.ok and t.mutating]
@@ -292,7 +359,49 @@ def claimed_a_change_it_did_not_make(turn: TurnRecord) -> bool:
         # presence of arguments: a call with only `state="on"` has arguments and
         # still gives us nothing to check against.
         return False
-    return not (subject_words & _words(turn.final_text))
+    return any(_claim_unsupported(c, subject_words) for c in claims)
+
+
+def _claim_clauses(sentence: str) -> list[str]:
+    """The individually-checkable claims inside one sentence.
+
+    A sentence is subdivided because the check used to union every landed
+    call's subjects and test the reply as a whole, which made ONE true claim
+    excuse every false one beside it. Measured 25-08-2026: "Eggs added and the
+    milk removed." with only the add landed returned False -- the word "eggs"
+    matched, so the invented removal went unchallenged. Splitting on the
+    coordinators lets the milk clause be judged on its own.
+
+    Only clauses that themselves assert a change are returned, so a conjoined
+    object ("I added the eggs and the milk") yields a single claim rather than
+    a second, verbless clause that no call could ever support."""
+    if not _asserts_a_change(sentence):
+        # Negation and prior-turn references are judged on the whole sentence,
+        # deliberately: "I added the eggs but did NOT remove the milk" reads as
+        # one disclaimed report, and splitting first would strip the "not" from
+        # the clause it governs.
+        return []
+    return [c for c in re.split(r"\band\b|\bbut\b|\bthen\b|[;,]", sentence)
+            if _asserts_a_change(c)]
+
+
+def _claim_unsupported(clause: str, subject_words: set[str]) -> bool:
+    """True if this one claim names something no successful call touched.
+
+    The claim verbs are stripped before comparing, so a bare "Added." carries
+    no distinctive words and FAILS OPEN. Without that it would compare
+    {"added"} against the subjects of a real add and accuse a turn that did
+    exactly what it said."""
+    named = {
+        w
+        for w in _words(clause) - _CLAIM_WORDS
+        # `_subjects` keeps only values containing a run of letters, so a
+        # bare number is absent from `subject_words` BY CONSTRUCTION.
+        # Judging a claim by one ("set the quantity to 250") could only
+        # ever accuse.
+        if not w.isdigit()
+    }
+    return bool(named) and not (named & subject_words)
 
 
 def asserts_a_change(text: str) -> bool:
