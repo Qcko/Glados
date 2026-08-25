@@ -26,6 +26,19 @@ _BACKUPS = 5
 
 _configured = False
 
+# Marker for a record that may carry the user's own content -- a spoken reply,
+# a product name, a quantity. Pass `extra={FILE_ONLY: True}` and the line is
+# written to the rotating file but kept off stderr, which on this deployment is
+# uvicorn's console and can be captured anywhere a service manager decides.
+# The file already sits beside traces/, which holds far more; the console does
+# not, and it is the surface most likely to be watched by someone else.
+FILE_ONLY = "file_only"
+
+
+class _KeepFileOnlyOffStderr(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not getattr(record, FILE_ONLY, False)
+
 
 def setup_logging() -> Path:
     """Install handlers on the root logger. Returns the log file path.
@@ -54,6 +67,7 @@ def setup_logging() -> Path:
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setFormatter(formatter)
     stderr_handler.setLevel(logging.INFO)
+    stderr_handler.addFilter(_KeepFileOnlyOffStderr())
 
     root = logging.getLogger()
     root.setLevel(logging.INFO)

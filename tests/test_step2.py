@@ -1077,3 +1077,201 @@ async def test_silent_turn_does_not_trigger_the_scope_fallback_redrive(
         for line in path.read_text(encoding="utf-8").splitlines()
     ]
     assert not any(e.get("event") == "tool_scope_fallback_full" for e in traced)
+
+
+class _FailingTool:
+    """A mutating tool whose call always errors, so a reply claiming success
+    is contradicted by the dispatch record."""
+
+    def __init__(self, server: str, name: str) -> None:
+        from glados.core.adapters import ToolSpec
+
+        self.spec = ToolSpec(
+            server=server, name=name, description=f"{server}.{name}",
+            parameters={"type": "object", "properties": {"name": {"type": "string"}}},
+            mutating=True,
+        )
+
+    async def call(self, args, envelope):
+        from glados.mcp.registry import MCPCallResult
+
+        return MCPCallResult(ok=False, content=None, error="tool exploded")
+
+
+@pytest.mark.asyncio
+async def test_false_claim_after_a_failed_call_is_scrubbed(tmp_path: Path) -> None:
+    """An unrecovered tool error classifies `failed`, and `failed` never had its
+    reply replaced -- so a model that announced success anyway got its false
+    claim both SPOKEN and committed to history. The verdict stays `failed`
+    (that is what drives escalation); only the lie is replaced."""
+    from glados.core.adapters import LLMText, LLMToolCall
+    from glados.core.organizer import _UNBACKED_CLAIM_REPLIES
+
+    class ClaimsSuccessLLM:
+        def __init__(self) -> None:
+            self.passes = 0
+
+        async def chat(self, messages, tools):
+            self.passes += 1
+            if self.passes == 1:
+                yield LLMToolCall(
+                    call_id="c1", server="dunnes", name="remove_from_cart_by_name",
+                    args={"name": "milk"},
+                )
+            else:
+                yield LLMText(text="Milk removed from cart.")
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=ClaimsSuccessLLM(),
+        extra_tools=[_FailingTool("dunnes", "remove_from_cart_by_name")],
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "take the milk off")
+        await org.flush()
+
+        outcomes = [m["outcome"] for _, m in sink if m["type"] == "turn_outcome"]
+        assert outcomes == ["failed"]
+        deltas = [m["text"] for _, m in sink if m["type"] == "assistant_delta"]
+        assert any(any(r in d for r in _UNBACKED_CLAIM_REPLIES) for d in deltas)
+
+
+@pytest.mark.asyncio
+async def test_unknown_claim_phrasing_is_logged_for_review(tmp_path: Path, caplog) -> None:
+    """The claim vocabulary can only be wrong by omission, so a turn that really
+    mutated something but matched no pattern is logged as a candidate phrasing.
+    "Took the milk off" is exactly the shape `_CLAIM_RE` does not know."""
+    from glados.core.adapters import LLMText, LLMToolCall
+
+    class UnknownPhrasingLLM:
+        def __init__(self) -> None:
+            self.passes = 0
+
+        async def chat(self, messages, tools):
+            self.passes += 1
+            if self.passes == 1:
+                yield LLMToolCall(
+                    call_id="c1", server="dunnes", name="remove_from_cart_by_name",
+                    args={"name": "milk"},
+                )
+            else:
+                yield LLMText(text="Took the milk off for you.")
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=UnknownPhrasingLLM(),
+        extra_tools=[_FakeTool("dunnes", "remove_from_cart_by_name", mutating=True)],
+    ) as (org, sink):
+        with caplog.at_level("INFO"):
+            await org.handle_user_text("desk-ui", "take the milk off")
+            await org.flush()
+
+    assert any("claim-vocab" in r.message for r in caplog.records)
+    assert any("Took the milk off" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_recognised_phrasing_is_not_logged(tmp_path: Path, caplog) -> None:
+    """The log must stay a short weekly list, not a record of every mutation."""
+    from glados.core.adapters import LLMText, LLMToolCall
+
+    class KnownPhrasingLLM:
+        def __init__(self) -> None:
+            self.passes = 0
+
+        async def chat(self, messages, tools):
+            self.passes += 1
+            if self.passes == 1:
+                yield LLMToolCall(
+                    call_id="c1", server="dunnes", name="remove_from_cart_by_name",
+                    args={"name": "milk"},
+                )
+            else:
+                yield LLMText(text="Removed the milk from your cart.")
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=KnownPhrasingLLM(),
+        extra_tools=[_FakeTool("dunnes", "remove_from_cart_by_name", mutating=True)],
+    ) as (org, sink):
+        with caplog.at_level("INFO"):
+            await org.handle_user_text("desk-ui", "take the milk off")
+            await org.flush()
+
+    assert not any("claim-vocab" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_our_own_canned_line_is_never_logged_as_a_candidate(
+    tmp_path: Path, caplog
+) -> None:
+    """The vocabulary log must harvest the MODEL's phrasings, not ours.
+
+    A silent turn that had already mutated gets one of
+    `_SILENT_TURN_AFTER_MUTATION_REPLIES` -- which contains no claim verb, and
+    is spoken on a turn where `made_successful_mutation()` is true. Logging
+    after the scrub would therefore file our own line as evidence of a missing
+    phrasing, every single time it happened."""
+    from glados.core.adapters import LLMToolCall
+
+    class MutatesThenSaysNothingLLM:
+        def __init__(self) -> None:
+            self.passes = 0
+
+        async def chat(self, messages, tools):
+            self.passes += 1
+            if self.passes == 1:
+                yield LLMToolCall(
+                    call_id="c1", server="dunnes", name="remove_from_cart_by_name",
+                    args={"name": "milk"},
+                )
+            # Second pass says nothing at all.
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=MutatesThenSaysNothingLLM(),
+        extra_tools=[_FakeTool("dunnes", "remove_from_cart_by_name", mutating=True)],
+    ) as (org, sink):
+        with caplog.at_level("INFO"):
+            await org.handle_user_text("desk-ui", "take the milk off")
+            await org.flush()
+
+    assert not any("claim-vocab" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_clarifying_question_after_a_mutation_is_not_logged(
+    tmp_path: Path, caplog
+) -> None:
+    """Mutated, then asked something. That is not a change reported in unknown
+    words -- it is not a report at all."""
+    from glados.core.adapters import LLMText, LLMToolCall
+
+    class AsksAfterMutatingLLM:
+        def __init__(self) -> None:
+            self.passes = 0
+
+        async def chat(self, messages, tools):
+            self.passes += 1
+            if self.passes == 1:
+                yield LLMToolCall(
+                    call_id="c1", server="dunnes", name="remove_from_cart_by_name",
+                    args={"name": "milk"},
+                )
+            else:
+                yield LLMText(text="Which milk did you mean?")
+
+    async with _make_organizer(
+        [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
+        tmp_path,
+        llm=AsksAfterMutatingLLM(),
+        extra_tools=[_FakeTool("dunnes", "remove_from_cart_by_name", mutating=True)],
+    ) as (org, sink):
+        with caplog.at_level("INFO"):
+            await org.handle_user_text("desk-ui", "take the milk off")
+            await org.flush()
+
+    assert not any("claim-vocab" in r.message for r in caplog.records)

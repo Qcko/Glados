@@ -35,6 +35,7 @@ from .adapters import (
 )
 from .config import ClientBinding
 from .language_guard import build_repair_messages, detect_drift, fallback_line
+from .logging_setup import FILE_ONLY
 from .protocols import (
     AssistantDelta,
     Cancelled,
@@ -55,6 +56,8 @@ from .tool_payload_cap import PayloadCap, cap_tool_payload
 from .traces import TraceStore
 from .turn_outcome import (
     TurnRecord,
+    asserts_a_change,
+    claimed_a_change_it_did_not_make,
     classify,
     is_action_request,
     is_time_request,
@@ -123,6 +126,20 @@ _CONFABULATION_REPLIES = (
     "I don't have a record of actually doing that -- say it again and I'll run it for real.",
     "That didn't dispatch; nothing was logged. Tell me once more and I'll act on it.",
     "I can't confirm that went through. Repeat it and I'll do it properly this time.",
+)
+
+# Spoken when the reply claimed a change the dispatch record does not support,
+# on a turn that classified as something OTHER than `confabulated` -- in
+# practice one whose mutating call errored, since an unrecovered error is
+# `failed` and `failed` never had its reply replaced. The distinction from the
+# lines above is small but real: there nothing dispatched at all; here
+# something ran and did not do what the reply says. So these never say
+# "nothing was logged", and they point at checking rather than repeating,
+# because a failed call can still have changed something.
+_UNBACKED_CLAIM_REPLIES = (
+    "I said that went through, but I can't confirm it did -- check before repeating it.",
+    "What I just said doesn't match what actually ran. Ask me whether it worked rather than saying it again.",
+    "That may not have happened the way I described it. Check it before you repeat the request.",
 )
 
 # Spoken when a turn produced no reply at all (classified `failed` via
@@ -334,6 +351,7 @@ class Organizer:
         # cascade of fabricated turns doesn't repeat one phrase verbatim.
         self._confab_reply_idx = 0
         self._silent_reply_idx = 0
+        self._unbacked_reply_idx = 0
         # session_id -> dispatch-grounded summary of its last real turn, for the
         # "did that actually work?" escape hatch. LRU-bounded by
         # _MAX_TRACKED_SESSIONS like _history, so a long uptime can't grow it.
@@ -622,11 +640,25 @@ class Organizer:
                     history, specs,
                 )
             kind = classify(outcome)
+            # BEFORE the scrub chain below, so this sees the MODEL's reply.
+            # Three of those branches replace it with a line of ours, and none
+            # of our lines match _CLAIM_RE -- logging after them would harvest
+            # our own vocabulary as evidence of the model's.
+            self._log_unmatched_claim_phrasing(outcome, final_text)
             if kind == "confabulated":
                 # Confabulation wins and short-circuits: the fabricated reply is
                 # replaced by a canned in-language line, so a language check on
                 # it would be moot (and would re-rewrite the same slot).
                 final_text = await self._handle_confabulation(
+                    session.session_id, session.room_id, new_history, trace
+                )
+            elif claimed_a_change_it_did_not_make(outcome):
+                # Reached when the turn classified as something else -- almost
+                # always `failed`, because an unrecovered tool error outranks
+                # everything and `failed` leaves the reply alone. The verdict is
+                # right and stays put (it is what drives escalation); it is the
+                # LIE that must not be spoken and must not enter history.
+                final_text = await self._handle_unbacked_claim(
                     session.session_id, session.room_id, new_history, trace
                 )
             elif said_nothing(outcome) and text.strip():
@@ -1141,6 +1173,66 @@ class Organizer:
         if history and history[-1].role == "assistant":
             history[-1] = LLMMessage(role="assistant", content=reply)
         trace.event("confabulation_suppressed", replacement=reply)
+        await self._broadcast(
+            room_id, AssistantDelta(session_id=session_id, text=" " + reply)
+        )
+        return reply
+
+    @staticmethod
+    def _log_unmatched_claim_phrasing(outcome: TurnRecord, final_text: str) -> None:
+        """Record a reply that almost certainly reported a change in words the
+        claim vocabulary does not know.
+
+        The vocabulary is a closed list, so it can only be wrong by omission,
+        and guessing at the missing phrasings from an armchair is how it stays
+        wrong. This logs the one case that is good evidence: a mutating call
+        really did succeed, so the reply is almost certainly reporting it, yet
+        nothing in the reply matched. "Took the milk off", "swapped it for
+        eggs", "that's done" all land here.
+
+        Deliberately not logged: turns with no successful mutation. Those are
+        reads, and logging them would bury the signal in every "what time is
+        it" the assistant ever answers.
+
+        Reviewed periodically; real phrasings get promoted into `_CLAIM_RE` in
+        core/turn_outcome.py. Grep the log for `claim-vocab`."""
+        if not final_text.strip():
+            return
+        if final_text.rstrip().endswith("?"):
+            # A turn that mutated and then asked something ("Which milk did you
+            # mean?") is not reporting a change in unknown words -- it is not
+            # reporting one at all. Mirrors the claim check's own question bail.
+            return
+        if not outcome.made_successful_mutation():
+            return
+        if asserts_a_change(final_text):
+            return
+        log.info(
+            "claim-vocab: a mutating call landed but the reply matched no claim "
+            "pattern -- candidate phrasing for _CLAIM_RE. tools=%s reply=%r",
+            [t.tool for t in outcome.tools if t.ok and t.mutating],
+            final_text[:300],
+            # The reply is the user's own content -- product names, quantities.
+            # It belongs in the log file that already sits beside traces/, not
+            # on the console.
+            extra={FILE_ONLY: True},
+        )
+
+    async def _handle_unbacked_claim(
+        self, session_id: str, room_id: str, history: list[LLMMessage], trace
+    ) -> str:
+        """Replace a reply whose claim the dispatch record does not support, on
+        a turn that is not classified `confabulated`. Same two egress paths as
+        `_handle_confabulation` -- the audio path and the history buffer -- and
+        the same reason: a false "I removed it" committed to history is what
+        teaches the next turn that saying so is enough."""
+        reply = _UNBACKED_CLAIM_REPLIES[
+            self._unbacked_reply_idx % len(_UNBACKED_CLAIM_REPLIES)
+        ]
+        self._unbacked_reply_idx += 1
+        if history and history[-1].role == "assistant":
+            history[-1] = LLMMessage(role="assistant", content=reply)
+        trace.event("unbacked_claim_suppressed", replacement=reply)
         await self._broadcast(
             room_id, AssistantDelta(session_id=session_id, text=" " + reply)
         )

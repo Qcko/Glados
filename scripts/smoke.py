@@ -2,14 +2,20 @@
 
 import asyncio
 import json
+import os
 import sys
 
 import websockets
 
+from _ws import ssl_context
+
+# The server is TLS-only, so this defaults to wss://. Override with
+# GLADOS_WS_URL to point at a plain-HTTP server or a test double.
+URI = os.environ.get("GLADOS_WS_URL", "wss://127.0.0.1:8765/ws/v1")
+
 
 async def turn(client_id: str, room_id: str, token: str, text: str) -> None:
-    uri = "ws://127.0.0.1:8765/ws/v1"
-    async with websockets.connect(uri) as ws:
+    async with websockets.connect(URI, ssl=ssl_context(URI)) as ws:
         await ws.send(json.dumps({
             "type": "hello",
             "client_id": client_id,

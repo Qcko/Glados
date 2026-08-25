@@ -46,12 +46,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import ssl
 import sys
 from dataclasses import dataclass, field
 
 import websockets
 
+from _ws import ssl_context
 from glados.core.secrets import KeyringSecrets
 
 
@@ -233,18 +233,6 @@ def _print_turn(rep: TurnReport) -> None:
     print(f"    OUTCOME: {rep.outcome or '(none)'}{flag}")
 
 
-def _ssl_context(url: str):
-    """The server is TLS-only with a self-signed cert, so a wss:// URL needs a
-    context that does not verify it. Returns None for ws:// so a plain-HTTP
-    server (or a test double) still connects."""
-    if not url.startswith("wss://"):
-        return None
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
 async def run(args: argparse.Namespace) -> None:
     token = args.token or KeyringSecrets().get("client-tokens", args.client_id)
     if not token:
@@ -266,7 +254,7 @@ async def run(args: argparse.Namespace) -> None:
     # the websockets client default max_size. The browser client has no such
     # cap; lift it here so the runner doesn't 1009-close mid-suite.
     async with websockets.connect(
-        args.url, max_size=16 * 1024 * 1024, ssl=_ssl_context(args.url)
+        args.url, max_size=16 * 1024 * 1024, ssl=ssl_context(args.url)
     ) as ws:
         await ws.send(json.dumps({
             "type": "hello",

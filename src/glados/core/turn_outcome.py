@@ -169,7 +169,7 @@ def classify(turn: TurnRecord) -> TurnOutcomeKind:
         return "failed"
     if said_nothing(turn):
         return "failed"
-    if _confabulated(turn) or _claimed_a_change_it_did_not_make(turn):
+    if _confabulated(turn) or claimed_a_change_it_did_not_make(turn):
         # Ahead of the drift check on purpose. A turn can be both drifted AND
         # making a false claim, and only `confabulated` gets the reply replaced
         # and kept out of history (see Organizer._handle_confabulation);
@@ -252,7 +252,7 @@ _UNDISTINCTIVE = frozenset(
 )
 
 
-def _claimed_a_change_it_did_not_make(turn: TurnRecord) -> bool:
+def claimed_a_change_it_did_not_make(turn: TurnRecord) -> bool:
     """The reply says something was added/removed/set, and the dispatch record
     does not support it.
 
@@ -293,6 +293,14 @@ def _claimed_a_change_it_did_not_make(turn: TurnRecord) -> bool:
         # still gives us nothing to check against.
         return False
     return not (subject_words & _words(turn.final_text))
+
+
+def asserts_a_change(text: str) -> bool:
+    """True if any sentence reports a completed change. Public so the organizer
+    can spot the inverse case -- a turn that really did mutate something but
+    whose reply matches nothing in the vocabulary below. Those replies are the
+    only reliable source of phrasings the vocabulary is missing."""
+    return any(_asserts_a_change(s) for s in _sentences(text))
 
 
 def _asserts_a_change(sentence: str) -> bool:
