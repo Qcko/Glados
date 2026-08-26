@@ -149,3 +149,72 @@ invariant change to argue on its own terms, not a classifier tweak.
 
 Until then the compound instruction is unguarded, and the honest reply reaches
 the user with half the job done.
+
+## Observed in production -- measured 26-08-2026, from a session of 25-08-2026
+
+The gap above stopped being theoretical. `traces/desk_qcko_fc8007bd.jsonl`
+holds 20 consecutive turns on `qwen3:4b` between 16:55 and 17:03 on
+25-08-2026, driving the real Dunnes MCP subprocess. **Six of the 20 dispatched
+no tools at all. All 20 classified `done`.**
+
+The session was a scripted four-utterance loop (`start the dunnes browser` ->
+`add milk to the cart` -> `Show me what's in my cart and then remove the
+milk.` -> `what is in my cart`), so it is emphatically NOT the naturalistic
+corpus named as an enabler above. It is the same kind of scripted data, and it
+cannot settle the false-positive question the split was rejected on.
+
+What it does settle is that the failure has two independent halves, and only
+one of them is about the model.
+
+| precedent in history for that utterance | turns | zero-tool | rate |
+| --- | --- | --- | --- |
+| none (first occurrence) | 4 | 0 | 0% |
+| every previous answer used a tool call | 11 | 2 | 18% |
+| at least one previous answer was text-only | 5 | 4 | 80% |
+
+- **Onset is the model.** The first two zero-tool turns had only tool-call
+  precedents in the window -- nothing in the history modelled the behaviour.
+  18% is a property of `qwen3:4b` and is the figure a model bake-off can
+  compare.
+- **Contagion is the harness.** One text-only answer entering the eight-turn
+  history window takes the rate from 18% to 80%. The window is ours, so this
+  half follows any model we swap in and cannot be fixed by swapping one.
+- **Invisibility is the `action_intent` gate**, exactly as *Why each guard
+  misses it* predicted. Confirmed by running the predicate:
+  `is_action_request("Show me what's in my cart and then remove the milk.")`
+  is `False`, so `_confabulated` cannot fire however the reply reads.
+
+**The gap is wider than this document assumed.** The motivating example is
+honest under-delivery -- a true report of what was found. The observed turns
+are worse. At 16:58:10 the model replied "Cart is empty." having dispatched
+nothing, eight seconds after a `view_cart` returned `itemCount: 1` and with no
+removal anywhere in the turn. That is a false assertion about external state,
+not an honest partial answer, and the same `action_intent` gate hides it. A
+zero-tool turn asserting checkable state is unverifiable regardless of whether
+its verbs are in any claim vocabulary.
+
+**The recovery machinery is not implicated.** `_finish_the_job` fired
+correctly at 17:01:53 on `add milk to the cart` -- which *is* a leading
+imperative -- injected its nudge, and the model dispatched the call five
+seconds later. It never runs on the compound turns because classification has
+already returned `done`.
+
+**A vocabulary fix is still the wrong lever, for a new reason.** The seven
+`claim-vocab` probe hits from this session are all "Cart is empty." or "Cart
+has 1 x 3L milk.". Neither is a claim, and `_confabulated` never consulted
+`_CLAIM_RE` in the first place -- promoting these would widen the claim check
+that is not the gate, while leaving the gate untouched. It would also
+manufacture false accusations on the turns that behaved, since "Cart is empty."
+after a successful removal is true.
+
+**What this changes for the parked decision:** nothing about the two enablers,
+which are still absent. It adds a third avenue that neither depends on
+splitting utterances nor on widening the adapter contract -- treating a
+zero-tool turn that asserts checkable external state as unverifiable, on the
+dispatch record alone, without reference to how the user phrased the request
+(the property that already makes `claimed_a_change_it_did_not_make` the guard
+that fires in practice). That is an invariant argument about what `done` may
+mean, so it belongs to a design panel, not to a classifier tweak.
+
+**Caveats.** One session, one model, 20 turns; the 4-of-5 and 2-of-11 cells are
+small. This is a mechanism with supporting evidence, not a measured rate.
