@@ -399,20 +399,37 @@ async def test_confabulation_wins_over_language_guard(tmp_path: Path) -> None:
 
 
 class _FakeTool:
-    """Minimal always-ok registry tool for tool-scoping tests."""
+    """Minimal registry tool; succeeds unless given an `error`."""
 
-    def __init__(self, server: str, name: str, *, mutating: bool = False) -> None:
-        from glados.core.adapters import ToolSpec
-
+    def __init__(
+        self,
+        server: str,
+        name: str,
+        *,
+        mutating: bool = False,
+        error: str | None = None,
+        properties: dict | None = None,
+    ) -> None:
         self.spec = ToolSpec(
             server=server, name=name, description=f"{server}.{name}",
-            parameters={"type": "object", "properties": {}}, mutating=mutating,
+            parameters={"type": "object", "properties": properties or {}},
+            mutating=mutating,
         )
+        self._error = error
 
     async def call(self, args, envelope):
-        from glados.mcp.registry import MCPCallResult
-
+        if self._error is not None:
+            return MCPCallResult(ok=False, content=None, error=self._error)
         return MCPCallResult(ok=True, content={"ok": True})
+
+
+def _failing_tool(server: str, name: str) -> _FakeTool:
+    """A mutating tool whose call always errors, so a reply claiming success
+    is contradicted by the dispatch record."""
+    return _FakeTool(
+        server, name, mutating=True, error="tool exploded",
+        properties={"name": {"type": "string"}},
+    )
 
 
 def _weather_router():
@@ -1079,25 +1096,6 @@ async def test_silent_turn_does_not_trigger_the_scope_fallback_redrive(
     assert not any(e.get("event") == "tool_scope_fallback_full" for e in traced)
 
 
-class _FailingTool:
-    """A mutating tool whose call always errors, so a reply claiming success
-    is contradicted by the dispatch record."""
-
-    def __init__(self, server: str, name: str) -> None:
-        from glados.core.adapters import ToolSpec
-
-        self.spec = ToolSpec(
-            server=server, name=name, description=f"{server}.{name}",
-            parameters={"type": "object", "properties": {"name": {"type": "string"}}},
-            mutating=True,
-        )
-
-    async def call(self, args, envelope):
-        from glados.mcp.registry import MCPCallResult
-
-        return MCPCallResult(ok=False, content=None, error="tool exploded")
-
-
 @pytest.mark.asyncio
 async def test_false_claim_after_a_failed_call_is_scrubbed(tmp_path: Path) -> None:
     """An unrecovered tool error classifies `failed`, and `failed` never had its
@@ -1125,7 +1123,7 @@ async def test_false_claim_after_a_failed_call_is_scrubbed(tmp_path: Path) -> No
         [ClientBinding(client_id="desk-ui", room_id="desk", role="ui", default_user="qcko")],
         tmp_path,
         llm=ClaimsSuccessLLM(),
-        extra_tools=[_FailingTool("dunnes", "remove_from_cart_by_name")],
+        extra_tools=[_failing_tool("dunnes", "remove_from_cart_by_name")],
     ) as (org, sink):
         await org.handle_user_text("desk-ui", "take the milk off")
         await org.flush()
