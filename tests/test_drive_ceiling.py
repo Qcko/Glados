@@ -14,19 +14,15 @@ it silently.
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
 import pytest
-from pydantic import BaseModel
 
 from glados.core.adapters import LLMEvent, LLMMessage, LLMText, LLMToolCall, ToolSpec
-from glados.core.config import ClientBinding
-from glados.core.organizer import Organizer
-from glados.core.sessions import SessionRegistry
-from glados.core.traces import TraceStore
-from glados.mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
+from glados.mcp.registry import MCPCallResult, MCPRegistry
+
+from .organizer_harness import CLIENT_ID, desk_organizer
 
 
 class _ReadOnlyTool:
@@ -77,32 +73,11 @@ class _DroppingRouter:
         return specs[:1]
 
 
-@asynccontextmanager
-async def _organizer(tmp: Path, llm, specialist=None):
-    async def send(client_id: str, msg: BaseModel) -> None:
-        return None
-
-    binding = ClientBinding(
-        client_id="desk-ui", room_id="desk", role="ui", default_user="qcko"
-    )
+def _read_only_registry() -> MCPRegistry:
     reg = MCPRegistry()
     reg.register(_ReadOnlyTool("view"))
     reg.register(_ReadOnlyTool("search"))
-    org = Organizer(
-        llm=llm,
-        mcp=reg,
-        traces=TraceStore(tmp),
-        sessions=SessionRegistry(),
-        send=send,
-        binding_for_client=lambda cid: binding if cid == "desk-ui" else None,
-        clients_in_room=lambda rid: ["desk-ui"],
-        tool_router=_DroppingRouter(),
-        specialist_llm=specialist,
-    )
-    try:
-        yield org
-    finally:
-        await org.close()
+    return reg
 
 
 @pytest.mark.asyncio
@@ -110,9 +85,11 @@ async def test_a_clean_turn_costs_exactly_one_drive(tmp_path: Path) -> None:
     """The budget only exists for failures. A turn that answers must not pay
     for the machinery that recovers the ones that don't."""
     llm = _CountingLLM()
-    async with _organizer(tmp_path, llm) as org:
-        await org.handle_user_text("desk-ui", "what is in my cart?")
-        await org.flush()
+    async with desk_organizer(
+        tmp_path, llm=llm, mcp=_read_only_registry(), tool_router=_DroppingRouter()
+    ) as h:
+        await h.org.handle_user_text(CLIENT_ID, "what is in my cart?")
+        await h.org.flush()
     assert llm.drives == 1
 
 
@@ -131,9 +108,15 @@ async def test_worst_case_never_exceeds_four_drives(tmp_path: Path) -> None:
     testing the thing this file is named after."""
     primary = _CountingLLM()
     specialist = _CountingLLM(confabulate=True)
-    async with _organizer(tmp_path, primary, specialist=specialist) as org:
-        await org.handle_user_text("desk-ui", "remove the milk")
-        await org.flush()
+    async with desk_organizer(
+        tmp_path,
+        llm=primary,
+        mcp=_read_only_registry(),
+        tool_router=_DroppingRouter(),
+        specialist_llm=specialist,
+    ) as h:
+        await h.org.handle_user_text(CLIENT_ID, "remove the milk")
+        await h.org.flush()
     total = primary.drives + specialist.drives
     assert total <= 4, f"drive budget blown: {total}"
     # Pinned per brain, not just as a sum: a different path costing the same
@@ -192,27 +175,16 @@ async def test_a_landed_mutation_blocks_every_re_drive(tmp_path: Path) -> None:
             yield LLMToolCall(call_id="c1", server="cart", name="write", args={})
 
     llm = _WritesThenBreaks()
-
-    async def send(client_id: str, msg: BaseModel) -> None:
-        return None
-
-    binding = ClientBinding(
-        client_id="desk-ui", room_id="desk", role="ui", default_user="qcko"
-    )
     reg = MCPRegistry()
     reg.register(_Write())
     reg.register(_Breaks())
-    org = Organizer(
-        llm=llm, mcp=reg, traces=TraceStore(tmp_path), sessions=SessionRegistry(),
-        send=send,
-        binding_for_client=lambda cid: binding if cid == "desk-ui" else None,
-        clients_in_room=lambda rid: ["desk-ui"],
+    async with desk_organizer(
+        tmp_path,
+        llm=llm,
+        mcp=reg,
         tool_router=_DroppingRouter(),
         specialist_llm=_CountingLLM(),
-    )
-    try:
-        await org.handle_user_text("desk-ui", "remove the milk")
-        await org.flush()
-    finally:
-        await org.close()
+    ) as h:
+        await h.org.handle_user_text(CLIENT_ID, "remove the milk")
+        await h.org.flush()
     assert llm.drives == 1
