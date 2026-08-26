@@ -250,6 +250,12 @@ LLM.
   summariser maintains.
 - **Validate before v2** with a synthetic 200-turn conversation; if recall
   suffers, add LanceDB + bge-small.
+- **Budget the assembled prompt on BEHAVIOUR, not just on `num_ctx`.** Tool
+  dispatch degrades with prompt volume well below the context limit (measured
+  26-08-2026: 67% occupancy, no truncation, `qwen3:4b` 90% -> 0%; `qwen3:8b`
+  unaffected). Summarisation thresholds and any injected memory (section 14)
+  therefore have a *behavioural* ceiling that is lower than the window and
+  differs per model.
 
 ---
 
@@ -1086,6 +1092,24 @@ in depth:
 The **runtime path is a pure, deterministic hash check** against the
 baseline — no model, no heuristics, no injection surface. All fuzzy,
 expensive vetting is one-time, behind the human-gated approval.
+
+**Volume is a second, independent cost -- the gate answers only half the
+question (measured 26-08-2026).** Everything above decides whether bytes may be
+*trusted*. None of it asks whether the brain can still *act* once that many
+bytes sit in front of it, and that is a real limit rather than a theoretical
+one. Topically inert filler -- no domain content, no tools, no imperatives --
+injected into the system prompt took `qwen3:4b` from 90% to 0% tool dispatch on
+a CLEAN history, at 67% context occupancy with every call returning
+`done_reason=stop`. Nothing truncated: this is **dilution, not overflow**, so a
+larger context window buys no immunity. The shipped `qwen3:8b` was unaffected
+(40/40), making it a small-model failure -- but `core/config.py` defaults to
+`qwen3:4b` when a config omits `model`, so the fragile tier is one missing line
+away. Consequence for this section: injected memory needs a **budget** as well
+as a gate, and that budget is a per-model number to be measured, not assumed.
+It also re-derives the "never auto-written" rule of Layer 2 from a second,
+non-security direction: an auto-writer grows the prompt without bound, and
+prompt growth alone is sufficient to suppress dispatch. Data and harness:
+`DESIGN-turn-outcome-guards.md`, section "Controlled experiment".
 
 **Ownership split.** The *gate* belongs in **LocalGuard** (the local-
 first, baseline-driven, fail-closed auditor): the injection scan ruleset,

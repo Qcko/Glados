@@ -218,3 +218,73 @@ mean, so it belongs to a design panel, not to a classifier tweak.
 
 **Caveats.** One session, one model, 20 turns; the 4-of-5 and 2-of-11 cells are
 small. This is a mechanism with supporting evidence, not a measured rate.
+
+## Controlled experiment -- 26-08-2026: prompt VOLUME suppresses dispatch too
+
+The section above is observational: one session, one model, no manipulation.
+This one manipulates the two candidate causes directly, and it changes how the
+observation should be read.
+
+**Harness.** `ballast_probe.py`, in the out-of-repo lab dir
+(`<lab-root>/glados/`), kept out of git deliberately: it is a measurement
+instrument, not shipped code. It drives the
+shipped `OllamaLLM` adapter, so payload assembly, tool-schema conversion and
+event parsing are production code paths rather than a re-implementation. Tool
+count is pinned at 33 -- what the observed session actually offered -- so it
+cannot drift as a hidden variable. Crossed design:
+
+- **Ballast**: neutral filler prepended to nothing and appended to the system
+  prompt, 0 / 2000 / 4000 / 8000 tokens. Topically inert by construction: no
+  cart, no tools, no imperatives. If it carried any of those it would smuggle
+  the content variable back into what is meant to be a volume test.
+- **Precedent**: the same utterance earlier in history, answered either WITH a
+  tool call (`clean`) or text-only (`poison_1`, `poison_3`).
+- **Model**: both shipped tiers.
+
+Probe utterance is the compound `"Show me what's in my cart and then remove the
+milk."`, measured as "did ANY tool dispatch". Ten repeats per cell.
+
+| model | clean / 0 | clean / 8000 | poison_3 / 0 | poison_3 / 8000 |
+| --- | --- | --- | --- | --- |
+| `qwen3:4b` | 9/10 | **0/10** | **0/10** | 1/10 |
+| `qwen3:8b` | 10/10 | 10/10 | 10/10 | 10/10 |
+
+**Two independent sufficient causes, on the small model.** Holding precedent
+clean, ballast alone takes dispatch from 90% to 0%. Holding ballast at zero,
+poisoned precedents alone take it from 90% to 0%. Neither needs the other.
+The volume half is the new finding -- inert bytes, carrying no behavioural
+precedent whatsoever, suppress tool-calling as completely as a poisoned one.
+
+**It is dilution, not overflow, and that distinction is the actionable part.**
+At 8000 ballast the prompt was 8179 tokens against `num_ctx = 12288` -- 67%
+occupancy -- and every call returned `done_reason=stop`. Nothing truncated.
+So there is no capacity cliff to stay below and no context size that buys
+immunity: a larger window would not have helped. Prompt volume has to be
+budgeted as a behavioural cost in its own right.
+
+**The shipped tier shows none of it: 40/40, every cell.** By the rule of three
+that bounds the true failure rate near 7.5% at 95% confidence rather than at
+zero, so this is a strong result and not a proof. Note `core/config.py`
+defaults to `qwen3:4b` when a config omits `model`, so the fragile tier is one
+missing line away from production.
+
+**This re-weights the production observation above.** Those 20 turns were
+`qwen3:4b`. Under controlled conditions the shipped model reproduces none of
+the behaviour. The `action_intent` gate remains model-independent and real --
+it would fail to classify an `8b` collapse exactly as it failed on `4b` -- but
+the behaviour it fails to catch is, on this evidence, largely a small-model
+problem.
+
+**A stored claim it refutes.** The 2026-06-15 write-up concluded "temp 0 => the
+collapse is a deterministic function of the message list, not randomness". It
+is not. `clean / 0` returned 9/10 here, and an earlier two-repeat cell split
+1/2 -- byte-identical requests at `temperature = 0.0` producing different
+outcomes. Any future cell of one or two runs should be treated as noise.
+
+**Methodological note, recorded because it nearly produced a false negative.**
+The first pass used two repeats and the probe utterance `"add milk to the
+cart"`. Both were wrong. Two repeats cannot resolve a rate against the variance
+above, and `add milk` is the one utterance in the observed session that never
+collapsed -- so the positive control could not fire, and the run reported no
+effect from anything. A grid whose positive control does not fire measures the
+harness, not the hypothesis.
