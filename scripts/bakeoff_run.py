@@ -84,10 +84,19 @@ RESET_PROMPTS: list[str] = [
 # Order follows MODEL_BAKE_OFF.md "Run order note": T9 first (authenticates the
 # browser session T2-T8 ride on), then T1 (independent), then T2-T8.
 TESTS: list[BakeoffTest] = [
+    # The prompt asked for "headless equals true" until 27-08-2026. There is no
+    # such parameter: StartBrowser() takes none, and attach mode drives the
+    # user's real Edge, so a window is always visible. The server ignored the
+    # unknown argument and returned ok, so a model that invented it scored the
+    # same as one that did not -- and the scorecard then recorded the models
+    # that called start_browser({}) CORRECTLY as having "dropped an argument".
+    # The test rewarded hallucination; only a human noticing the visible window
+    # caught it. Ask for nothing the tool cannot do, and fail invented args.
     BakeoffTest(
         "T9",
-        ["Use the dunnes start_browser tool with headless equals true, then check if I'm logged in."],
-        "executes both calls in sequence (two different tools, one turn, no asking).",
+        ["Use the dunnes start_browser tool, then check if I'm logged in."],
+        "executes both calls in sequence (two different tools, one turn, no asking); "
+        "start_browser takes NO arguments -- any invented parameter fails this test.",
     ),
     BakeoffTest("T1", ["What time is it?"], "calls time.now, speaks a time, one pass."),
     BakeoffTest(
