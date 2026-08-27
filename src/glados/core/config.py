@@ -74,8 +74,37 @@ class LLMConfig(BaseModel):
     # absent 404s at the first inference, not at boot.
     model: str = "ministral3:8b-instruct"
     host: str = "http://localhost:11434"
-    temperature: float = 0.2
+    # 0.0 (greedy) MATCHES what configs/glados.toml ships. It read 0.2 until
+    # 2026-08-27, i.e. a config omitting `temperature` sampled where the
+    # shipped system decodes greedily -- the same second-live-surface shape as
+    # the `model` default above, and as the num_predict=512 bug.
+    temperature: float = 0.0
     timeout: float = 60.0
+    # Repetition penalty, sent explicitly rather than inherited. Ollama applies
+    # 1.1 when the field is absent and llama.cpp applies 1.0, so an unset value
+    # is not a constant -- it belongs to whichever runtime happens to serve the
+    # request, and a runtime swap would move it silently.
+    #
+    # 1.1 is the INCUMBENT, not a demonstrated optimum: every score this
+    # project has recorded was taken under it by inheritance. Setting it
+    # explicitly is provably behaviour-neutral (measured 2026-08-27: an
+    # explicit 1.1 reproduces the recorded h2 dispatch row exactly).
+    #
+    # DO NOT "tidy" this to 1.0 on the strength of abstention accuracy alone.
+    # Measured on ministral3:8b-instruct, 2026-08-27: 1.0 removes an
+    # INTERMITTENT (~56%, n=16) spurious call to the non-mutating
+    # toy_stdio.echo, and introduces a DETERMINISTIC (12/12) wrong call to
+    # add_to_cart_by_name -- which is `mutating = true` -- on "add one more of
+    # the tomatoes", where 1.1 safely reads the cart first. The scorecard hides
+    # that trade because both count as one fixture.
+    #
+    # Model-dependent, like num_predict: re-derive it on a model swap. Only two
+    # values on one model have ever been measured.
+    # Bounded like its numeric siblings above: the penalty divides positive
+    # logits, so 0.0 is a division by zero and a negative value inverts it into
+    # a repetition REWARD -- a typo would ship a looping model with nothing
+    # failing at boot.
+    repeat_penalty: float = Field(default=1.1, gt=0)
     # How long Ollama keeps the model resident after a request. "-1" pins it
     # in VRAM indefinitely so it never evicts mid-session -- an evicted model
     # re-colds, and a cold model drifts language / skips tools on the next

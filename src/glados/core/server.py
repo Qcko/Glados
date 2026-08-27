@@ -275,6 +275,7 @@ def _build_llm(cfg: LLMConfig) -> LLM:
             text_tool_format=cfg.text_tool_format,
             num_ctx=cfg.num_ctx,
             num_predict=cfg.num_predict,
+            repeat_penalty=cfg.repeat_penalty,
             think=cfg.think,
         )
     return FakeLLM()
@@ -313,6 +314,7 @@ def _build_specialist_llm(
             text_tool_format=llm_cfg.text_tool_format,
             num_ctx=llm_cfg.num_ctx,
             num_predict=llm_cfg.num_predict,
+            repeat_penalty=llm_cfg.repeat_penalty,
             # `think` is deliberately NOT inherited: it is a per-model
             # capability, and this branch runs a DIFFERENT tag from the primary.
             # A model that relocates its reasoning into `content` instead of

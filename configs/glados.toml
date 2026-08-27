@@ -46,6 +46,30 @@ host = "http://localhost:11434"
 # which is the failure num_predict bounds, and that bound is now 8x looser.
 # Revisit if a repetition loop ever shows up in ~/.glados/logs/glados.log.
 temperature = 0.0
+# Repetition penalty. SENT EXPLICITLY rather than inherited, because an unset
+# value is not a constant: Ollama fills in 1.1 and llama.cpp fills in 1.0, so
+# omitting it hands the choice to whichever runtime serves the request and lets
+# a runtime swap move it silently. Until 2026-08-27 this was never sent at all.
+#
+# 1.1 is the INCUMBENT, not a proven optimum -- every score in this file was
+# recorded under it by inheritance. Setting it explicitly is behaviour-neutral:
+# measured 2026-08-27, an explicit 1.1 reproduces the recorded h2 dispatch row
+# exactly (15 correct / 3 wrong_tool / 0 miss / 10 abstain / 2 false_fire).
+#
+# DO NOT LOWER THIS TO 1.0 on the strength of abstention accuracy alone. It
+# looks like a clean win and is not. Measured on ministral3:8b-instruct:
+#   1.0 REMOVES an intermittent (~56%, n=16) spurious call to toy_stdio.echo
+#       on abstain turns -- echo has no overlay, so it is NON-mutating: noise.
+#   1.0 INTRODUCES a deterministic (12/12) call to add_to_cart_by_name on
+#       "add one more of the tomatoes" -- `mutating = true` in servers.toml --
+#       i.e. a duplicate cart line instead of a quantity bump. At 1.1 the model
+#       calls view_cart, a READ, which the fixture accepts.
+# So 1.0 trades an intermittent harmless call for a deterministic wrong WRITE.
+# The scorecard hides the trade: both count as one fixture.
+#
+# MODEL-DEPENDENT, like num_predict -- re-derive on a model swap. Only two
+# values, on one model, have ever been measured.
+repeat_penalty = 1.1
 timeout = 60.0
 # Keep the model resident in VRAM so it never evicts mid-session. A re-cold
 # model drifts language (replies in Thai) and skips tools on its next free-form

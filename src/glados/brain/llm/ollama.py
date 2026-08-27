@@ -44,7 +44,7 @@ class OllamaLLM:
         *,
         host: str = "http://localhost:11434",
         model: str = "ministral3:8b-instruct",
-        temperature: float = 0.2,
+        temperature: float = 0.0,
         timeout: float = 60.0,
         keep_alive: str = "-1",
         # None means "the caller did not say" -- the key is omitted and Ollama
@@ -53,6 +53,11 @@ class OllamaLLM:
         # duplicating numbers that would then drift out of step with it.
         num_ctx: int | None = None,
         num_predict: int | None = None,
+        # Same None-means-omit contract, and the one option here whose absence
+        # is NOT neutral: Ollama fills in 1.1 and llama.cpp fills in 1.0, so an
+        # omitted value belongs to the runtime rather than to us. Production
+        # passes it from LLMConfig, which is where the measured rationale lives.
+        repeat_penalty: float | None = None,
         think: bool | None = None,
         # Wire format for tool calls the server hands back as TEXT (currently
         # only "mistral_v13"). STRICTLY PER-MODEL, like `think` above: None
@@ -72,6 +77,7 @@ class OllamaLLM:
         self._timeout = timeout
         self._num_ctx = num_ctx
         self._num_predict = num_predict
+        self._repeat_penalty = repeat_penalty
         self._think = think
         self._text_tool_format = text_tool_format
         # Context pressure is a standing condition, not an event: on a workload
@@ -263,6 +269,8 @@ class OllamaLLM:
             options["num_ctx"] = self._num_ctx
         if self._num_predict is not None:
             options["num_predict"] = self._num_predict
+        if self._repeat_penalty is not None:
+            options["repeat_penalty"] = self._repeat_penalty
         return options
 
     def _log_usage(self, chunk: dict, *, produced_speakable: bool) -> None:

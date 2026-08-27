@@ -271,6 +271,7 @@ async def test_sends_num_ctx_and_num_predict() -> None:
         num_ctx=8192,
         num_predict=512,
         temperature=0.0,
+        repeat_penalty=1.1,
         transport=_mock_transport(body, captured=captured),
     )
     await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
@@ -279,6 +280,10 @@ async def test_sends_num_ctx_and_num_predict() -> None:
     assert options["num_ctx"] == 8192
     assert options["num_predict"] == 512
     assert options["temperature"] == 0.0
+    # Never sent at all until 2026-08-27, so Ollama's own 1.1 applied while
+    # llama.cpp would have applied 1.0 -- an unset value belonged to the
+    # runtime rather than to us.
+    assert options["repeat_penalty"] == 1.1
 
 
 @pytest.mark.asyncio
@@ -298,6 +303,7 @@ async def test_none_context_options_are_omitted_not_nulled() -> None:
     options = captured[0]["options"]
     assert "num_ctx" not in options
     assert "num_predict" not in options
+    assert "repeat_penalty" not in options
     assert "temperature" in options
 
 
