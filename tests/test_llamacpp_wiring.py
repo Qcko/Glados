@@ -86,3 +86,23 @@ def test_env_rejects_garbage_instead_of_falling_back(monkeypatch) -> None:
     monkeypatch.setenv("GLADOS_LLM_BACKEND", "olama")
     with pytest.raises(ValueError, match="not selectable by environment"):
         config_mod._apply_env_overrides(config_mod.GladosConfig())
+
+
+def test_empty_string_is_the_toml_spelling_of_unset() -> None:
+    """TOML has no null and this field's default is not None, so without the
+    coercion a llamacpp config could not be written at all: omitting the key
+    yields "mistral_v13" (refused) and there is no other way to say "off"."""
+    cfg = LLMConfig(
+        backend="llamacpp", model="ministral3:8b-instruct", text_tool_format=""
+    )
+    assert cfg.text_tool_format is None
+
+
+def test_empty_string_does_not_weaken_the_ollama_arm() -> None:
+    """The coercion must not become a way to silently disable the parser on a
+    model that needs it -- that would dispatch nothing and speak the raw
+    marker."""
+    with pytest.raises(ValueError, match="returns tool calls as TEXT"):
+        LLMConfig(
+            backend="ollama", model="ministral3:8b-instruct", text_tool_format=""
+        )

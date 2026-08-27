@@ -33,6 +33,15 @@ def test_healthz(client: TestClient) -> None:
     assert r.json()["ok"] is True
 
 
+def test_healthz_reports_the_runtime(client: TestClient) -> None:
+    """The bake-off report header reads this. `--slot` only LABELS a run, so
+    without it a scorecard taken against a stale server on the previous backend
+    is indistinguishable from a real result."""
+    llm = client.get("/healthz").json()["llm"]
+    assert llm["backend"] in ("fake", "ollama", "llamacpp")
+    assert llm["model"]
+
+
 def test_handshake_and_echo(client: TestClient) -> None:
     with client.websocket_connect("/ws/v1") as ws:
         ws.send_json(

@@ -10,7 +10,7 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .protocols import Role
 
@@ -186,6 +186,15 @@ class LLMConfig(BaseModel):
     # that same turn, and the Organizer confirms any MUTATING call recovered
     # this way even where the tool is normally un-gated (ARCH section 7).
     text_tool_format: str | None = Field(default="mistral_v13")
+
+    @field_validator("text_tool_format", mode="before")
+    @classmethod
+    def _empty_means_off(cls, v):
+        """TOML cannot express `None`, and this field's default is not None --
+        so without this coercion a backend that must have the text parser OFF
+        has no way to say so, and the config becomes unwritable. `""` is the
+        TOML spelling of "unset"."""
+        return None if v == "" else v
     # Sent as /api/chat `think`. `None` omits the key and leaves the model's own
     # default alone; `False` asks a reasoning model not to reason.
     #

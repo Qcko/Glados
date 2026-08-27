@@ -49,6 +49,7 @@ import json
 import sys
 from dataclasses import dataclass, field
 
+import httpx
 import websockets
 
 from _ws import ssl_context
@@ -159,6 +160,11 @@ class TurnReport:
     deltas: list[str] = field(default_factory=list)
     tool_calls: list[str] = field(default_factory=list)
     tool_results: list[str] = field(default_factory=list)
+    # (tool name, decoded payload) for each successful call, kept as STRUCTURE
+    # rather than as a JSON string. A string forces substring heuristics, and
+    # those break on a payload that nests JSON inside a string field -- the
+    # escaped quotes stop matching and a successful reset reads as a failed one.
+    tool_payloads: list[tuple[str, object]] = field(default_factory=list)
     route: str | None = None
     outcome: str | None = None
     ended: str = "done"
@@ -172,6 +178,7 @@ async def _run_turn(ws, prompt: str) -> TurnReport:
     """Send one user_text and collect every server frame until the turn ends.
     Auto-grants tool confirmations so gated tools proceed unattended."""
     rep = TurnReport(prompt=prompt)
+    names_by_call_id: dict[str, str] = {}
     await ws.send(json.dumps({"type": "user_text", "text": prompt}))
     while True:
         try:
@@ -189,10 +196,22 @@ async def _run_turn(ws, prompt: str) -> TurnReport:
         elif kind == "tool_call":
             args = json.dumps(msg.get("args", {}), ensure_ascii=False)
             rep.tool_calls.append(f"{msg['server']}.{msg['name']}({args})")
+            names_by_call_id[msg["call_id"]] = msg["name"]
         elif kind == "tool_result":
             rep.tool_results.append(
                 "ok" if msg["ok"] else f"ERROR: {msg.get('error')}"
             )
+            # Kept separately from the ok/ERROR line above, which is what the
+            # human-readable report prints. The reset verification needs the
+            # payload AND which tool produced it -- without the name it cannot
+            # tell a view_cart result from, say, an add_to_cart echo that also
+            # happens to carry exactly one productId, and would then verify the
+            # reset against the wrong payload. That is the one silently-wrong
+            # outcome available here; every other failure aborts loudly.
+            if msg.get("ok"):
+                rep.tool_payloads.append(
+                    (names_by_call_id.get(msg["call_id"], ""), msg.get("content"))
+                )
         elif kind == "route_notice":
             tag = "escalated->cloud" if msg["escalated"] else msg["target"]
             rep.route = f"{tag} ({msg['reason']})"
@@ -209,15 +228,95 @@ async def _run_turn(ws, prompt: str) -> TurnReport:
             return rep
 
 
+def _resolve_runtime(ws_url: str) -> tuple[str, str]:
+    """Ask the running server what actually served this run. Loopback-only, so
+    it works exactly where the bake-off does."""
+    health = ws_url.replace("wss://", "https://").replace("ws://", "http://")
+    health = health.split("/ws/")[0] + "/healthz"
+    try:
+        with httpx.Client(verify=False, timeout=5.0) as client:
+            llm = client.get(health).json().get("llm") or {}
+        return llm.get("backend", "unknown"), llm.get("model", "unknown")
+    except Exception:
+        return "unknown", "unknown"
+
+
+_VERIFY_PROMPT = "Call view_cart and list what is in the cart."
+
+
 async def _reset_cart(ws) -> None:
-    """Drive the cart back to a known single-milk state via RESET_PROMPTS.
-    LLM-mediated (same user_text path as the suite); logged under a distinct
-    banner so a reset run is visibly distinguishable from one that isn't."""
+    """Drive the cart back to a known single-milk state via RESET_PROMPTS, then
+    VERIFY it landed there.
+
+    The reset is mediated by the model under test, so a weaker arm reaches a
+    different starting cart -- and the stateful block (T6/T8/T10/T11/T12, five
+    of the twelve) is then scored from divergent state. For a comparison whose
+    entire point is comparability, an unverified reset is worse than none: it
+    looks like a control and is not one.
+    """
     print("=== CART RESET (--reset) -- empty + seed single milk ===")
     for prompt in RESET_PROMPTS:
         rep = await _run_turn(ws, prompt)
         _print_turn(rep)
-    print("=== CART RESET done ===")
+    rep = await _run_turn(ws, _VERIFY_PROMPT)
+    _print_turn(rep)
+    lines = _count_cart_lines(rep)
+    if lines is None:
+        raise SystemExit(
+            "CART RESET INCONCLUSIVE: the model never called view_cart when "
+            "asked to, so the starting cart is unknown. Note this is the model "
+            "UNDER TEST being used to verify its own control -- an arm too weak "
+            "to run the tool on request cannot be reset this way. Set the cart "
+            "to a single milk by hand and re-run WITHOUT --reset, and say so on "
+            "the scorecard."
+        )
+    if lines != 1:
+        empty = " (the cart is empty -- the reseed step did not land)" if lines == 0 else ""
+        raise SystemExit(
+            f"CART RESET FAILED: view_cart shows {lines} line(s), expected "
+            f"exactly 1 (a single milk){empty}. The stateful tests would be "
+            "scored from an unknown starting cart, so this run would not be "
+            "comparable to any other. Fix the cart and re-run."
+        )
+    print("=== CART RESET verified -- exactly one line ===")
+
+
+def _count_cart_lines(rep: TurnReport) -> int | None:
+    """Count cart lines in the turn's last `view_cart` payload.
+
+    Walks the decoded structure counting `productId` keys rather than matching
+    substrings in serialised JSON: a payload that nests JSON inside a string
+    field escapes its quotes, and a substring count then reports zero for a
+    cart that is actually fine -- aborting a reset that worked.
+
+    Returns None when no `view_cart` payload was produced at all, which is a
+    different problem from a wrong count and gets different advice.
+    """
+    for name, payload in reversed(rep.tool_payloads):
+        if name == "view_cart":
+            return _count_keys(payload, "productid")
+    return None
+
+
+def _count_keys(node: object, wanted: str) -> int:
+    """Recursive key count, case-insensitive. Nested because the cart may be
+    wrapped (`{"cart": {"lines": [...]}}`) and the wrapper is not ours."""
+    if isinstance(node, dict):
+        return sum(
+            (1 if str(k).lower() == wanted else 0) + _count_keys(v, wanted)
+            for k, v in node.items()
+        )
+    if isinstance(node, list):
+        return sum(_count_keys(item, wanted) for item in node)
+    if isinstance(node, str):
+        # A payload that carries its cart as a JSON STRING rather than as
+        # structure. Walking into it is the difference between a correct count
+        # and a confident zero, which would abort a reset that had worked.
+        try:
+            return _count_keys(json.loads(node), wanted)
+        except (ValueError, TypeError):
+            return 0
+    return 0
 
 
 def _print_turn(rep: TurnReport) -> None:
@@ -247,8 +346,17 @@ async def run(args: argparse.Namespace) -> None:
     print(f"=== GLaDOS bake-off -- slot {args.slot} ===")
     print(f"server: {args.url}   client: {args.client_id}/{args.room}")
     print(f"cart reset: {'ON (--reset) -- single-milk reseed before stateful block' if args.reset else 'OFF -- stateful tests share an unreset cart'}")
-    print("Model under test is the server's configured [llm] model -- confirm it "
-          "matches the slot.\n")
+    backend, model = _resolve_runtime(args.url)
+    print(f"runtime: backend={backend} model={model}   (read from /healthz)")
+    if backend == "unknown":
+        print(
+            "WARNING: could not read /healthz, so this report cannot say which "
+            "runtime served it. --slot only LABELS a run; a scorecard taken "
+            "against a stale server is otherwise indistinguishable from a real "
+            "result.\n"
+        )
+    else:
+        print()
 
     # Dunnes search_results frames run >1 MB (30 full product records), past
     # the websockets client default max_size. The browser client has no such

@@ -899,6 +899,14 @@ def _register_routes(app: FastAPI) -> None:
             "ok": True,
             "rooms": len({c.room_id for c in s.rooms_cfg.clients}),
             "tools": [spec.qualified for spec in s.mcp.specs()],
+            # What actually served this process, for a bake-off report header.
+            # `--slot` only LABELS a run, so without this a scorecard taken
+            # against a stale server on the old backend is indistinguishable
+            # from a real result.
+            "llm": {
+                "backend": s.glados_cfg.llm.backend,
+                "model": s.glados_cfg.llm.model,
+            },
         }
 
     @app.get("/admin/memory")
