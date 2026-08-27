@@ -63,12 +63,16 @@ class AuthConfig(BaseModel):
 
 class LLMConfig(BaseModel):
     backend: Literal["fake", "ollama"] = "fake"
-    # The fallback a config lands on when it omits `model` -- deliberately the
-    # SMALLEST capable model (4.18 GB), not the shipped one, so an accidental
-    # default is cheap to load rather than a 6.6 GB surprise. Shipped model is
-    # chosen in configs/glados.toml; keep this in sync with what is on disk --
-    # a default naming an unpulled tag 404s at the first inference, not at boot.
-    model: str = "qwen3:4b"
+    # The fallback a config lands on when it omits `model`. It MATCHES the
+    # shipped model on purpose, reversing the old "smallest capable model"
+    # rule: a default that differs from what ships is a second live surface
+    # nobody exercises, and that is precisely how the num_predict=512 bug
+    # survived -- harmless on the tier under test, silent on the other.
+    #
+    # Not an Ollama library tag: build it from
+    # configs/ministral3-8b-instruct.Modelfile. A default naming a tag that is
+    # absent 404s at the first inference, not at boot.
+    model: str = "ministral3:8b-instruct"
     host: str = "http://localhost:11434"
     temperature: float = 0.2
     timeout: float = 60.0
@@ -128,8 +132,12 @@ class LLMConfig(BaseModel):
     # blanked assistant is not.
     num_predict: int | None = Field(default=4096, ge=1)
     # Wire format for tool calls the server returns as TEXT instead of as
-    # structure. Only "mistral_v13" (Ministral 3) is understood; None -- the
-    # default -- means the spoken channel is NEVER treated as a dispatch.
+    # structure. Only "mistral_v13" (Ministral 3) is understood; None means the
+    # spoken channel is NEVER treated as a dispatch.
+    #
+    # Defaults ON only because the default `model` above NEEDS it -- the two
+    # move together or a bare config speaks every tool call instead of running
+    # it. Point `model` at something Ollama parses natively and clear this.
     #
     # STRICTLY PER-MODEL, and a TRUST decision, not a compatibility one: text
     # is the channel <external> content reaches, so enabling this on a model
@@ -137,7 +145,7 @@ class LLMConfig(BaseModel):
     # only accepts a marker that STARTS the reply and names a tool offered on
     # that same turn, and the Organizer confirms any MUTATING call recovered
     # this way even where the tool is normally un-gated (ARCH section 7).
-    text_tool_format: str | None = Field(default=None)
+    text_tool_format: str | None = Field(default="mistral_v13")
     # Sent as /api/chat `think`. `None` omits the key and leaves the model's own
     # default alone; `False` asks a reasoning model not to reason.
     #
@@ -163,6 +171,32 @@ class LLMConfig(BaseModel):
     # Hash-approved server memory (ARCH section 14) is still appended on top of
     # whichever base wins.
     system_prompt: str = ""
+
+    _TEXT_TOOL_MODELS = ("ministral",)
+
+    @model_validator(mode="after")
+    def _text_tool_format_matches_model(self) -> "LLMConfig":
+        """A model whose calls arrive as text needs the parser turned on.
+
+        The mismatch is invisible until it happens: the model dispatches
+        nothing and GLaDOS reads the raw `[TOOL_CALLS]...` marker aloud, which
+        looks like a hopeless model rather than a config that is one line
+        short. Cheaper to refuse the config than to debug the symptom.
+        """
+        wants = any(m in self.model.lower() for m in self._TEXT_TOOL_MODELS)
+        if wants and self.text_tool_format is None:
+            raise ValueError(
+                f"[llm] model = {self.model!r} returns tool calls as TEXT, so "
+                'it needs text_tool_format = "mistral_v13". Without it every '
+                "tool call is spoken instead of run."
+            )
+        if not wants and self.text_tool_format is not None:
+            raise ValueError(
+                f"[llm] model = {self.model!r} has its tool calls parsed by "
+                "Ollama, so text_tool_format must be unset -- leaving it on "
+                "lets the spoken channel dispatch tools for no benefit."
+            )
+        return self
 
 
 class RouterConfig(BaseModel):

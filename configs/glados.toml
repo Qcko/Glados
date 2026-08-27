@@ -13,7 +13,10 @@ clients = ["desk-ui", "desk2-ui", "livingroom-mic", "livingroom-speaker"]
 [llm]
 # backend: "fake" (deterministic, used in tests) or "ollama"
 backend = "ollama"
-# Swap by un/commenting. Restart GLaDOS to pick up the change.
+# Swap by un/commenting. Restart GLaDOS to pick up the change. Swapping to a
+# model Ollama parses natively (any qwen3 line below) means commenting out
+# `text_tool_format` in the same edit -- the config refuses the mismatched pair
+# rather than let it boot, because the symptom is tool calls read ALOUD.
 # REASONING MODELS: qwen3 emits <think> tokens that count against num_predict.
 # Never ship one without checking the num_predict note further down -- at 512 a
 # qwen3 goes silent rather than slow, which does not look like a config fault.

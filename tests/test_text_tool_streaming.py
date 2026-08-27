@@ -136,7 +136,10 @@ async def test_format_off_leaves_the_marker_as_plain_text():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"\n".join(_chunks(f"[TOOL_CALLS]{WIRE}[ARGS]{{}}")))
 
-    llm = OllamaLLM(model="qwen3:8b", transport=httpx.MockTransport(handler))
+    llm = OllamaLLM(
+        model="qwen3:8b", text_tool_format=None,
+        transport=httpx.MockTransport(handler),
+    )
     events = await _run(llm)
     assert _calls(events) == []
     assert "[TOOL_CALLS]" in _spoken(events)

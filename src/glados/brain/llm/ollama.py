@@ -43,7 +43,7 @@ class OllamaLLM:
         self,
         *,
         host: str = "http://localhost:11434",
-        model: str = "qwen3:4b",
+        model: str = "ministral3:8b-instruct",
         temperature: float = 0.2,
         timeout: float = 60.0,
         keep_alive: str = "-1",
@@ -58,7 +58,12 @@ class OllamaLLM:
         # only "mistral_v13"). STRICTLY PER-MODEL, like `think` above: None
         # means the text channel is never treated as a dispatch, which is the
         # right answer for every model whose calls Ollama already parses.
-        text_tool_format: str | None = None,
+        #
+        # Defaulted to match the default `model` above, since that one needs
+        # it -- an incoherent pair here dispatches nothing and SPEAKS the raw
+        # marker. Production passes both explicitly from LLMConfig, which
+        # refuses a mismatched pair outright.
+        text_tool_format: str | None = "mistral_v13",
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._host = host.rstrip("/")

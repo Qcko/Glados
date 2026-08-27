@@ -136,3 +136,34 @@ def test_streaming_holds_text_that_may_still_become_a_call(partial):
 
 def test_streaming_releases_ordinary_speech_immediately():
     assert not could_start_call("The capital of France")
+
+
+class TestConfigPairing:
+    """`model` and `text_tool_format` have to agree, or the mismatch shows up
+    as tool calls read ALOUD rather than as anything a log would call an
+    error. The config refuses both directions rather than boot into that."""
+
+    def test_defaults_are_a_working_pair(self):
+        from glados.core.config import LLMConfig
+
+        cfg = LLMConfig()
+        assert "ministral" in cfg.model
+        assert cfg.text_tool_format == "mistral_v13"
+
+    def test_text_format_model_without_the_parser_is_refused(self):
+        from glados.core.config import LLMConfig
+
+        with pytest.raises(ValueError, match="spoken instead of run"):
+            LLMConfig(model="ministral3:8b-instruct", text_tool_format=None)
+
+    def test_natively_parsed_model_with_the_parser_on_is_refused(self):
+        from glados.core.config import LLMConfig
+
+        with pytest.raises(ValueError, match="must be unset"):
+            LLMConfig(model="qwen3:8b", text_tool_format="mistral_v13")
+
+    def test_natively_parsed_model_opting_out_is_accepted(self):
+        from glados.core.config import LLMConfig
+
+        cfg = LLMConfig(model="qwen3:8b", text_tool_format=None)
+        assert cfg.text_tool_format is None

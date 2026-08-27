@@ -16,7 +16,7 @@ from glados.core.adapters import LLMMessage, LLMText, LLMToolCall, ToolSpec
 
 
 HOST = os.environ.get("GLADOS_OLLAMA_HOST", "http://localhost:11434")
-MODEL = os.environ.get("GLADOS_OLLAMA_MODEL", "qwen3:4b")
+MODEL = os.environ.get("GLADOS_OLLAMA_MODEL", "ministral3:8b-instruct")
 
 
 def _ollama_has_model() -> bool:
