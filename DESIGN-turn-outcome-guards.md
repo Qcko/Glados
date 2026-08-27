@@ -246,14 +246,34 @@ milk."`, measured as "did ANY tool dispatch". Ten repeats per cell.
 
 | model | clean / 0 | clean / 8000 | poison_3 / 0 | poison_3 / 8000 |
 | --- | --- | --- | --- | --- |
-| `qwen3:4b` | 9/10 | **0/10** | **0/10** | 1/10 |
+| `qwen3:4b` | 9/10 | **0/10** | 0/10 (unreplicated) | 1/10 |
 | `qwen3:8b` | 10/10 | 10/10 | 10/10 | 10/10 |
 
-**Two independent sufficient causes, on the small model.** Holding precedent
-clean, ballast alone takes dispatch from 90% to 0%. Holding ballast at zero,
-poisoned precedents alone take it from 90% to 0%. Neither needs the other.
-The volume half is the new finding -- inert bytes, carrying no behavioural
-precedent whatsoever, suppress tool-calling as completely as a poisoned one.
+**Ballast alone suppresses dispatch. The poison half DID NOT REPLICATE.**
+Holding precedent clean, ballast alone takes dispatch from 90% to 0%, and that
+reproduced exactly on 27-08-2026. This section originally read "two
+independent sufficient causes" and claimed poisoned precedent at zero ballast
+was the second one. Re-measurement does not support it:
+
+| `qwen3:4b`, `poison_3` / 0 ballast | dispatch rate |
+| --- | --- |
+| 26-08-2026, 10 repeats | 0/10 |
+| 27-08-2026, 10 repeats | 9/10 |
+| 27-08-2026, 20 repeats, unmodified adapter, no wrapper | **19/20** |
+
+Two independent re-runs put that cell near 95%, one of them driving
+`OllamaLLM` directly with no wrapper of any kind, which excludes a harness
+artefact. The likeliest reading is the trap this document warns about
+elsewhere: ten repeats cannot resolve a rate sitting near a cliff, and a lone
+0/10 is what a badly-landing low-probability cell looks like. In the same
+27-08-2026 sweep `qwen3:8b` reproduced its 40/40 exactly, so the instrument
+was behaving.
+
+So a poisoned precedent is NOT established as a sufficient cause on its own.
+The volume half is unaffected, and it is the finding that matters -- inert
+bytes, carrying no behavioural precedent whatsoever, suppress tool-calling by
+themselves. Anything downstream that rests on "either cause alone is enough"
+should rest on the ballast result only.
 
 **It is dilution, not overflow, and that distinction is the actionable part.**
 At 8000 ballast the prompt was 8179 tokens against `num_ctx = 12288` -- 67%

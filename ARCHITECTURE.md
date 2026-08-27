@@ -1101,11 +1101,14 @@ one. Topically inert filler -- no domain content, no tools, no imperatives --
 injected into the system prompt took `qwen3:4b` from 90% to 0% tool dispatch on
 a CLEAN history, at 67% context occupancy with every call returning
 `done_reason=stop`. Nothing truncated: this is **dilution, not overflow**, so a
-larger context window buys no immunity. The shipped `qwen3:8b` was unaffected
-(40/40), making it a small-model failure -- but `core/config.py` defaults to
-`qwen3:4b` when a config omits `model`, so the fragile tier is one missing line
-away. Consequence for this section: injected memory needs a **budget** as well
-as a gate, and that budget is a per-model number to be measured, not assumed.
+larger context window buys no immunity. The then-shipped `qwen3:8b` was
+unaffected (40/40), making it a small-model failure. It was reachable by
+accident too: `core/config.py` defaulted to `qwen3:4b`, so a config omitting
+`model` ran the fragile tier. Closed 27-08-2026 -- the default now matches the
+shipped model (`ministral3:8b-instruct`, itself 40/40), precisely so there is
+no second, unexercised tier one missing line away. Consequence for this
+section: injected memory needs a **budget** as well as a gate, and that budget
+is a per-model number to be measured, not assumed.
 It also re-derives the "never auto-written" rule of Layer 2 from a second,
 non-security direction: an auto-writer grows the prompt without bound, and
 prompt growth alone is sufficient to suppress dispatch. Data and harness:
