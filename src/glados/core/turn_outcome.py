@@ -76,6 +76,18 @@ class TurnRecord:
     # (set by the organizer via core/utterance.is_action_request). Drives the
     # goal-check: such a turn is only `done` if a mutating call actually landed.
     action_intent: bool = False
+    # True once this turn has ingested `<external>` bytes, seeded from whether
+    # the session's retained history already holds some. Drives the
+    # confirmation gate in `Organizer._run_tool_calls`, which is where the
+    # reasoning lives.
+    #
+    # Seeded per turn rather than recomputed, so note what the retry paths
+    # depend on: scope fallback, specialist escalation and `_finish_the_job`
+    # each mint a fresh record and replay the PRIOR history, so a retry
+    # correctly inherits the session flag without the failed attempt's bytes.
+    # A retry changed to replay the failed attempt's messages would need this
+    # flag carried across with them.
+    untrusted_seen: bool = False
 
     def record_tool(
         self,

@@ -359,6 +359,14 @@ class Organizer:
         # `_MAX_TRACKED_SESSIONS` so dead sessions can't grow it without limit.
         self._history: dict[str, list[LLMMessage]] = {}
         self._history_max_turns = history_max_turns
+        # Sessions whose retained history contains `<external>` bytes. The
+        # untrusted-content confirmation gate has to outlive the turn that read
+        # them: the payload stays in `_history` and stays echoable, so an
+        # attacker who cannot win in the reading turn just waits for the next
+        # one ("yeah, do it") where a turn-scoped flag would be back to False.
+        # Sticky until the history itself is cleared -- deriving it from
+        # `_cap_history` aging would reopen the hole on a quiet gap.
+        self._untrusted_sessions: set[str] = set()
         # Rotates the honest-failure line spoken on a `confabulated` turn so a
         # cascade of fabricated turns doesn't repeat one phrase verbatim.
         self._confab_reply_idx = 0
@@ -967,7 +975,10 @@ class Organizer:
             LLMMessage(role="user", content=text),
         ]
         final_text = ""
-        outcome = TurnRecord(action_intent=is_action_request(text))
+        outcome = TurnRecord(
+            action_intent=is_action_request(text),
+            untrusted_seen=session_id in self._untrusted_sessions,
+        )
         await self._maybe_force_time(
             session_id, room_id, envelope, text, messages, trace, outcome
         )
@@ -1153,8 +1164,14 @@ class Organizer:
         # an active one that keeps getting follow-ups.
         self._history.pop(session_id, None)
         if len(self._history) >= _MAX_TRACKED_SESSIONS:
-            del self._history[next(iter(self._history))]
+            evicted = next(iter(self._history))
+            del self._history[evicted]
+            self._untrusted_sessions.discard(evicted)
         self._history[session_id] = self._cap_history(new_history)
+        # Committed alongside the history it describes: the flag is a property
+        # of the retained bytes, so it lives and dies with them.
+        if outcome.untrusted_seen:
+            self._untrusted_sessions.add(session_id)
 
     def _cap_history(self, messages: list[LLMMessage]) -> list[LLMMessage]:
         """Keep only the last `_history_max_turns` turns. A turn starts at a
@@ -1481,6 +1498,7 @@ class Organizer:
         )
         if kind == "start_over":
             self._history.pop(sid, None)
+            self._untrusted_sessions.discard(sid)
             self._last_turn.pop(sid, None)
             trace.event("history_cleared", reason="user start-over")
             reply = "Done -- I've cleared our conversation. Starting fresh."
@@ -1610,8 +1628,17 @@ class Organizer:
             # A text-parsed call has no provenance -- the same channel
             # carries <external> content -- so a mutating one is confirmed
             # even when the structured path would let it through un-gated.
+            #
+            # `untrusted_seen` covers the same attack where from_text cannot:
+            # a backend that returns STRUCTURED tool calls sets from_text=False
+            # for every call, so the arm above never fires and an echoed
+            # `[TOOL_CALLS]` from a seller-authored field reaches a cart write
+            # un-gated. Gating on "this turn ingested untrusted bytes AND the
+            # call mutates" is provenance the runtime cannot erase.
             needs_confirm = spec is not None and (
-                spec.requires_confirmation or (tc.from_text and spec.mutating)
+                spec.requires_confirmation
+                or (tc.from_text and spec.mutating)
+                or (outcome.untrusted_seen and spec.mutating)
             )
             if needs_confirm:
                 granted = await self._await_confirmation(
@@ -1679,6 +1706,9 @@ class Organizer:
                 # tag boundary.
                 safe = raw.replace("</external>", "<\\/external>")
                 wrapped = f"<external>{safe}</external>"
+                # Set at the wrap site, so the signal is ours rather than the
+                # payload's. Every later mutating call this turn is confirmed.
+                outcome.untrusted_seen = True
             else:
                 wrapped = raw
             messages.append(
