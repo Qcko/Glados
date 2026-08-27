@@ -1,7 +1,13 @@
 # DESIGN -- the llama.cpp runtime question, and why it is DEFERRED
 
-Status: **recommendation, awaiting sign-off.** Two decisions inside are marked
-SIGN-OFF and are not mine to make. No migration code exists.
+Status: **both SIGN-OFF items decided 27-08-2026; the DEFER itself is now
+conditional on one outstanding measurement.** No migration code exists.
+
+The deferral stands on latency and dispatch, both measured and both neutral.
+It does NOT stand on prose quality, which has never been measured on
+llama.cpp and is the one dimension where the runtimes are not known to be
+equivalent -- see "The measurement that would reopen this" below. Treat DEFER
+as provisional until that suite runs.
 
 ## The question
 
@@ -34,7 +40,7 @@ qualitative one, while leaving its real prize intact but smaller than it looked.
 | --- | --- |
 | Better tool-calling | Equivalent. Dispatch scores match once samplers are pinned (below). |
 | Faster / better on the R9700 | Latency-neutral today. All three runtimes within ~10%. |
-| Removes a US layer (provenance) | Theatre, and net-NEGATIVE on supply chain. |
+| Removes a US layer (provenance) | Never the case for the swap; a tiebreaker with no tie. See SIGN-OFF 2. |
 | No bespoke parser in the trust path | FALSE. The parser moves into llama.cpp, looser and unobservable. |
 
 Against that, what it genuinely buys is real: deleting ~575 lines of
@@ -46,6 +52,11 @@ The judgement is that the prize is worth having and the moment is wrong. The
 security work required to migrate SAFELY (below) is comparable in size to what
 the migration deletes, and it buys no measured improvement in latency or
 dispatch quality. Doing it now spends that budget for a net-zero result.
+
+**Reopens sooner than the revisit trigger if the 22-point prose suite moves on
+llama.cpp** -- see "The measurement that would reopen this". Until that runs,
+"no measured improvement" means "no improvement measured in the two dimensions
+anyone measured".
 
 **Revisit trigger, concrete:** the R9700 32 GB arriving AND Mistral Small 24B
 being qualified on it. That is where llama.cpp's advantages stop being
@@ -246,7 +257,40 @@ marked.
   port), so reading the blob silently drops the template the Modelfile exists
   to supply.
 
-## SIGN-OFF 1 -- one backend or two
+## The measurement that would reopen this
+
+The migration's stated purpose is **making Ministral run better**. Two of the
+three dimensions that could mean were measured and came back neutral: latency
+(~10% across all three runtimes) and dispatch (identical once `repeat_penalty`
+is pinned). The third was not measured at all.
+
+**Ministral runs on a hand-ported template today.** `configs/ministral3-8b-instruct.Modelfile`
+is a 497-byte port, written because mistralai's own GGUF ships a 142-byte
+single-turn template with no `.Tools` and no `range .Messages`. Under
+`llama-server --jinja` the same blob runs mistralai's CANONICAL
+`chat_template.jinja`. That is a template-fidelity difference on the shipped
+model, and the only instrument that would detect it is the 22-point
+human-judged quality scorecard -- which has never been run on llama.cpp.
+Dispatch equivalence is not evidence about prose, and `repeat_penalty` is
+exactly the kind of sampler whose effect shows up in prose and not in a
+gold-label dispatch harness.
+
+So the honest position is not "llama.cpp buys nothing." It is: **it buys
+nothing that has been measured, and the one unmeasured thing is the thing the
+swap was for.** Running the suite is what makes DEFER a finding instead of a
+judgement call.
+
+Per the both-tiers rule in `CLAUDE.md`, the suite runs on both shipped-tier
+models, not just the shipped one. The lab harness
+(`<lab-root>/glados/ministral/llamacpp_llm.py`) exists and scored dispatch; it
+is not a GLaDOS adapter, and scoring prose needs one.
+
+**If prose quality moves**, the migration has a measured justification and the
+security bill below is worth paying. **If it does not**, DEFER stops being
+provisional and the revisit trigger (R9700 + Mistral Small 24B) is the only
+thing that reopens it.
+
+## SIGN-OFF 1 -- one backend or two -- DECIDED: dual, with a kill-date
 
 The architect and migration lenses disagree, and the disagreement is real.
 
@@ -258,28 +302,55 @@ The architect and migration lenses disagree, and the disagreement is real.
   both -- but an undated "keep both for now" is how it reproduces.
 
 They converge on dual-with-a-kill-date and differ on whether that is a
-concession or the plan. **Recommendation: moot under DEFER.** If the migration
-proceeds later, land llama.cpp alongside with a written deletion date and
-parameterised contract tests, and treat a missed date as a decision to revert
-rather than to extend.
+concession or the plan.
 
-## SIGN-OFF 2 -- provenance
+**Decided: dual-with-a-kill-date is the plan, not a concession.** If the
+migration proceeds, llama.cpp lands alongside Ollama under three conditions,
+all of which are part of the same change and none of which are follow-ups:
 
-This one cuts against the reasoning that drove the model swap of 27-08-2026, so
-it deserves an explicit decision rather than a silent drop.
+1. A deletion date for the losing backend, written into this document.
+2. Contract tests parameterised over BOTH runtimes. This is the whole
+   safeguard: the `num_predict = 512` scar was an UNEXERCISED surface, and a
+   second exercised surface is not that. An unparameterised dual period
+   recreates the scar exactly.
+3. A missed date reads as a decision to **revert**, never to extend. Extending
+   requires a new decision recorded here, with a reason.
 
-The provenance case for llama.cpp is that ggml is Bulgarian-origin while Ollama
-is a US company. Judged on merits it does not hold: Ollama SHIPS the same
-`ggml-*.dll`, so the inference engine is identical; the ggml team joined Hugging
-Face, a US company, in February 2026; and the measurable supply-chain delta is
-NEGATIVE -- a signed installer with a content-addressed model store, traded for
-an unsigned zip fetched from a browser and living outside LocalGuard.
+Moot while DEFER holds -- there is nothing to run two of -- but it is the
+standing answer the moment that changes.
 
-**Recommendation: drop provenance from the justification entirely and migrate,
-if at all, on the tool-parsing merits.** Note this does NOT retroactively
-question the MODEL choice: Ministral's weights are Mistral's regardless of which
-runtime loads them, and that swap also stands on a 20/22 score. It questions
-only whether provenance argues for changing RUNTIME, where it does not.
+## SIGN-OFF 2 -- provenance -- DECIDED: not a runtime argument, and never was
+
+**This section previously misstated the question, and the correction matters
+more than the answer.** It framed provenance as a case FOR the runtime swap and
+then knocked that case down. Provenance was never the case for the swap. Its
+actual role, confirmed 27-08-2026, is two things, neither of which is an
+argument about runtimes:
+
+1. **A screening filter on MODEL origin** -- ruling Chinese-origin models out of
+   consideration before anything is scored. That filter did its work at model
+   selection and is untouched by any of this. Ministral's weights are Mistral's
+   regardless of which runtime loads them, and that choice also stands on its
+   own 20/22 score.
+2. **A tiebreaker**, applied only if the technical case came out level.
+
+**Decided: it carries no weight here, because neither role applies.** A
+screening filter on model origin says nothing about the process that loads the
+weights. And the tiebreaker cannot fire, because there is no tie to break --
+the runtimes are not level-but-close on the dimension in question, they are
+measured EQUAL on dispatch and within noise on latency, while the dimension
+that could separate them (prose quality under the canonical template) is
+unmeasured. A tiebreaker applied to an unmeasured comparison is not a
+tiebreaker; it is a way of deciding before looking.
+
+For the record, the specific provenance CLAIM would also have failed on its
+facts: Ollama ships the same `ggml-*.dll`, so the inference engine is
+identical; the ggml team joined Hugging Face, a US company, in February 2026;
+and the measurable supply-chain delta is NEGATIVE -- a signed installer with a
+content-addressed model store, traded for an unsigned zip fetched from a
+browser and living outside LocalGuard. But that is a footnote, not the
+reasoning. The swap is decided on whether Ministral runs better, and only on
+that.
 
 ## Deliberately not built
 
