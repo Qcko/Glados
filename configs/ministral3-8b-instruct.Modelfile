@@ -1,0 +1,31 @@
+# Ministral 3 8B Instruct, taught to speak tools.
+#
+# mistralai's own GGUF repo ships a SINGLE-TURN template: no `.Tools`, and no
+# `range .Messages`, so Ollama refuses any tools payload ("does not support
+# tools") and cannot represent conversation history at all. The template below
+# is ported from the canonical repo's `chat_template.jinja`
+# (mistralai/Ministral-3-8B-Instruct-2512), which does carry the tool format.
+#
+# The model emits calls as `[TOOL_CALLS]<name>[ARGS]<json>` -- Mistral's v13
+# shape, NOT the JSON-list form `mistral-small` uses. Ollama does not parse it,
+# so GLaDOS recovers it adapter-side; see `[llm] text_tool_format` in
+# configs/glados.toml and src/glados/brain/llm/tool_text.py.
+#
+# Build (one-off, per machine):
+#   ollama pull hf.co/mistralai/Ministral-3-8B-Instruct-2512-GGUF:Q4_K_M
+#   ollama create ministral3:8b-instruct -f configs/ministral3-8b-instruct.Modelfile
+
+FROM hf.co/mistralai/Ministral-3-8B-Instruct-2512-GGUF:Q4_K_M
+TEMPLATE """<s>
+{{- if .System }}[SYSTEM_PROMPT]{{ .System }}[/SYSTEM_PROMPT]{{ end }}
+{{- if .Tools }}[AVAILABLE_TOOLS]{{ .Tools }}[/AVAILABLE_TOOLS]{{ end }}
+{{- range .Messages }}
+{{- if eq .Role "user" }}[INST]{{ .Content }}[/INST]
+{{- else if eq .Role "assistant" }}
+{{- if .Content }}{{ .Content }}{{ end }}
+{{- range .ToolCalls }}[TOOL_CALLS]{{ .Function.Name }}[ARGS]{{ .Function.Arguments }}{{ end }}</s>
+{{- else if eq .Role "tool" }}[TOOL_RESULTS]{{ .Content }}[/TOOL_RESULTS]
+{{- end }}
+{{- end }}"""
+PARAMETER stop "[INST]"
+PARAMETER stop "</s>"

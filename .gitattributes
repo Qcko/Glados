@@ -19,3 +19,8 @@ client_room/deploy/termux/provision.sh                 text eol=lf
 
 # Server-side TLS cert generator, run through sh on the dev box / server.
 scripts/gen-tls-cert.sh                                text eol=lf
+
+# The Modelfile body IS the chat template Ollama bakes into the model, so a
+# CRLF here puts a stray carriage return into every rendered prompt. Force LF
+# regardless of the host's core.autocrlf.
+configs/ministral3-8b-instruct.Modelfile               text eol=lf

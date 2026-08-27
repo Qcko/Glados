@@ -20,7 +20,19 @@ backend = "ollama"
 # model = "qwen3:4b"                         # 4.80 GB at 12288 -- 20/22, plain-sentence replies (best for TTS); also the hardcoded default
 # model = "qwen2.5:14b-instruct"             # Q4_K_M (8.4 GB) -- DO NOT SHIP: Thai/JSON pathologies (bake-off 03-06-2026)
 # model = "qwen2.5:14b-instruct-q5_K_M"      # Q5_K_M (10.5 GB) -- previous ship; 15/22, and the only model measured to LEAK tool text
-model = "qwen3:8b"                         # 7.23 GB at 12288 -- 21/22 and the lowest per-turn latency measured (19-08-2026)
+# model = "qwen3:8b"                         # 7.23 GB at 12288 -- 21/22, previous ship; retired 27-08-2026 on PROVENANCE, not merit
+# model = "ministral3:14b-instruct"          # 8.24 GB -- 19/22, and 92% of a 12 GB card. Answers T5 properly, which 8b does not
+model = "ministral3:8b-instruct"             # 5.2 GB at 12288 -- 20/22 twice, best-in-field dispatch h0 (32/33), 0.4s median (5x qwen3:8b)
+# NOT an Ollama library tag: build it once per machine from the Modelfile in
+# `configs/`, which carries the tool-capable template mistralai's GGUF omits.
+#   ollama create ministral3:8b-instruct -f configs/ministral3-8b-instruct.Modelfile
+#
+# Ministral hands tool calls back as TEXT (`[TOOL_CALLS]name[ARGS]{...}`);
+# Ollama does not parse that shape, so without the line below every call is
+# SPOKEN instead of run. Opt-in per model on purpose -- it lets the adapter
+# treat the spoken channel as a dispatch source, which is a trust decision
+# (ARCH section 7). See src/glados/brain/llm/tool_text.py.
+text_tool_format = "mistral_v13"
 host = "http://localhost:11434"
 # Greedy decoding (0.0). Originally set because the 14b/Q5 (retired 19-08-2026)
 # drifted into another language when sampled; greedy + the "reply in English"
