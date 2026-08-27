@@ -20,6 +20,7 @@ from typing import AsyncIterator
 
 import httpx
 
+from .tool_text import could_start_call, parse_tool_text
 from ...core.adapters import (
     LLMEvent,
     LLMMessage,
@@ -53,6 +54,11 @@ class OllamaLLM:
         num_ctx: int | None = None,
         num_predict: int | None = None,
         think: bool | None = None,
+        # Wire format for tool calls the server hands back as TEXT (currently
+        # only "mistral_v13"). STRICTLY PER-MODEL, like `think` above: None
+        # means the text channel is never treated as a dispatch, which is the
+        # right answer for every model whose calls Ollama already parses.
+        text_tool_format: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._host = host.rstrip("/")
@@ -62,6 +68,7 @@ class OllamaLLM:
         self._num_ctx = num_ctx
         self._num_predict = num_predict
         self._think = think
+        self._text_tool_format = text_tool_format
         # Context pressure is a standing condition, not an event: on a workload
         # whose tool block is genuinely large it would be true on EVERY turn,
         # and a warning that fires every turn stops being read -- which is how
@@ -153,6 +160,9 @@ class OllamaLLM:
             # reply. `_log_usage` needs this to tell "cut mid-sentence" from
             # "cut before it said anything".
             produced_speakable = False
+            # Text withheld from the spoken channel while it might still turn
+            # out to be a tool call. Empty unless `text_tool_format` is set.
+            held: list[str] = []
             async for line in resp.aiter_lines():
                 line = line.strip()
                 if not line:
@@ -167,8 +177,80 @@ class OllamaLLM:
                 )
                 if chunk.get("done"):
                     self._log_usage(chunk, produced_speakable=produced_speakable)
-                for event in events:
+                for event in self._filtered(events, held):
                     yield event
+            for event in self._drain(name_map, held):
+                yield event
+        if held:
+            # Only reachable if the stream died or the consumer walked away
+            # mid-turn. Nothing can be yielded now, so say so rather than let
+            # a turn go silent with no explanation anywhere.
+            log.warning(
+                "dropped %d withheld chars: stream ended before drain model=%s",
+                len("".join(held)),
+                self._model,
+            )
+
+    def _filtered(self, events: list[LLMEvent], held: list[str]) -> list[LLMEvent]:
+        """Hold back text that may be a tool call, pass everything else on.
+
+        A model whose calls Ollama parses never reaches the holding branch, so
+        streaming to the spoken channel is unchanged for it.
+        """
+        if self._text_tool_format is None:
+            return events
+        out: list[LLMEvent] = []
+        for event in events:
+            if not isinstance(event, LLMText):
+                out.append(event)
+                continue
+            if held or could_start_call(event.text):
+                held.append(event.text)
+                if not could_start_call("".join(held)):
+                    # Settled: it was ordinary speech all along. Release it and
+                    # stop withholding for the rest of the turn.
+                    out.append(LLMText(text="".join(held)))
+                    held.clear()
+                continue
+            out.append(event)
+        return out
+
+    def _drain(
+        self, name_map: dict[str, ToolSpec], held: list[str]
+    ) -> list[LLMEvent]:
+        """Turn whatever was withheld into calls, speech, or both."""
+        if not held:
+            return []
+        raw = "".join(held)
+        held.clear()
+        spoken, calls, thought = parse_tool_text(
+            raw, frozenset(name_map), fmt=self._text_tool_format
+        )
+        events: list[LLMEvent] = []
+        if thought:
+            # Reasoning belongs on the thinking channel whatever syntax it
+            # arrived in. Speaking it is the failure LLMThinking exists to stop.
+            events.append(LLMThinking(text=thought))
+        for sanitised, args in calls:
+            spec = name_map[sanitised]
+            log.info(
+                "ollama recovered tool call from text model=%s tool=%s.%s",
+                self._model,
+                spec.server,
+                spec.name,
+            )
+            events.append(
+                LLMToolCall(
+                    call_id=uuid.uuid4().hex,
+                    server=spec.server,
+                    name=spec.name,
+                    args=args,
+                    from_text=True,
+                )
+            )
+        if spoken.strip():
+            events.append(LLMText(text=spoken))
+        return events
 
     def _build_options(self) -> dict:
         options: dict = {"temperature": self._temperature}

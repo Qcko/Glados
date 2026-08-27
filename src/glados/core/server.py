@@ -272,6 +272,7 @@ def _build_llm(cfg: LLMConfig) -> LLM:
             temperature=cfg.temperature,
             timeout=cfg.timeout,
             keep_alive=cfg.keep_alive,
+            text_tool_format=cfg.text_tool_format,
             num_ctx=cfg.num_ctx,
             num_predict=cfg.num_predict,
             think=cfg.think,
@@ -309,6 +310,7 @@ def _build_specialist_llm(
             temperature=llm_cfg.temperature,
             timeout=llm_cfg.timeout,
             keep_alive=llm_cfg.keep_alive,
+            text_tool_format=llm_cfg.text_tool_format,
             num_ctx=llm_cfg.num_ctx,
             num_predict=llm_cfg.num_predict,
             # `think` is deliberately NOT inherited: it is a per-model

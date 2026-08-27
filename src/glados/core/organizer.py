@@ -1607,7 +1607,13 @@ class Organizer:
             )
             spec = self.mcp.spec_for(tc.server, tc.name)
             denied = False
-            if spec is not None and spec.requires_confirmation:
+            # A text-parsed call has no provenance -- the same channel
+            # carries <external> content -- so a mutating one is confirmed
+            # even when the structured path would let it through un-gated.
+            needs_confirm = spec is not None and (
+                spec.requires_confirmation or (tc.from_text and spec.mutating)
+            )
+            if needs_confirm:
                 granted = await self._await_confirmation(
                     session_id=session_id,
                     room_id=room_id,

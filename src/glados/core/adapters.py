@@ -86,6 +86,12 @@ class LLMToolCall(BaseModel):
     server: str
     name: str
     args: dict
+    # True when the call was recovered from assistant TEXT rather than handed
+    # over as structure (see brain/llm/tool_text.py). Text is the channel
+    # <external> content reaches, so provenance has to survive to the gate:
+    # the Organizer confirms a MUTATING text-parsed call even where the tool
+    # is normally un-gated. Never set this for a structured call.
+    from_text: bool = False
 
 
 LLMEvent = Annotated[

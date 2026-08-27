@@ -127,6 +127,17 @@ class LLMConfig(BaseModel):
     # looser. Accepted deliberately: a wedged turn is recoverable, a silently
     # blanked assistant is not.
     num_predict: int | None = Field(default=4096, ge=1)
+    # Wire format for tool calls the server returns as TEXT instead of as
+    # structure. Only "mistral_v13" (Ministral 3) is understood; None -- the
+    # default -- means the spoken channel is NEVER treated as a dispatch.
+    #
+    # STRICTLY PER-MODEL, and a TRUST decision, not a compatibility one: text
+    # is the channel <external> content reaches, so enabling this on a model
+    # that does not need it widens the attack surface for nothing. The parser
+    # only accepts a marker that STARTS the reply and names a tool offered on
+    # that same turn, and the Organizer confirms any MUTATING call recovered
+    # this way even where the tool is normally un-gated (ARCH section 7).
+    text_tool_format: str | None = Field(default=None)
     # Sent as /api/chat `think`. `None` omits the key and leaves the model's own
     # default alone; `False` asks a reasoning model not to reason.
     #
