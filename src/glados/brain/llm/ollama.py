@@ -21,6 +21,7 @@ from typing import AsyncIterator
 import httpx
 
 from .tool_text import could_start_call, parse_tool_text
+from .wire_names import UNKNOWN_SERVER, sanitise, sanitise_pair
 from ...core.adapters import (
     LLMEvent,
     LLMMessage,
@@ -335,15 +336,11 @@ class OllamaLLM:
 
     @staticmethod
     def _sanitise(spec: ToolSpec) -> str:
-        return OllamaLLM._sanitise_pair(spec.server, spec.name)
+        return sanitise(spec)
 
     @staticmethod
     def _sanitise_pair(server: str, name: str) -> str:
-        if "__" in server or "__" in name:
-            raise ValueError(
-                f"server/tool names must not contain '__' (reserved separator): {server}.{name}"
-            )
-        return f"{server}__{name}"
+        return sanitise_pair(server, name)
 
     @staticmethod
     def _to_ollama_tool(sanitised_name: str, spec: ToolSpec) -> dict:
@@ -372,7 +369,17 @@ class OllamaLLM:
                     {
                         "id": tc.call_id,
                         "function": {
-                            "name": OllamaLLM._sanitise_pair(tc.server, tc.name),
+                            # An `unknown`-server call already holds the raw
+                            # wire name, which contains the reserved `__` by
+                            # construction -- so sanitising it here raised and
+                            # killed the turn on the NEXT pass. Reachable
+                            # without an attacker: any hallucinated name of the
+                            # shape `a__b` that was not offered this turn.
+                            "name": (
+                                tc.name
+                                if tc.server == UNKNOWN_SERVER
+                                else sanitise_pair(tc.server, tc.name)
+                            ),
                             "arguments": tc.args,
                         },
                     }

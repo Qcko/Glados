@@ -62,7 +62,18 @@ class AuthConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    backend: Literal["fake", "ollama"] = "fake"
+    backend: Literal["fake", "ollama", "llamacpp"] = "fake"
+    # llama-server's address. A SEPARATE field rather than a reuse of `host`
+    # below: that one defaults to Ollama's port, so a config that switched
+    # backend and left it alone would point the new adapter at Ollama and 404
+    # at the first inference rather than at boot -- the same failure the
+    # `model` default is written to avoid.
+    llamacpp_host: str = "http://127.0.0.1:8080"
+    # Env var holding llama-server's `--api-key`, never the key itself (ARCH
+    # section 9). Empty means the server was launched without one -- which is
+    # llama-server's DEFAULT, alongside a webui and permissive CORS, so a
+    # measurement run on a box that is also driving a browser wants this set.
+    llamacpp_api_key_env: str = ""
     # The fallback a config lands on when it omits `model`. It MATCHES the
     # shipped model on purpose, reversing the old "smallest capable model"
     # rule: a default that differs from what ships is a second live surface
@@ -212,7 +223,20 @@ class LLMConfig(BaseModel):
         looks like a hopeless model rather than a config that is one line
         short. Cheaper to refuse the config than to debug the symptom.
         """
-        wants = any(m in self.model.lower() for m in self._TEXT_TOOL_MODELS)
+        # Backend-aware, not just model-aware. The text channel is a dispatch
+        # route only where the SERVER hands tool calls back as prose. Under
+        # llama.cpp's --jinja the same model returns structured `tool_calls`,
+        # so the parser is not merely unnecessary there -- leaving it on would
+        # keep the spoken channel dispatchable for no benefit, which is exactly
+        # what the second arm below refuses for every other model.
+        # Only `llamacpp` inverts this. `fake` keeps the ollama-shaped rule
+        # deliberately: it is the DEFAULT backend, so it is the one a config
+        # is most often written against, and catching an incoherent pair there
+        # is early feedback rather than a false alarm.
+        parses_text = self.backend != "llamacpp"
+        wants = parses_text and any(
+            m in self.model.lower() for m in self._TEXT_TOOL_MODELS
+        )
         if wants and self.text_tool_format is None:
             raise ValueError(
                 f"[llm] model = {self.model!r} returns tool calls as TEXT, so "
@@ -221,9 +245,10 @@ class LLMConfig(BaseModel):
             )
         if not wants and self.text_tool_format is not None:
             raise ValueError(
-                f"[llm] model = {self.model!r} has its tool calls parsed by "
-                "Ollama, so text_tool_format must be unset -- leaving it on "
-                "lets the spoken channel dispatch tools for no benefit."
+                f"[llm] model = {self.model!r} on backend = {self.backend!r} "
+                "has its tool calls handed over as STRUCTURE, so "
+                "text_tool_format must be unset -- leaving it on lets the "
+                "spoken channel dispatch tools for no benefit."
             )
         return self
 
@@ -570,7 +595,19 @@ def _apply_env_overrides(cfg: GladosConfig) -> GladosConfig:
 
     llm_updates: dict = {}
     backend = os.environ.get("GLADOS_LLM_BACKEND")
-    if backend in ("fake", "ollama"):
+    # `llamacpp` is deliberately NOT selectable here. It is a measurement
+    # backend (see brain/llm/llamacpp.py): reaching it should take an edited
+    # TOML that a human read, not an exported variable. But an unrecognised
+    # value must not fall through silently either -- that lands on `fake`, and
+    # a server answering every turn with canned text looks like a broken model
+    # rather than a typo'd env var.
+    if backend is not None:
+        if backend not in ("fake", "ollama"):
+            raise ValueError(
+                f"GLADOS_LLM_BACKEND = {backend!r} is not selectable by "
+                'environment. Use "fake" or "ollama"; any other backend must '
+                "be set in the TOML."
+            )
         llm_updates["backend"] = backend
     if (model := os.environ.get("GLADOS_LLM_MODEL")) is not None:
         llm_updates["model"] = model

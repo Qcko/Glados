@@ -32,6 +32,7 @@ from ..audio.stt.fake import FakeSTT
 from ..audio.tts.fake import FakeTTS
 from ..audio.vad.fake import FakeVAD
 from ..brain.llm.fake import FakeLLM
+from ..brain.llm.llamacpp import LlamaCppLLM
 from ..brain.llm.ollama import OllamaLLM
 from ..brain.router import Router
 from ..brain.tool_router import ServerScope, ToolRouter
@@ -278,7 +279,27 @@ def _build_llm(cfg: LLMConfig) -> LLM:
             repeat_penalty=cfg.repeat_penalty,
             think=cfg.think,
         )
-    return FakeLLM()
+    if cfg.backend == "llamacpp":
+        return LlamaCppLLM(
+            host=cfg.llamacpp_host,
+            model=cfg.model,
+            temperature=cfg.temperature,
+            timeout=cfg.timeout,
+            max_tokens=cfg.num_predict,
+            repeat_penalty=cfg.repeat_penalty,
+            num_ctx=cfg.num_ctx,
+            api_key=(
+                os.environ.get(cfg.llamacpp_api_key_env)
+                if cfg.llamacpp_api_key_env
+                else None
+            ),
+        )
+    if cfg.backend == "fake":
+        return FakeLLM()
+    # No fall-through to FakeLLM. A missing branch would otherwise yield a
+    # server that runs, answers every turn with canned text, and looks like a
+    # broken model rather than a missing case.
+    raise ValueError(f"[llm] backend = {cfg.backend!r} has no builder")
 
 
 def _build_specialist_llm(
@@ -305,6 +326,20 @@ def _build_specialist_llm(
     if cfg.provider == "local":
         if not cfg.local_smart_model or cfg.local_smart_model == llm_cfg.model:
             return primary_llm  # alias -- same instance, same model
+        # Gated on a REAL non-Ollama runtime. `fake` reaches here in tests that
+        # exercise routing itself, where there is no runtime to mix.
+        if llm_cfg.backend == "llamacpp":
+            # This branch builds an OllamaLLM unconditionally. Letting it run
+            # under another backend would serve SOME turns from Ollama and the
+            # rest from the configured runtime -- a mixed-runtime setup that
+            # looks clean in the logs and silently corrupts any measurement
+            # taken across it.
+            raise ValueError(
+                f"[router] a distinct local_smart_model needs [llm] backend = "
+                f'"ollama", not {llm_cfg.backend!r} -- the specialist would '
+                "run on Ollama while the primary ran elsewhere. Leave "
+                "local_smart_model empty to alias the primary brain."
+            )
         return OllamaLLM(
             host=llm_cfg.host,
             model=cfg.local_smart_model,

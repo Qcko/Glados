@@ -489,3 +489,21 @@ async def test_tool_call_alone_is_not_a_silent_turn(caplog) -> None:
         await _collect(adapter, [LLMMessage(role="user", content="hi")], [_now_spec()])
 
     assert not any("WITHOUT EMITTING ANY REPLY" in r.message for r in caplog.records)
+
+
+async def test_unknown_call_replays_into_history_without_raising() -> None:
+    """An `unknown`-server call holds the RAW wire name, which contains the
+    reserved `__` by construction. Sanitising it on the way back into history
+    raised mid-turn, killing the turn -- and reachable without an attacker, on
+    any hallucinated `a__b` name that was not offered."""
+    msg = LLMMessage(
+        role="assistant",
+        content="",
+        tool_calls=[
+            LLMToolCall(
+                call_id="c", server="unknown", name="shop__drop_database", args={}
+            )
+        ],
+    )
+    wire = OllamaLLM._to_ollama_msg(msg)
+    assert wire["tool_calls"][0]["function"]["name"] == "shop__drop_database"
