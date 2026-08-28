@@ -43,8 +43,12 @@ LIVING_MIC = ClientBinding(
 
 
 class _FakeTts:
-    """Streams one chunk per call, after an optional hold so a test can catch
-    the audio mid-flight."""
+    """Streams a few chunks per call, after an optional hold so a test can
+    catch the audio mid-flight. More than one chunk per call so that two
+    interleaved streams are expressible at all -- with one chunk each, two
+    streams cannot help but look serialised."""
+
+    CHUNKS = 3
 
     def __init__(
         self, hold: asyncio.Event | None = None, hold_marker: str = ""
@@ -52,12 +56,28 @@ class _FakeTts:
         self._hold = hold
         self._hold_marker = hold_marker
         self.spoken: list[str] = []
+        self.holding = 0
+        self._reached = asyncio.Condition()
 
     async def synthesize(self, text: str):
         self.spoken.append(text)
         if self._hold is not None and self._hold_marker in text:
+            async with self._reached:
+                self.holding += 1
+                self._reached.notify_all()
             await self._hold.wait()
-        yield TtsChunkOut(pcm=b"\x00\x00" * 16, sample_rate=22_050)
+        for _ in range(self.CHUNKS):
+            yield TtsChunkOut(pcm=b"\x00\x00" * 16, sample_rate=22_050)
+
+    async def wait_until_holding(self, count: int = 1) -> None:
+        """Block until `count` syntheses have reached the hold. A fixed sleep
+        is a guess at how long a worker takes to spawn a task, open a trace on
+        disk and enter the fake -- and when the guess is short, the failure is
+        an empty-list mismatch that reads like a real bug."""
+        async with self._reached:
+            await asyncio.wait_for(
+                self._reached.wait_for(lambda: self.holding >= count), 2.0
+            )
 
 
 class _SpeakIntoLLM:
@@ -187,7 +207,7 @@ async def test_speak_into_returns_while_the_target_room_is_still_speaking(
         org._queues.enqueue(  # noqa: SLF001
             "livingroom", lambda: org._deliver_intercom("livingroom", "earlier")
         )
-        await asyncio.sleep(0.05)
+        await tts.wait_until_holding()
         assert tts.spoken == ["earlier"]  # the livingroom really is stuck
 
         call = LLMToolCall(
@@ -203,6 +223,11 @@ async def test_speak_into_returns_while_the_target_room_is_still_speaking(
                 org._speak_into_room(call, "s1", "desk", trace, outcome),  # noqa: SLF001
                 1.0,
             )
+            # Handed to the room's FIFO, not spawned alongside it. A bare
+            # `create_task` would also return promptly and would also end up
+            # spoken -- and would put two streams into one room at once.
+            assert org._queues.queue_depth("livingroom") == 1  # noqa: SLF001
+            assert _intercom_lines(tts) == []
         finally:
             trace.close()
             hold.set()
@@ -380,3 +405,236 @@ def test_the_spoken_sentence_never_becomes_claim_evidence() -> None:
         call_id="c2", server="dunnes", name="add", args={"item": "milk"}
     )
     assert _subject_args(ordinary) == {"item": "milk"}
+
+
+# ---- the target room owns the announcement, and can stop it -----------
+
+
+def _delta_session(sink: list, prefix: str) -> str:
+    session = next(
+        (
+            m["session_id"]
+            for _cid, m in sink
+            if m.get("type") == "assistant_delta"
+            and str(m.get("text", "")).startswith(prefix)
+        ),
+        None,
+    )
+    assert session is not None, f"no assistant_delta starting {prefix!r} in {sink}"
+    return session
+
+
+async def _until(predicate, what: str, timeout: float = 2.0) -> None:
+    """Wait for something a cancellation delivers on a later tick. Bounded, so
+    a real regression fails on the named condition rather than on a sleep that
+    happened to be long enough."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        assert loop.time() < deadline, f"timed out waiting for {what}"
+        await asyncio.sleep(0.005)
+
+
+async def test_stop_in_the_target_room_cancels_only_that_announcement(
+    tmp_path: Path,
+) -> None:
+    """The synthetic session is bound to the room the audio lands in, so a
+    voice "stop" there reaches the announcement through the ordinary barge-in
+    path -- and reaches nothing else. It must not cancel work in the room that
+    sent the message (which is already done and has been told `queued`), and it
+    must not fall through into a new turn in the target room."""
+    hold = asyncio.Event()
+    tts = _FakeTts(hold)  # every synthesis holds
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "unused"})
+    async with _organizer(
+        tmp_path, llm, [DESK_UI, LIVING_SPEAKER, LIVING_MIC], tts=tts
+    ) as (org, sink):
+        org._queues.enqueue(  # noqa: SLF001
+            "livingroom",
+            lambda: org._deliver_intercom("livingroom", "Message from the desk. one"),
+        )
+        org._queues.enqueue(  # noqa: SLF001
+            "desk",
+            lambda: org._deliver_intercom("desk", "Message from the livingroom. two"),
+        )
+        await tts.wait_until_holding(2)
+        living_session = _delta_session(sink, "Message from the desk")
+
+        await org.handle_audio_text("livingroom-mic", "stop")
+        await _until(
+            lambda: any(m.get("type") == "cancelled" for _cid, m in sink),
+            "the cancelled broadcast",
+        )
+
+        cancelled = {
+            m["session_id"] for _cid, m in sink if m.get("type") == "cancelled"
+        }
+        assert cancelled == {living_session}
+        # The desk's announcement is untouched and still holding its TTS.
+        assert "desk" in {rid for _task, rid in org._inflight.values()}  # noqa: SLF001
+        # "stop" ended there -- it did not become a turn in the livingroom.
+        assert llm.passes == []
+
+        hold.set()
+        await org.flush()
+
+
+async def test_the_target_rooms_own_playback_done_drives_the_gate(
+    tmp_path: Path,
+) -> None:
+    """`handle_playback_done` matches on `session_id`. Under the design this
+    slice replaced -- the caller's session armed the target room's gate -- the
+    target's speaker could never match it, and the room stayed deaf for the
+    whole estimate. The gate belongs to the synthetic session, so the speaker
+    that actually played the audio is the one that can release it.
+
+    Driven through a whole turn on purpose: the regression being pinned is the
+    caller's session reaching the target's gate, and a test that only enqueues
+    a delivery has no caller session to confuse it with."""
+    tts = _FakeTts()
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "dinner is ready"})
+    async with _organizer(
+        tmp_path, llm, [DESK_UI, LIVING_SPEAKER, LIVING_MIC], tts=tts
+    ) as (org, sink):
+        confirms = asyncio.create_task(_grant_confirms(org, sink, "desk-ui"))
+        try:
+            await asyncio.wait_for(org.handle_user_text("desk-ui", "tell them"), 5.0)
+            await org.flush()
+        finally:
+            confirms.cancel()
+
+        session = _delta_session(sink, "Message from the desk")
+        desk_session = _delta_session(sink, "Passed it on")
+        gate = org._tts_gate["livingroom"]  # noqa: SLF001
+        assert gate.phase == "draining"
+        assert gate.session_id == session
+        # The synthetic session, not the desk turn that sent the message.
+        assert session.startswith("intercom-")
+        assert session != desk_session
+
+        # Another turn's signal is still stale and still dropped.
+        await org.handle_playback_done("livingroom-speaker", "some-other-session")
+        assert org._tts_gate["livingroom"].phase == "draining"  # noqa: SLF001
+
+        await org.handle_playback_done("livingroom-speaker", session)
+        assert org._tts_gate["livingroom"].phase == "cooldown"  # noqa: SLF001
+
+
+# ---- one turn cannot flood a room -------------------------------------
+
+
+class _TwiceIntoTheSameRoomLLM:
+    """Two `room.speak_into` calls at the same target, in one turn."""
+
+    def __init__(self) -> None:
+        self.passes: list[list[LLMMessage]] = []
+
+    async def chat(self, messages, tools):
+        self.passes.append([m.model_copy(deep=True) for m in messages])
+        if len(self.passes) == 1:
+            for call_id, message in (("c1", "dinner is ready"), ("c2", "and again")):
+                yield LLMToolCall(
+                    call_id=call_id,
+                    server="room",
+                    name="speak_into",
+                    args={"room": "livingroom", "message": message},
+                )
+            return
+        yield LLMText(text="Passed it on.")
+
+
+def _tool_result_texts(passes: list[list[LLMMessage]]) -> list[str]:
+    return [m.content or "" for m in passes[-1] if m.role == "tool"]
+
+
+async def test_one_turn_may_announce_into_a_room_only_once(tmp_path: Path) -> None:
+    """A per-turn cap is what answers the Security lens's objection to
+    queueing: bounded accumulation, so one compromised turn cannot loop a
+    room's speaker. The second call is refused, not queued."""
+    tts = _FakeTts()
+    llm = _TwiceIntoTheSameRoomLLM()
+    async with _organizer(
+        tmp_path, llm, [DESK_UI, LIVING_SPEAKER, LIVING_MIC], tts=tts
+    ) as (org, sink):
+        confirms = asyncio.create_task(_grant_confirms(org, sink, "desk-ui"))
+        try:
+            await asyncio.wait_for(org.handle_user_text("desk-ui", "tell them"), 5.0)
+            await org.flush()
+        finally:
+            confirms.cancel()
+
+    results = _tool_result_texts(llm.passes)
+    assert len(results) == 2
+    assert "queued" in results[0]
+    assert "already been passed" in results[1]
+    assert _intercom_lines(tts) == ["Message from the desk. dinner is ready"]
+
+
+async def test_two_announcements_into_one_room_do_not_interleave(
+    tmp_path: Path,
+) -> None:
+    """The reason the handoff is an enqueue rather than a spawn: the room's
+    FIFO already owns "two simultaneous TTS streams to one room are
+    incoherent". The second announcement waits for the first to finish, and
+    the chunks of the two never mix."""
+    hold = asyncio.Event()
+    tts = _FakeTts(hold, hold_marker="first")
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "unused"})
+    async with _organizer(
+        tmp_path, llm, [DESK_UI, LIVING_SPEAKER, LIVING_MIC], tts=tts
+    ) as (org, sink):
+        for message in ("Message from the desk. first", "Message from the desk. second"):
+            org._queues.enqueue(  # noqa: SLF001
+                "livingroom", lambda m=message: org._deliver_intercom("livingroom", m)
+            )
+        await tts.wait_until_holding()
+        # The second has not started synthesising while the first is held.
+        assert tts.spoken == ["Message from the desk. first"]
+        hold.set()
+        await org.flush()
+
+    assert _intercom_lines(tts) == [
+        "Message from the desk. first",
+        "Message from the desk. second",
+    ]
+    streams = [
+        m["session_id"] for _cid, m in sink if m.get("type") == "tts_chunk"
+    ]
+    # Contiguous runs, one per announcement -- never A, B, A.
+    runs = [sid for i, sid in enumerate(streams) if i == 0 or streams[i - 1] != sid]
+    assert len(runs) == len(set(runs)) == 2
+
+
+# ---- egress only: nothing of the announcement lands in the target room -
+
+
+async def test_the_announcement_leaves_no_trace_in_the_target_rooms_history(
+    tmp_path: Path,
+) -> None:
+    """Section 3's "no context bleed" is a session rule, so the intercom is
+    egress and nothing more: the sending room keeps the tool result, and the
+    room the audio lands in gains no session and no history. This is what the
+    synthetic session buys structurally rather than by policy -- and it is the
+    accepted cost, too, because "what did you just say?" asked in the target
+    room has nothing to answer from."""
+    tts = _FakeTts()
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "dinner is ready"})
+    async with _organizer(
+        tmp_path, llm, [DESK_UI, LIVING_SPEAKER, LIVING_MIC], tts=tts
+    ) as (org, sink):
+        confirms = asyncio.create_task(_grant_confirms(org, sink, "desk-ui"))
+        try:
+            await asyncio.wait_for(org.handle_user_text("desk-ui", "tell them"), 5.0)
+            await org.flush()
+        finally:
+            confirms.cancel()
+
+        desk = org.sessions.latest("desk", "qcko")
+        assert desk is not None
+        history = org._history[desk.session_id]  # noqa: SLF001
+        assert any("queued" in (m.content or "") for m in history if m.role == "tool")
+
+        # No session was opened in the room the audio played in, and the
+        # synthetic session that carried it holds no history of its own.
+        assert org.sessions.latest("livingroom", "qcko") is None
+        assert list(org._history) == [desk.session_id]  # noqa: SLF001
