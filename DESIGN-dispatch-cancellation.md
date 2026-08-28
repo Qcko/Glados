@@ -324,34 +324,44 @@ indeterminate does not count toward the consecutive-failure breaker.
 
 ## The shape
 
+As built. The one part that was designed and deliberately NOT built is drawn
+dashed and labelled deferred, so the picture cannot be mistaken for the plan.
+
 ```mermaid
 flowchart TD
-    D["dispatch: asyncio.wait_for"] --> W{"returned in time?"}
+    D["dispatch: asyncio.wait_for"] --> W{"answered in time?"}
     W -->|yes| OK["ok=True -- unchanged"]
-    W -->|no| C["CancelledError reaches _call_method"]
+    W -->|no| P{"did the request reach the child's pipe?"}
+    P -->|"no -- the write never got the lock"| CF["clean failure:<br/>nothing is running, safe to retry"]
+    P -->|"yes -- a cancelled wait, OR a drain that<br/>timed out after the bytes were buffered"| C["ABANDONED: nobody is waiting,<br/>the child is still working"]
 
-    subgraph transport ["Slice 1 -- stdio_client.py"]
-        C --> F["finally: move rid from _pending to _abandoned<br/>(tool name + start time, bounded FIFO)"]
-        F --> N["shielded task: notifications/cancelled<br/>reason='client timeout', bounded write"]
-        F --> G["server DEGRADED while _abandoned non-empty"]
-        G --> FF["later call_tool fails fast<br/>NOT marked indeterminate"]
+    subgraph transport ["Slice 1 -- stdio_client.py (built)"]
+        F["finally: rid leaves _pending for _abandoned<br/>(tool + start time, bounded FIFO)"]
+        F --> G["server DEGRADED while _abandoned is non-empty"]
+        G --> FF["later call_tool fails fast<br/>NOT marked indeterminate -- it has not earned one"]
         F --> R["reaper: sleep() refuses<br/>-- no kill mid-write"]
         F -.->|"minutes later, unprompted"| L["late response arrives"]
         L --> LW["WARNING: tool, elapsed ms, isError"]
-        LW --> CL["clear _abandoned -- server free again"]
+        LW --> CL["_abandoned cleared -- ordinary service resumes"]
+        F -.->|"a child that hangs without dying<br/>never sends one"| TTL["after _ABANDON_TTL_S, forget it:<br/>degraded forever is worse than the leak this replaced"]
+        TTL --> CL
+        F -.->|"DEFERRED -- buys nothing until the<br/>Dunnes server honours it"| N["notifications/cancelled"]
     end
 
-    subgraph semantics ["Slice 2 -- registry / organizer / turn_outcome"]
-        C --> I["registry: indeterminate=True on every timeout<br/>(a transport fact, no policy)"]
+    subgraph semantics ["Slice 2 -- registry / organizer / turn_outcome (built)"]
+        I["registry: indeterminate=True on every timeout<br/>(a transport fact, no policy)"]
         I --> M{"organizer: mutating or requires_confirmation?"}
         M -->|no| PF["plain failure -- a retried read is harmless"]
-        M -->|yes| LED["mark per-turn ledger<br/>(server, name, canonical args)"]
-        LED --> ADV["advisory text OUTSIDE the external wrapper"]
-        LED --> REC["record_tool: ok=False, indeterminate=True"]
+        M -->|yes| LED["mark the per-turn ledger<br/>(server.name + canonical args)"]
+        M -->|yes| REC["record_tool: ok=False, indeterminate=True"]
+        LED --> ADV["advisory OUTSIDE the external wrapper --<br/>inside it, the model is told to ignore instructions"]
         REC --> CLS["classify() still returns failed -- truthful"]
-        REC --> MAY["may_have_mutated() blocks all three replay sites"]
-        REC --> FO["claimed_a_change... fails open"]
+        REC --> MAY["may_have_mutated() gates all three replay sites"]
+        REC --> FO["claim check: the indeterminate call excuses claims<br/>about ITS OWN subject, never the whole turn"]
     end
 
-    LED -.->|"re-dispatch of a marked key<br/>never reaches the wire"| D
+    C --> F
+    C --> I
+
+    LED -.->|"a re-issue stops HERE:<br/>answered from the ledger,<br/>ahead of the confirmation gate"| D
 ```
