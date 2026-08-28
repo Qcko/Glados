@@ -13,6 +13,61 @@ A single Python core defines small interfaces (`STT`, `TTS`, `LLM`, `WakeWord`,
 by config. MCP servers stay as child processes — that is already MCP's native
 model.
 
+The shape, and the three boundaries that matter -- the socket a client may
+cross, the process edge every MCP server sits behind, and the `<external>`
+wrapper everything scraped comes back inside. Section 4 draws the same system
+as a stream; this one draws who owns what.
+
+```mermaid
+flowchart TD
+    subgraph inputs["Clients that SEND -- dumb, one transducer each"]
+        mic["mic client<br/>audio_chunk"]
+        ui["ui client<br/>user_text"]
+    end
+
+    mic -->|"/ws/v1, TLS, per-client token"| org
+    ui -->|"/ws/v1, TLS, per-client token"| org
+
+    subgraph server["Server -- one box (section 2)"]
+        org["ORGANIZER (section 3)<br/>ingress, dedup, session assignment,<br/>per-session queue, barge-in, egress routing<br/>the ONLY place rooms and sessions are reasoned about"]
+        org --> session["session = (room_id, speaker_id)<br/>never keyed by client_id; no context bleed"]
+        session --> drive["turn drive loop<br/>prompt, tool calls, outcome classification"]
+
+        subgraph adapters["Adapters -- chosen by config, swapped without code edits (sections 5-6)"]
+            vad["VAD"]
+            stt["STT"]
+            llm["LLM"]
+            tts["TTS"]
+        end
+
+        org --> vad
+        vad --> stt
+        stt --> drive
+        drive <--> llm
+        drive --> tts
+        drive <--> memory[("memory<br/>SQLite + FTS5 (section 8)")]
+        drive --> registry["MCP registry + dispatch (section 7)<br/>per-tool timeout, confirmation gate,<br/>a timed-out mutating call is indeterminate"]
+    end
+
+    registry -->|"envelope (room_id, speaker_id)<br/>rides with EVERY call"| dunnes
+    registry --> quests
+    registry --> spotify
+
+    subgraph children["MCP servers -- separate child processes (section 7)"]
+        dunnes["Dunnes<br/>UNTRUSTED: scrapes the open web"]
+        quests["LifeQuests"]
+        spotify["Spotify"]
+    end
+
+    dunnes -.->|"wrapped in &lt;external&gt;:<br/>instructions inside are DATA"| drive
+
+    tts -->|"fans out to every speaker in room_id"| speaker
+
+    subgraph outputs["Clients that RECEIVE"]
+        speaker["speaker client<br/>tts_chunk"]
+    end
+```
+
 Alternatives considered:
 
 - **Monolithic app** — simplest, lowest latency, but one crash kills the voice
