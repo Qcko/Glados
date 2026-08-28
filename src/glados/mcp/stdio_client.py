@@ -72,6 +72,11 @@ _WRITE_TIMEOUT_S = 5.0
 # enough that a slow browser write is still expected to arrive first.
 _ABANDON_TTL_S = 300.0
 
+# How long a child gets to exit on its own after stdin closes, and then again
+# after kill(). Bounded twice: this runs inside a dispatch the registry is
+# already timing, so an unbounded wait here becomes a hung turn.
+_STOP_GRACE_S = 2.0
+
 
 class StdioServerError(RuntimeError):
     pass
@@ -586,13 +591,14 @@ class StdioServer:
             backoff = self._restart_backoff_s * (2 ** len(self._restart_attempts))
             await asyncio.sleep(backoff)
             self._restart_attempts.append(now)
-            # Drain whatever's left of the dead instance. _mark_dead has
-            # already failed _pending and cancelled nothing; we leave the
-            # old proc handle alone (it's already exited) and just null it
-            # so start() respawns a fresh one.
-            self._proc = None
-            self._reader_task = None
-            self._stderr_task = None
+            # Tear the dead instance down before respawning. "Dead" has two
+            # causes and only one of them means the child exited: EOF on stdout
+            # does, a crashed reader task does NOT -- there the process is still
+            # alive with nobody reading it. Nulling the handle there orphans a
+            # live child for the rest of the session, which for a Selenium
+            # server is a leaked browser. `_stop_child` is idempotent and
+            # returns immediately for a process that has already gone.
+            await self._stop_child()
             self._dead = False
             self._died_reason = None
             try:
@@ -616,20 +622,11 @@ class StdioServer:
     async def _stop_child(self) -> None:
         """Tear down the child process and its reader/stderr tasks. Cancels
         the reader BEFORE closing stdin so the resulting EOF can't race
-        `_mark_dead`. Leaves `_proc = None`. Shared by `aclose` (permanent)
-        and `sleep` (dormant) -- the caller sets the resulting state flag."""
-        if self._reader_task is not None and not self._reader_task.done():
-            self._reader_task.cancel()
-            try:
-                await self._reader_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        if self._stderr_task is not None and not self._stderr_task.done():
-            self._stderr_task.cancel()
-            try:
-                await self._stderr_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        `_mark_dead`. Leaves `_proc = None`. Shared by `aclose` (permanent),
+        `sleep` (dormant) and `_try_restart` (replacing a dead instance) -- the
+        caller sets the resulting state flag."""
+        await _settle(self._reader_task)
+        await _settle(self._stderr_task)
         if self._proc is not None:
             try:
                 if self._proc.stdin is not None and not self._proc.stdin.is_closing():
@@ -637,10 +634,19 @@ class StdioServer:
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await asyncio.wait_for(self._proc.wait(), timeout=2.0)
+                await asyncio.wait_for(self._proc.wait(), timeout=_STOP_GRACE_S)
             except asyncio.TimeoutError:
                 self._proc.kill()
-                await self._proc.wait()
+                try:
+                    await asyncio.wait_for(self._proc.wait(), timeout=_STOP_GRACE_S)
+                except asyncio.TimeoutError:
+                    # A Chrome tree that TerminateProcess did not reap would
+                    # otherwise hang here forever -- and `_try_restart` reaches
+                    # this from inside a dispatch the registry is timing.
+                    _log.warning(
+                        "stdio %s: child survived kill(); abandoning the handle",
+                        self.server_id,
+                    )
         self._proc = None
         self._reader_task = None
         self._stderr_task = None
@@ -796,6 +802,23 @@ def _result_or_raise(resp: dict) -> dict:
         err = resp["error"]
         raise StdioServerError(err.get("message", "rpc error"))
     return resp.get("result") or {}
+
+
+async def _settle(task: asyncio.Task | None) -> None:
+    """Cancel a task if it is still running, and swallow however it ended.
+
+    A task that died on its own holds its exception until somebody asks for it,
+    and asyncio logs an alarming "never retrieved" at GC if nobody does -- for
+    a death `_mark_dead` has already reported properly.
+    """
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
 
 
 def _answered(fut: asyncio.Future[dict]) -> bool:

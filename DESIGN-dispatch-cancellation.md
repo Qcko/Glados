@@ -307,9 +307,16 @@ indeterminate does not count toward the consecutive-failure breaker.
 
 ## Carried, not designed here
 
-- `_try_restart` nulls `_proc`/`_reader_task` without killing, so the
-  `_mark_dead("reader crashed")` path orphans a live child and leaks a Chrome
-  process. Adjacent, real, and should call `_stop_child()` first.
+- ~~`_try_restart` orphans a live child on the `_mark_dead("reader crashed")`
+  path.~~ **Done 28-08-2026**: it calls `_stop_child()` before respawning.
+  Note what that trades, because it cuts against `sleep()`'s rule elsewhere in
+  this document. `sleep()` refuses to stop a server with an abandoned call
+  precisely so the reaper cannot kill a child mid-write -- but on the
+  crashed-reader path `_mark_dead` has already cleared `_abandoned`, so the
+  restart kills blind, and a mutating write in flight becomes an unknown
+  outcome. That is the right trade: the alternative is the orphan, and the
+  child is unreachable either way once its reader is gone. It is a deliberate
+  exception to the no-kill-mid-write rule, not an oversight.
 - A turn-level interrupt raises `CancelledError` through `dispatch`, which
   catches only `TimeoutError` -- so an interrupted mutating call records no
   indeterminate marker anywhere even though the same zombie exists. Slice 1

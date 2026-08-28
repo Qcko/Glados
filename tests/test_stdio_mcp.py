@@ -307,6 +307,65 @@ sys.exit(0)
         await server.aclose()
 
 
+# Answers `initialize`, then replies to anything else with a bare JSON number.
+# The reader does `msg.get("id")` on that, raises AttributeError, and dies --
+# the `reader crashed` death, where the CHILD IS STILL ALIVE. The sleep keeps it
+# that way, which is the whole point: an EOF death and a crashed-reader death
+# leave the process in opposite states.
+_READER_KILLER = """
+import json, sys, time
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    req = json.loads(line)
+    rid = req.get("id")
+    m = req.get("method")
+    if rid is None:
+        continue
+    if m == "initialize":
+        out = {"jsonrpc":"2.0","id":rid,"result":{
+            "protocolVersion":"2024-11-05",
+            "capabilities":{"tools":{}},
+            "serverInfo":{"name":"crasher","version":"0.1"}}}
+        print(json.dumps(out)); sys.stdout.flush()
+    else:
+        print("123"); sys.stdout.flush()
+        time.sleep(30)
+"""
+
+
+async def test_restart_reaps_a_child_whose_reader_crashed() -> None:
+    """A restart must not orphan the process it is replacing.
+
+    `_mark_dead` has two causes and only one means the child exited. EOF on
+    stdout does; a crashed reader does not -- there the process is alive with
+    nobody reading it, and for the Dunnes server that is a leaked browser for
+    the rest of the session.
+    """
+    server = StdioServer(
+        sys.executable,
+        ["-c", _READER_KILLER],
+        server_id="crasher",
+        restart_backoff_s=0.0,
+    )
+    await server.start()
+    try:
+        await server.initialize()
+        orphan = server._proc  # noqa: SLF001
+        assert orphan is not None
+
+        result = await server.call_tool("boom", {})
+        assert not result.ok
+        assert server._dead  # noqa: SLF001
+        assert orphan.returncode is None  # still running -- nobody read it
+
+        assert await server._try_restart()  # noqa: SLF001
+        assert orphan.returncode is not None  # reaped, not orphaned
+        assert server._proc is not orphan  # noqa: SLF001
+    finally:
+        await server.aclose()
+
+
 # ---- Lazy spawn + idle reap (ARCH section 13) ---------------------------------
 
 
