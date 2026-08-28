@@ -13,6 +13,7 @@ import base64
 import json
 import logging
 import re
+import hashlib
 import uuid
 from contextlib import aclosing
 from dataclasses import dataclass
@@ -61,6 +62,7 @@ from .turn_outcome import (
     classify,
     said_nothing,
 )
+from ..servers.room_intercom import MAX_MESSAGE_CHARS, SPEAK_INTO
 from .utterance import is_action_request, is_time_request
 
 log = logging.getLogger(__name__)
@@ -246,6 +248,47 @@ def _in_flight_key(call: LLMToolCall) -> tuple[str, str]:
         f"{call.server}.{call.name}",
         json.dumps(call.args, sort_keys=True, default=str),
     )
+
+
+def _took_effect(call: LLMToolCall, result: MCPCallResult) -> bool:
+    """False for a tool that answered successfully while changing nothing.
+
+    Only the intercom can do this: it reports a refusal as `ok=True` so a
+    message that was never deliverable does not fail the whole turn. Recorded
+    as a mutation it would make the recheck escape hatch answer "yes, that went
+    through" about a message nobody heard, and would trip `may_have_mutated`
+    into disabling this turn's confabulation recovery."""
+    if f"{call.server}.{call.name}" != SPEAK_INTO:
+        return True
+    return (result.content or {}).get("status") == "queued"
+
+
+def _subject_args(call: LLMToolCall) -> dict | None:
+    """The arguments the claim check may treat as what a call was ABOUT.
+
+    The intercom's argument is a sentence the model wrote, not a subject it
+    acted on. Harvesting it would put the model's own prose into the words that
+    corroborate its claims -- so "I took the milk out" spoken into another room
+    would excuse an invented "Milk removed from cart" in the same turn."""
+    if f"{call.server}.{call.name}" == SPEAK_INTO:
+        return None
+    return call.args
+
+
+def _intercom_refusal(reason: str) -> MCPCallResult:
+    """A refusal the model can read out. `ok=True` on purpose: the capability
+    answered correctly, and a False here would read as an unrecovered tool
+    error and fail the whole turn over a message that was never deliverable."""
+    return MCPCallResult(ok=True, content={"status": "refused", "reason": reason})
+
+
+def _spoken_message(raw: str) -> str:
+    """What is safe to hand to TTS. `_strip_markdown_for_tts` downstream is a
+    prosody fix, not a sanitiser -- it bounds neither length nor character set,
+    and this text is model-authored from an utterance that may itself have been
+    shaped by untrusted bytes."""
+    printable = "".join(ch for ch in raw if ch.isprintable() or ch.isspace())
+    return " ".join(printable.split())[:MAX_MESSAGE_CHARS].strip()
 
 
 def _is_barge_in(text: str) -> bool:
@@ -1720,11 +1763,13 @@ class Organizer:
                     denied = True
                     result = MCPCallResult(ok=False, error="user denied")
                 else:
-                    result = await self.mcp.dispatch(
-                        tc.server, tc.name, tc.args, envelope
+                    result = await self._dispatch_or_answer(
+                        tc, envelope, session_id, room_id, trace, outcome
                     )
             else:
-                result = await self.mcp.dispatch(tc.server, tc.name, tc.args, envelope)
+                result = await self._dispatch_or_answer(
+                    tc, envelope, session_id, room_id, trace, outcome
+                )
             if mutating and result.indeterminate and not denied:
                 outcome.in_flight.add(_in_flight_key(tc))
             await self._broadcast(
@@ -1752,9 +1797,9 @@ class Organizer:
                 outcome.record_tool(
                     f"{tc.server}.{tc.name}",
                     result.ok,
-                    mutating=mutating,
+                    mutating=mutating and _took_effect(tc, result),
                     indeterminate=result.indeterminate,
-                    args=tc.args,
+                    args=_subject_args(tc),
                 )
             # Cap AFTER the broadcast and the trace event above, so the desk
             # client and `traces/` keep the whole result and only the SPOKEN
@@ -1796,6 +1841,103 @@ class Organizer:
                     content=wrapped,
                 )
             )
+
+    async def _dispatch_or_answer(
+        self,
+        tc: LLMToolCall,
+        envelope: CallEnvelope,
+        session_id: str,
+        room_id: str,
+        trace,
+        outcome: TurnRecord,
+    ) -> MCPCallResult:
+        """Send the call to its server, unless it is one the Organizer owns.
+
+        `room.speak_into` is declared in the registry so the model can see it,
+        but its effect is audio in another room rather than content returned to
+        this turn -- so it is answered here and never dispatched. Intercepting
+        BEFORE `mcp.dispatch` is what keeps it out of the registry's timeout:
+        an announcement must never come back `indeterminate`."""
+        if f"{tc.server}.{tc.name}" != SPEAK_INTO:
+            return await self.mcp.dispatch(tc.server, tc.name, tc.args, envelope)
+        return await self._speak_into_room(tc, session_id, room_id, trace, outcome)
+
+    async def _speak_into_room(
+        self,
+        tc: LLMToolCall,
+        session_id: str,
+        room_id: str,
+        trace,
+        outcome: TurnRecord,
+    ) -> MCPCallResult:
+        """Hand a message to another room's queue. Returns synchronously.
+
+        Never waits on the target room. Waiting is what would put this call
+        past the dispatch budget and back into the `indeterminate` state
+        `DESIGN-dispatch-cancellation.md` exists to remove -- so the answer is
+        always one of queued / refused, decided here and now. Refusals may
+        state device facts (no speaker) and must not state occupancy: this is
+        the one direction where the model learns about a room it is not in.
+        """
+        target = str(tc.args.get("room") or "").strip()
+        message = _spoken_message(str(tc.args.get("message") or ""))
+        if not message:
+            return _intercom_refusal("there was no message to pass on")
+        if target == room_id:
+            return _intercom_refusal(
+                "that is the room you are already in -- just say it here"
+            )
+        if not self._room_has_speaker(target):
+            return _intercom_refusal(f"no speaker is connected in the {target}")
+        if target in outcome.announced_rooms:
+            return _intercom_refusal(
+                f"a message has already been passed to the {target} this turn"
+            )
+        outcome.announced_rooms.add(target)
+        spoken = f"Message from the {room_id}. {message}"
+        log.info(
+            "intercom: %s -> %s, %d chars, hash=%s",
+            room_id,
+            target,
+            len(spoken),
+            hashlib.sha256(spoken.encode("utf-8")).hexdigest()[:12],
+        )
+        trace.event("intercom_queued", target_room=target, chars=len(spoken))
+        self._queues.enqueue(target, lambda: self._deliver_intercom(target, spoken))
+        return MCPCallResult(ok=True, content={"status": "queued", "room": target})
+
+    async def _deliver_intercom(self, room_id: str, text: str) -> None:
+        """Speak a handed-over message on the target room's worker.
+
+        Under a synthetic session bound to the TARGET room, not the room that
+        sent it. That is what keeps the target coherent: its own gate and
+        `PlaybackDone` key to a session that belongs to it, and `_inflight`
+        holds the announcement against its room -- so "stop" spoken there
+        cancels this stream, and cannot reach the turn that sent it."""
+        session_id = f"intercom-{uuid.uuid4().hex}"
+        task = asyncio.current_task()
+        if task is not None:
+            self._inflight[session_id] = (task, room_id)
+        trace = self.traces.open(session_id)
+        cancelled = False
+        try:
+            trace.event("intercom_speaking", room_id=room_id, chars=len(text))
+            await self._broadcast(
+                room_id, AssistantDelta(session_id=session_id, text=text)
+            )
+            await self._speak(session_id, room_id, text, trace)
+        except asyncio.CancelledError:
+            cancelled = True
+            trace.event("cancelled")
+        finally:
+            entry = self._inflight.get(session_id)
+            if entry is not None and entry[0] is task:
+                del self._inflight[session_id]
+            trace.close()
+            if cancelled:
+                await asyncio.shield(
+                    self._broadcast(room_id, Cancelled(session_id=session_id))
+                )
 
     def _capped_for_speech(
         self, spec: "ToolSpec | None", result: MCPCallResult

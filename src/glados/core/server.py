@@ -38,6 +38,7 @@ from ..brain.router import Router
 from ..brain.tool_router import ServerScope, ToolRouter
 from ..mcp.registry import MCPRegistry
 from ..mcp.stdio_client import StdioServer, StdioToolProxy
+from ..servers.room_intercom import SpeakIntoTool
 from ..servers.time_server import NowTool
 from ..servers.toy_server import TOY_TOOLS
 from .adapters import LLM, STT, TTS, VAD
@@ -414,6 +415,20 @@ def _build_tts(cfg: TTSConfig) -> TTS:
     return FakeTTS()
 
 
+def _register_intercom(mcp: MCPRegistry, rooms_cfg: RoomsConfig) -> None:
+    """Declare `room.speak_into` over the rooms that CONFIGURE a speaker.
+
+    Configured, not connected: a room whose speaker is briefly offline must
+    stay addressable, so an unplugged Pi is a spoken refusal at call time
+    rather than a room name the model has never heard of. Registering nothing
+    when no room has a speaker keeps the capability off single-room installs
+    entirely.
+    """
+    rooms = sorted({c.room_id for c in rooms_cfg.clients if c.role == "speaker"})
+    if rooms:
+        mcp.register(SpeakIntoTool(rooms))
+
+
 async def _warmup(stt: STT, tts: TTS) -> None:
     """Hide first-inference latency by exercising each backend once on
     server boot. Real Whisper/Piper load weights at construct time, but
@@ -453,6 +468,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     traces = TraceStore(glados_cfg.server.traces_dir)
     mcp = MCPRegistry()
     mcp.register(NowTool())
+    _register_intercom(mcp, rooms_cfg)
     for tool in TOY_TOOLS:
         mcp.register(tool)
     # Subprocess MCP servers are wired in the lifespan startup because they

@@ -100,6 +100,10 @@ class TurnRecord:
     # answers it from here instead of putting it back on the wire. Per turn,
     # because a fresh turn is a fresh decision by the user.
     in_flight: set[tuple[str, str]] = field(default_factory=set)
+    # Rooms this turn has already handed a spoken message to. One compromised
+    # turn must not be able to loop the intercom, and a model that re-emits the
+    # same call must not double-announce.
+    announced_rooms: set[str] = field(default_factory=set)
 
     def record_tool(
         self,

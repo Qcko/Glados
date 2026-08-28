@@ -48,6 +48,10 @@ SYSTEM_PROMPT = (
     "returned successfully in this turn. Never claim you added, removed, or "
     "changed anything unless you actually called that tool -- if it still needs "
     "doing, call it.\n"
+    "The house has rooms with speakers. To pass a message to someone in a "
+    "different room, call the tool that speaks into that room -- do not just "
+    "say it where you are. It is handed to that room rather than spoken at "
+    "once, so tell the user you have passed it on, not that it was heard.\n"
     + EXTERNAL_CONTENT_RULE + "\n"
     # Repeated last for recency: the 14b/Q5 local model otherwise drifts into
     # another language (often mid-reply) despite the instruction up top. Stating
