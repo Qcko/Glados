@@ -48,6 +48,12 @@ class MCPCallResult(BaseModel):
     ok: bool
     content: dict | None = None
     error: str | None = None
+    # The call was sent and then given up on, so whether it took effect is
+    # unknown -- distinct from a failure, where nothing happened. Set by the
+    # dispatcher on timeout and never by a tool: it is a fact about the wait,
+    # not about what the tool does. What to tell the model, and whether a
+    # replay is now unsafe, is the organizer's to decide.
+    indeterminate: bool = False
 
 
 class Tool(Protocol):
@@ -98,7 +104,14 @@ class MCPRegistry:
             return result
         except asyncio.TimeoutError:
             _log.warning("dispatch %s timeout after %ss", key, effective)
-            return MCPCallResult(ok=False, error=f"timeout after {effective}s calling {key}({rendered_args})")
+            # Not a failure: the request went out and the tool may still be
+            # running it. Reporting "it failed" is what makes the model retry a
+            # write that then lands twice.
+            return MCPCallResult(
+                ok=False,
+                indeterminate=True,
+                error=f"timeout after {effective}s calling {key}({rendered_args})",
+            )
         except Exception as e:  # noqa: BLE001 - report any tool error to the LLM
             _log.exception("dispatch %s raised", key)
             return MCPCallResult(ok=False, error=f"{type(e).__name__} calling {key}({rendered_args}): {e}")

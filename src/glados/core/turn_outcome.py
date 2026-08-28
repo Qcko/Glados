@@ -63,6 +63,11 @@ class ToolRecord:
     # the claim check below, which asks whether the thing the reply says was
     # changed is the thing any successful call actually touched.
     subjects: tuple[str, ...] = ()
+    # The call timed out after it was sent, so whether it landed is unknown.
+    # `ok` stays False -- the turn really did fail, and saying otherwise would
+    # report success for a write that may never have happened -- but every
+    # guard asking "is it safe to run this again" must treat it as a maybe.
+    indeterminate: bool = False
 
 
 @dataclass
@@ -89,24 +94,49 @@ class TurnRecord:
     # flag carried across with them.
     untrusted_seen: bool = False
 
+    # Mutating calls this turn sent but never got an answer to, keyed by
+    # `(server.name, canonical args)`. Re-dispatching one of these would be the
+    # duplicate write the whole design exists to prevent, so the organizer
+    # answers it from here instead of putting it back on the wire. Per turn,
+    # because a fresh turn is a fresh decision by the user.
+    in_flight: set[tuple[str, str]] = field(default_factory=set)
+
     def record_tool(
         self,
         tool: str,
         ok: bool,
         *,
         mutating: bool = False,
+        indeterminate: bool = False,
         args: dict | None = None,
     ) -> None:
         self.tools.append(
-            ToolRecord(tool=tool, ok=ok, mutating=mutating, subjects=_subjects(args))
+            ToolRecord(
+                tool=tool,
+                ok=ok,
+                mutating=mutating,
+                indeterminate=indeterminate,
+                subjects=_subjects(args),
+            )
         )
 
     def made_successful_mutation(self) -> bool:
-        """True if a side-effecting tool call landed this turn. The specialist
-        escalation path checks this before re-running a `failed` turn: a turn
-        that already mutated external state must not be replayed cold, or the
-        side effect (cart write, checkout, send) fires twice."""
+        """True if a side-effecting tool call is KNOWN to have landed this turn.
+
+        The goal check's predicate: did the thing the user asked for actually
+        happen. Deliberately not the replay predicate -- see
+        `may_have_mutated`, which asks the different question."""
         return _has_successful_mutation(self.tools)
+
+    def may_have_mutated(self) -> bool:
+        """True if external state might already have changed this turn.
+
+        "Did the goal get achieved" and "is it safe to do this again" are
+        different questions, and every replay path wants this one. A mutating
+        call that timed out is recorded `ok=False`, so asking
+        `made_successful_mutation` there answers "nothing landed, safe to
+        replay" about a cart write that may be executing as it answers."""
+        return any(t.mutating and (t.ok or t.indeterminate) for t in self.tools)
 
 
 def classify(turn: TurnRecord) -> TurnOutcomeKind:
@@ -246,7 +276,12 @@ def claimed_a_change_it_did_not_make(turn: TurnRecord) -> bool:
     if not claims:
         return False
 
-    landed = [t for t in turn.tools if t.ok and t.mutating]
+    # A mutating call that timed out may well have made the change the reply
+    # describes, so it excuses a claim exactly as a successful one does --
+    # but only a claim about ITS OWN subject. Bailing on the whole turn
+    # instead would let one outstanding call excuse every invented claim
+    # beside it, which is the failure `_claim_clauses` exists to prevent.
+    landed = [t for t in turn.tools if t.mutating and (t.ok or t.indeterminate)]
     if not landed:
         # Claimed a change with nothing side-effecting behind it at all.
         return True

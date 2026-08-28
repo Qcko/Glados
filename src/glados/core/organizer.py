@@ -190,6 +190,26 @@ _SILENT_TURN_AFTER_MUTATION_REPLIES = (
     "It landed, but I couldn't get the words out. Check whether it worked rather than repeating it.",
 )
 
+# What the model is told about a mutating call that timed out. GLaDOS-authored
+# and emitted OUTSIDE the `<external>` wrapper on purpose: the system prompt
+# tells the model that anything inside that wrapper is data rather than
+# instructions, so an instruction delivered there is one it has been told to
+# ignore. It explains; the in-flight ledger below is what actually enforces.
+_INDETERMINATE_NOTE = (
+    "GLaDOS note, not tool output: that call was sent but never answered, so it "
+    "may already have taken effect. Do not issue it again. Say the outcome is "
+    "uncertain rather than claiming it worked or failed."
+)
+
+# Answer given to a re-issue of a call already outstanding this turn. It never
+# reaches the wire, which is the point: prompt-level guidance is unreliable on
+# the small local models this runs on, so the duplicate write is refused in
+# code and the model is told why.
+_ALREADY_ATTEMPTED = (
+    "not sent: this exact call is already outstanding from earlier in this turn "
+    "and its outcome is unknown"
+)
+
 # Upper bound on how many sessions' conversation buffers are held in RAM at
 # once. Far above any realistic concurrent-session count; exists only so a long
 # uptime accumulating dead sessions can't grow the history dict without limit.
@@ -217,6 +237,15 @@ _BARGE_IN_RE = re.compile(
     r"(?:[\s,]+(?:glados|please))*[\s.!?,]*$",
     re.IGNORECASE,
 )
+
+
+def _in_flight_key(call: LLMToolCall) -> tuple[str, str]:
+    """Identity of a tool call for the per-turn in-flight ledger. Arguments are
+    canonicalised so key order cannot disguise a re-issue as a new call."""
+    return (
+        f"{call.server}.{call.name}",
+        json.dumps(call.args, sort_keys=True, default=str),
+    )
 
 
 def _is_barge_in(text: str) -> bool:
@@ -626,7 +655,7 @@ class Organizer:
             if (
                 scoped
                 and classify(outcome) == "failed"
-                and not outcome.made_successful_mutation()
+                and not outcome.may_have_mutated()
                 and not said_nothing(outcome)
             ):
                 # Capability recovery (ARCH section 13) runs BEFORE difficulty
@@ -634,9 +663,11 @@ class Organizer:
                 # needed, so re-drive ONCE on the FULL set (same cheap brain)
                 # from clean prior history. `scoped` means the scope was a strict
                 # subset -- not necessarily that THE relevant tool was dropped.
-                # Bounded: only on `failed` with no mutation (so a real side
-                # effect can't double-fire). A later escalation then retries the
-                # full set, not the scoped one.
+                # Bounded: only on `failed` where nothing MAY have mutated
+                # (so a real side effect can't double-fire) -- a mutating call
+                # that timed out counts, because the child may be running it as
+                # this decides. A later escalation then retries the full set,
+                # not the scoped one.
                 #
                 # A turn that said NOTHING is excluded: that failure is the
                 # model exhausting its token budget before it started replying,
@@ -664,8 +695,9 @@ class Organizer:
                 # outcome, not the one that already failed.
                 answered_by = self._specialist_llm or llm
             kind = classify(outcome)
-            if kind == "confabulated" and not outcome.made_successful_mutation():
-                # Nothing landed, so nothing can fire twice -- the same
+            if kind == "confabulated" and not outcome.may_have_mutated():
+                # Nothing landed and nothing is outstanding, so nothing can
+                # fire twice -- the same
                 # interlock the scope fallback and the specialist retry use,
                 # and the reason a confabulated turn is the one failure that is
                 # SAFE to replay. Measured 25-08-2026 on "show me my cart and
@@ -1067,16 +1099,18 @@ class Organizer:
         Specialist turns never escalate (there's nowhere further to go), and
         escalation needs the specialist brain wired and the feature enabled.
 
-        A turn that already landed a successful mutating call is never
-        escalated even when it classifies `failed` (loop exhaustion, or a
-        later unrelated tool error): re-driving the user request cold on the
-        specialist would fire that side effect a second time (double cart-add /
-        checkout). Better a visible primary `failed` than a duplicated mutation."""
+        A turn that MAY already have mutated external state is never escalated
+        even when it classifies `failed` (loop exhaustion, or a later unrelated
+        tool error): re-driving the user request cold on the specialist would
+        fire that side effect a second time (double cart-add / checkout). Better
+        a visible primary `failed` than a duplicated mutation. "May" is the
+        operative word -- a mutating call that timed out is recorded `ok=False`
+        and is exactly the case where a replay is least safe."""
         return (
             target == "primary"
             and self._escalate_on_failed
             and self._specialist_llm is not None
-            and not outcome.made_successful_mutation()
+            and not outcome.may_have_mutated()
             and classify(outcome) == "failed"
         )
 
@@ -1368,12 +1402,15 @@ class Organizer:
         """The model produced no reply. Speak an honest line instead of nothing,
         and put the same line where the empty reply would have gone in history.
 
-        Which line depends on whether the turn already CHANGED something. A
-        silent turn can have landed a successful mutating call and merely failed
-        to narrate it. The ordinary lines invite the user to ask again, which is
-        exactly the wrong advice there -- reissuing "add milk" adds it twice --
-        so those turns get lines that point at the recheck escape hatch instead,
-        which answers from the dispatch record. Hence the split.
+        Which line depends on whether the turn MAY already have changed
+        something. A silent turn can have landed a successful mutating call and
+        merely failed to narrate it. The ordinary lines invite the user to ask
+        again, which is exactly the wrong advice there -- reissuing "add milk"
+        adds it twice -- so those turns get lines that point at the recheck
+        escape hatch instead, which answers from the dispatch record. Hence the
+        split. A mutating call that timed out takes the same branch: whether it
+        landed is unknown, and "ask me again" is the one answer that is wrong
+        either way.
 
         Committing the line matters as much as speaking it: the user HEARD this,
         so a history recording an empty assistant turn no longer matches the
@@ -1387,7 +1424,7 @@ class Organizer:
         correct, so this delta stands alone and needs no leading space."""
         replies = (
             _SILENT_TURN_AFTER_MUTATION_REPLIES
-            if outcome.made_successful_mutation()
+            if outcome.may_have_mutated()
             else _SILENT_TURN_REPLIES
         )
         reply = replies[self._silent_reply_idx % len(replies)]
@@ -1624,6 +1661,15 @@ class Organizer:
                 args=tc.args,
             )
             spec = self.mcp.spec_for(tc.server, tc.name)
+            # A tool mutates external state if it's explicitly flagged
+            # `mutating` OR it's confirmation-gated (gated tools always mutate).
+            # Confirmation alone is NOT sufficient -- Dunnes cart writes are
+            # un-gated side effects, so they carry `mutating=True` directly;
+            # without this an un-gated add would look like a read and the
+            # goal-check would wrongly fail a turn that actually added.
+            mutating = bool(
+                spec is not None and (spec.mutating or spec.requires_confirmation)
+            )
             denied = False
             # A text-parsed call has no provenance -- the same channel
             # carries <external> content -- so a mutating one is confirmed
@@ -1640,7 +1686,29 @@ class Organizer:
                 or (tc.from_text and spec.mutating)
                 or (outcome.untrusted_seen and spec.mutating)
             )
-            if needs_confirm:
+            answered_from_ledger = _in_flight_key(tc) in outcome.in_flight
+            if answered_from_ledger:
+                # Answered from the ledger, never re-sent. The first attempt is
+                # still running somewhere; issuing it again is the duplicate
+                # cart line this whole design exists to prevent. Ahead of the
+                # confirmation gate as well as the dispatch, so a re-issue
+                # cannot re-prompt the room for something already outstanding.
+                result = MCPCallResult(
+                    ok=False, indeterminate=True, error=_ALREADY_ATTEMPTED
+                )
+                log.warning(
+                    "refused re-issue of outstanding %s.%s in session %s",
+                    tc.server,
+                    tc.name,
+                    session_id,
+                )
+                trace.event(
+                    "reissue_refused",
+                    call_id=tc.call_id,
+                    server=tc.server,
+                    name=tc.name,
+                )
+            elif needs_confirm:
                 granted = await self._await_confirmation(
                     session_id=session_id,
                     room_id=room_id,
@@ -1657,6 +1725,8 @@ class Organizer:
                     )
             else:
                 result = await self.mcp.dispatch(tc.server, tc.name, tc.args, envelope)
+            if mutating and result.indeterminate and not denied:
+                outcome.in_flight.add(_in_flight_key(tc))
             await self._broadcast(
                 room_id,
                 ToolResult(
@@ -1678,17 +1748,13 @@ class Organizer:
             # failure -- don't let it poison the turn outcome as `failed` (and
             # so spuriously escalate to the v2.6 specialist router). Skip recording
             # it entirely; the model still sees `user denied` in the transcript.
-            #
-            # A tool mutates external state if it's explicitly flagged
-            # `mutating` OR it's confirmation-gated (gated tools always mutate).
-            # Confirmation alone is NOT sufficient -- Dunnes cart writes are
-            # un-gated side effects, so they carry `mutating=True` directly;
-            # without this an un-gated add would look like a read and the
-            # goal-check would wrongly fail a turn that actually added.
             if not denied:
-                mutating = bool(spec is not None and (spec.mutating or spec.requires_confirmation))
                 outcome.record_tool(
-                    f"{tc.server}.{tc.name}", result.ok, mutating=mutating, args=tc.args
+                    f"{tc.server}.{tc.name}",
+                    result.ok,
+                    mutating=mutating,
+                    indeterminate=result.indeterminate,
+                    args=tc.args,
                 )
             # Cap AFTER the broadcast and the trace event above, so the desk
             # client and `traces/` keep the whole result and only the SPOKEN
@@ -1698,7 +1764,7 @@ class Organizer:
             raw = json.dumps(content) if result.ok else (result.error or "error")
             # `spec` already fetched above for the requires_confirmation
             # check -- reuse rather than another registry lookup.
-            if spec is not None and spec.untrusted:
+            if spec is not None and spec.untrusted and not answered_from_ledger:
                 # Defang any literal `</external>` inside the payload so an
                 # attacker-controlled page can't close the wrapper early and
                 # promote the trailing text to "trusted" status. The escape
@@ -1710,7 +1776,19 @@ class Organizer:
                 # payload's. Every later mutating call this turn is confirmed.
                 outcome.untrusted_seen = True
             else:
+                # A ledger answer takes this branch even for an untrusted tool.
+                # It never went to the wire, so it ingested no external bytes
+                # and must not set `untrusted_seen`, which is session-sticky and
+                # would gate every later mutating call in the session behind a
+                # room confirmation. GLaDOS wrote that string, so wrapping it
+                # would also hand the model our own refusal inside the region
+                # the system prompt tells it to ignore.
                 wrapped = raw
+            if mutating and result.indeterminate:
+                # Appended after the wrapper closes, so this line is GLaDOS
+                # speaking to the model rather than payload the model has been
+                # told to treat as data.
+                wrapped = f"{wrapped}\n{_INDETERMINATE_NOTE}"
             messages.append(
                 LLMMessage(
                     role="tool",

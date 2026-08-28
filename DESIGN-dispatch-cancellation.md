@@ -1,18 +1,23 @@
 # DESIGN -- a dispatch timeout must stop claiming the write failed
 
-Status: **slice 1 implemented except the cancellation send; slice 2 not
-started.** Roster run 28-08-2026 (Architect, Security,
-Concurrency/Reliability) against a four-part plan; two of those four parts were
-found to introduce new instances of the bug they targeted, and the design below
-is the corrected shape.
+Status: **implemented, except the cancellation send.** Roster run 28-08-2026
+(Architect, Security, Concurrency/Reliability) against a four-part plan; two of
+those four parts were found to introduce new instances of the bug they targeted,
+and the design below is the corrected shape.
 
-Landed 28-08-2026 in `src/glados/mcp/stdio_client.py`: the `finally` that stops
-leaking `_pending`, the bounded `_abandoned` map, `sleep()` refusing while it is
-non-empty, the bounded write, the degraded fast-fail, and the late-arrival
-WARNING. Deferred by decision: the `notifications/cancelled` send, which buys
-nothing until the Dunnes C# server honours it. Everything under "Slice 2 --
-semantics" is untouched, so the model is still told a timed-out mutating call
-failed.
+Slice 1 landed 28-08-2026 in `src/glados/mcp/stdio_client.py`: the `finally`
+that stops leaking `_pending`, the bounded `_abandoned` map, `sleep()` refusing
+while it is non-empty, the bounded write, the degraded fast-fail, and the
+late-arrival WARNING.
+
+Slice 2 landed the same day across `registry.py`, `turn_outcome.py` and
+`organizer.py`: `MCPCallResult.indeterminate` set by the dispatcher on timeout,
+the `ToolRecord` marker, `may_have_mutated()` gating the replay sites, the
+per-turn in-flight ledger, the advisory outside the `<external>` wrapper, and
+the claim check failing open.
+
+Deferred by decision: the `notifications/cancelled` send, which buys nothing
+until the Dunnes C# server honours it.
 
 ## The problem
 
@@ -275,12 +280,21 @@ fixes a live idle-reap leak and removes a real kill-the-child-mid-write hazard
 today, against any stdio server, with no dependency on the C# side. That is why
 slice 1 landed without the send.
 
-What a user can still hit while slice 2 is outstanding: the model is told a
-timed-out mutating call *failed*, so it may still retry a write that lands
-later. The degraded fast-fail now makes that retry return immediately with
-"state is unknown" instead of issuing a second write, which narrows the
-duplicate-cart-line window but does not close it -- the moment the late
-response clears the degraded state, a retry goes through.
+The ledger matches a re-issue on the EXACT call -- qualified name plus
+canonicalised arguments. Argument order cannot disguise one, but
+`{"item": "Milk"}` after `{"item": "milk"}`, or `{"qty": 1}` after
+`{"qty": "1"}`, is a second write. That is a deliberate boundary: normalising
+harder risks refusing a genuinely different request, which is the failure the
+user cannot see. It rests on the assumption that a model re-emitting a call
+re-emits its arguments the same way, which is worth re-checking against real
+traces rather than trusting.
+
+With slice 2 landed, the duplicate write is refused in two independent
+places: the transport fast-fails while the call is outstanding, and the ledger
+refuses a re-issue of that exact call for the rest of the turn even after the
+late response clears the degraded state. What remains is unavoidable without
+server-side cooperation -- the user is told the outcome is uncertain, because
+it is.
 
 ## Documentation that is currently false
 

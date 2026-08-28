@@ -200,9 +200,13 @@ LLM.
   not the work: a stdio child keeps executing a request the client gave up
   on. Such a call is recorded as abandoned, the server is degraded until it
   answers (later calls fail fast, and the idle reaper may not kill a child
-  mid-write), and the late response is logged. Asking the server to stop --
-  `notifications/cancelled` -- and telling the model the outcome is
-  indeterminate rather than failed are both still to come; see
+  mid-write), and the late response is logged. A timed-out *mutating* call is
+  therefore **indeterminate, not failed**: every replay path is gated on "may
+  this turn have mutated" rather than "did it", a per-turn ledger refuses a
+  re-issue of the same call in code, and the model is told the outcome is
+  unknown outside the `<external>` wrapper. Asking the server to actually stop
+  -- `notifications/cancelled` -- is still to come, and honouring it would be
+  the server's discretion in any case; see
   `DESIGN-dispatch-cancellation.md`.
 - **Permission gates on every side-effecting tool,** not only money/messages.
   Quest creation, calendar writes, basket changes, search refinement that
