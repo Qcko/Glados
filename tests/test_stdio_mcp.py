@@ -11,6 +11,8 @@ Two layers:
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import sys
 from pathlib import Path
 
@@ -385,6 +387,205 @@ async def test_sleep_refuses_while_call_in_flight() -> None:
         server._active_calls = 0  # noqa: SLF001
         await server.sleep()
         assert not server.is_resident()  # now idle -- sleeps
+    finally:
+        await server.aclose()
+
+
+# ---- Abandoned calls: dispatch timeout / interrupt (DESIGN-dispatch-cancellation) ----
+
+
+# Answers `initialize` promptly, then takes a full second over any
+# `tools/call` -- long enough for the caller to give up first. Single
+# threaded on purpose: a later request queues behind the slow one exactly
+# as the real Dunnes server queues on its `lock (_gate)`.
+_SLOW_SERVER = """
+import json, sys, time
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    req = json.loads(line)
+    rid = req.get("id")
+    m = req.get("method")
+    if rid is None:
+        continue
+    if m == "initialize":
+        out = {"jsonrpc":"2.0","id":rid,"result":{
+            "protocolVersion":"2024-11-05",
+            "capabilities":{"tools":{}},
+            "serverInfo":{"name":"slow","version":"0.1"}}}
+    elif m == "tools/call":
+        time.sleep(1.0)
+        out = {"jsonrpc":"2.0","id":rid,"result":{
+            "content":[{"type":"text","text":"{}"}],
+            "isError":False}}
+    else:
+        out = {"jsonrpc":"2.0","id":rid,"error":{"code":-32601,"message":"unknown"}}
+    print(json.dumps(out)); sys.stdout.flush()
+"""
+
+
+# Answers `initialize`, then stops reading stdin entirely while staying
+# alive. This is the pipe-buffer wedge, and it cannot be reproduced with an
+# in-memory transport double.
+_DEAF_SERVER = """
+import json, sys, time
+line = sys.stdin.readline()
+req = json.loads(line)
+out = {"jsonrpc":"2.0","id":req["id"],"result":{
+    "protocolVersion":"2024-11-05",
+    "capabilities":{"tools":{}},
+    "serverInfo":{"name":"deaf","version":"0.1"}}}
+print(json.dumps(out)); sys.stdout.flush()
+time.sleep(30)
+"""
+
+
+async def test_timeout_abandons_the_call_instead_of_leaking_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A caller that gives up leaves a request the child is still running.
+
+    It must land in `_abandoned` -- not leak in `_pending` (which silently
+    disables idle reap forever) and not vanish (which would let the reaper
+    kill the child mid-write). While it is outstanding the server is
+    degraded, and the late response is what clears it.
+    """
+    from glados.core.server import _reap_idle_servers
+
+    loop = asyncio.get_running_loop()
+    server = _make_inline_server(_SLOW_SERVER, server_id="slow")
+    await server.start()
+    try:
+        with caplog.at_level(logging.WARNING):
+            await server.initialize()
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(server.call_tool("slow_write", {}), 0.2)
+
+            assert server._pending == {}  # noqa: SLF001 - no leak
+            assert server._active_calls == 0  # noqa: SLF001
+            assert not server._write_lock.locked()  # noqa: SLF001
+            abandoned = server._abandoned  # noqa: SLF001
+            assert [tool for tool, _ in abandoned.values()] == ["slow_write"]
+
+            # The reaper must not kill a child that is mid-write.
+            await server.sleep()
+            assert server.is_resident()
+            for coro in _reap_idle_servers([(server, 0.0)], loop.time() + 999.0):
+                await coro
+            assert server.is_resident()
+
+            # A later call fails fast rather than queueing behind the zombie
+            # and burning another full budget.
+            started = loop.time()
+            degraded = await server.call_tool("read_state", {})
+            assert not degraded.ok
+            assert "abandoned operation" in degraded.error
+            assert "slow_write" in degraded.error
+            assert loop.time() - started < 0.2
+
+            # The late response is the only evidence that ever arrives.
+            for _ in range(60):
+                if not server._abandoned:  # noqa: SLF001
+                    break
+                await asyncio.sleep(0.05)
+            assert server._abandoned == {}  # noqa: SLF001
+
+        assert "late response for abandoned slow_write" in caplog.text
+        assert "isError=False" in caplog.text
+        # Cleared state means the server is usable again.
+        recovered = await server.call_tool("slow_write", {})
+        assert recovered.ok
+    finally:
+        await server.aclose()
+
+
+async def test_death_clears_abandoned_calls() -> None:
+    """No late response can arrive from a child that is gone, so a dead
+    server must not stay degraded (or unreapable) forever."""
+    server = _make_inline_server(_SLOW_SERVER, server_id="slow")
+    await server.start()
+    try:
+        await server.initialize()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(server.call_tool("slow_write", {}), 0.2)
+        assert server._abandoned  # noqa: SLF001
+        server._mark_dead("test")  # noqa: SLF001
+        assert server._abandoned == {}  # noqa: SLF001
+    finally:
+        await server.aclose()
+
+
+async def test_write_to_a_child_that_stopped_reading_is_bounded() -> None:
+    """An unbounded drain against a wedged child holds the write lock
+    forever, hanging every later call outside any dispatch timeout.
+
+    The bytes are already buffered when the drain gives up, so the child may
+    still run the request whenever it resumes reading -- that makes this an
+    abandoned call, not a clean failure.
+    """
+    loop = asyncio.get_running_loop()
+    server = StdioServer(
+        sys.executable, ["-c", _DEAF_SERVER], server_id="deaf", write_timeout_s=0.5
+    )
+    await server.start()
+    try:
+        await server.initialize()
+        started = loop.time()
+        result = await server.call_tool("echo", {"text": "x" * (2 * 1024 * 1024)})
+        elapsed = loop.time() - started
+        assert not result.ok
+        assert "stopped reading stdin" in result.error
+        assert elapsed < 5.0
+        assert not server._write_lock.locked()  # noqa: SLF001
+        assert server._pending == {}  # noqa: SLF001
+        assert [tool for tool, _ in server._abandoned.values()] == ["echo"]  # noqa: SLF001
+    finally:
+        await server.aclose()
+
+
+async def test_a_call_that_never_left_the_client_is_not_abandoned() -> None:
+    """A write that gave up waiting for the lock put nothing on the wire, so
+    the child cannot be running it and the server must not degrade."""
+    server = StdioServer(
+        sys.executable, ["-c", _SLOW_SERVER], server_id="slow", write_timeout_s=0.05
+    )
+    await server.start()
+    try:
+        await server.initialize()
+        await server._write_lock.acquire()  # noqa: SLF001 - simulate a busy writer
+        try:
+            result = await server.call_tool("never_sent", {})
+        finally:
+            server._write_lock.release()  # noqa: SLF001
+        assert not result.ok
+        assert "write lock still held" in result.error
+        assert server._abandoned == {}  # noqa: SLF001
+        assert server._pending == {}  # noqa: SLF001
+    finally:
+        await server.aclose()
+
+
+async def test_an_abandoned_call_that_never_answers_expires(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The late response is the intended exit from degraded, but a child that
+    hangs without dying never sends one -- and a server that fast-fails every
+    call and can never be reaped is worse than the leak this replaced."""
+    server = StdioServer(
+        sys.executable, ["-c", _SLOW_SERVER], server_id="slow", abandon_ttl_s=0.05
+    )
+    await server.start()
+    try:
+        with caplog.at_level(logging.WARNING):
+            await server.initialize()
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(server.call_tool("slow_write", {}), 0.2)
+            assert server._abandoned  # noqa: SLF001
+            await asyncio.sleep(0.1)
+            await server.sleep()
+        assert server._abandoned == {}  # noqa: SLF001
+        assert not server.is_resident()  # reapable again
+        assert "never answered" in caplog.text
     finally:
         await server.aclose()
 

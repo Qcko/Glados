@@ -18,6 +18,13 @@ the circuit stays open: subsequent calls return a clean
 yet; field signal will tell us if we need one). The bound exists so a
 hard-crashing server (Selenium browser process gone for good) can't burn
 the event loop in a tight respawn loop.
+
+Abandonment semantics: a caller that stops waiting -- a dispatch timeout or
+a user interrupt -- cancels the Python await, not the child's work. That
+request moves to `_abandoned` and the server is degraded until it answers:
+later calls fail fast instead of queueing behind it, and the idle reaper
+refuses to sleep (and so to kill) a child that is still mid-write. See
+`DESIGN-dispatch-cancellation.md`.
 """
 
 from __future__ import annotations
@@ -47,9 +54,40 @@ _MCP_PROTOCOL_VERSION = "2024-11-05"
 # (that's redundant with the connection and breaks the constant).
 _LESSONS_URI = "memory://lessons"
 
+# Cap on remembered abandoned requests. A permanently wedged server would
+# otherwise accumulate one entry per timed-out call for the life of the
+# process; the oldest is forgotten first, since the newest abandoned write
+# is the one whose outcome is still in question.
+_MAX_ABANDONED = 16
+
+# Every write to the child is bounded. A child that has stopped reading
+# stdin fills the pipe buffer, `drain()` never returns, and the write lock
+# is held forever -- hanging every later call in the write, outside any
+# timeout the registry applies.
+_WRITE_TIMEOUT_S = 5.0
+
+# How long a server stays degraded waiting for an abandoned call to answer.
+# Without a bound, a child that hangs without dying takes the server out
+# permanently: every call fast-fails and the reaper never sleeps it. Long
+# enough that a slow browser write is still expected to arrive first.
+_ABANDON_TTL_S = 300.0
+
 
 class StdioServerError(RuntimeError):
     pass
+
+
+class _WriteAttempt:
+    """Whether a message reached the child's pipe before the write failed.
+
+    A cancelled or timed-out `drain()` does not unwrite the bytes already
+    handed to the transport, so the child may still execute the request. The
+    caller needs that distinction to tell a call that never left from one that
+    is now running unattended.
+    """
+
+    def __init__(self) -> None:
+        self.reached_the_child = False
 
 
 class StdioServer:
@@ -64,6 +102,9 @@ class StdioServer:
         max_restarts: int = 3,
         restart_window_s: float = 60.0,
         restart_backoff_s: float = 0.5,
+        max_abandoned: int = _MAX_ABANDONED,
+        write_timeout_s: float = _WRITE_TIMEOUT_S,
+        abandon_ttl_s: float = _ABANDON_TTL_S,
     ) -> None:
         self._command = command
         self._args = list(args)
@@ -74,6 +115,16 @@ class StdioServer:
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
         self._pending: dict[int, asyncio.Future[dict]] = {}
+        # Requests whose caller stopped waiting (dispatch timeout, user
+        # interrupt) but which the child is still executing. `_pending` is
+        # wrong for these: the caller is gone, yet the work is not. Keyed by
+        # request id, carrying the tool name and start time so the late
+        # response can be logged with something a human can act on --
+        # `_pending` carries neither. While this map is non-empty the server
+        # is DEGRADED: it may not be slept (a `kill()` mid-write turns an
+        # unknown outcome into a partially-applied one) and later calls
+        # fast-fail rather than queueing behind the zombie.
+        self._abandoned: dict[int, tuple[str, float]] = {}
         self._next_id = 1
         # Lazy-spawn state (ARCH section 13 "lazy MCP child spawn + idle reap"). A
         # dormant server has no child process but is NOT closed: the next
@@ -109,6 +160,9 @@ class StdioServer:
         self._restart_backoff_s = restart_backoff_s
         self._restart_attempts: list[float] = []
         self._restart_lock = asyncio.Lock()
+        self._max_abandoned = max_abandoned
+        self._write_timeout_s = write_timeout_s
+        self._abandon_ttl_s = abandon_ttl_s
 
     async def start(self) -> None:
         if self._proc is not None:
@@ -174,6 +228,8 @@ class StdioServer:
                 rid = msg.get("id")
                 fut = self._pending.pop(rid, None)
                 if fut is None:
+                    if self._claim_late_response(rid, msg):
+                        continue
                     # Stray response -- id never matched a pending call.
                     # Could be a protocol bug in the server or a parse-
                     # error response with id=null. Log so a stalled call
@@ -186,6 +242,33 @@ class StdioServer:
             raise
         except Exception as e:  # noqa: BLE001 - blanket guard for reader thread
             self._mark_dead(f"reader crashed: {type(e).__name__}: {e}")
+
+    def _claim_late_response(self, rid: object, msg: dict) -> bool:
+        """Match a response against the abandoned map. True if it was one.
+
+        This is the only evidence that ever arrives about an abandoned call:
+        whether the write landed, and how long the child really took. It also
+        ends the degraded state -- the child has finished and is reading again.
+        """
+        entry = self._abandoned.pop(rid, None) if isinstance(rid, int) else None
+        if entry is None:
+            return False
+        tool, started = entry
+        elapsed_ms = (asyncio.get_running_loop().time() - started) * 1000.0
+        result = msg.get("result")
+        if not isinstance(result, dict):
+            result = {}
+        _log.warning(
+            "stdio %s: late response for abandoned %s after %.0fms "
+            "(isError=%s, rpc_error=%s) -- the call the model was told failed "
+            "may have landed",
+            self.server_id,
+            tool,
+            elapsed_ms,
+            bool(result.get("isError")),
+            "error" in msg,
+        )
+        return True
 
     def _mark_dead(self, reason: str) -> None:
         if self._dead:
@@ -201,6 +284,48 @@ class StdioServer:
             if not fut.done():
                 fut.set_exception(StdioServerError(reason))
         self._pending.clear()
+        # The child is gone, so no late response can ever arrive to clear
+        # these. Holding them would wedge the reaper and the degraded gate on
+        # a server that no longer exists.
+        self._abandoned.clear()
+
+    async def _write_payload(
+        self, payload: bytes, what: str, attempt: _WriteAttempt | None = None
+    ) -> None:
+        """Write one framed message to the child, bounded at both steps.
+
+        Both the lock acquire and the drain can block forever against a child
+        that has stopped reading stdin, and neither is covered by the caller's
+        dispatch timeout -- so a single wedged child would hang every later
+        call in the write. Failure is always a `StdioServerError` naming the
+        message that could not be sent.
+        """
+        stdin = self._proc.stdin if self._proc is not None else None
+        if stdin is None:
+            raise StdioServerError(f"stdio server not started, cannot send {what}")
+        try:
+            await asyncio.wait_for(self._write_lock.acquire(), self._write_timeout_s)
+        except asyncio.TimeoutError as e:
+            raise StdioServerError(
+                f"write lock still held after {self._write_timeout_s:.0f}s "
+                f"sending {what} to {self.server_id}"
+            ) from e
+        try:
+            stdin.write(payload)
+            if attempt is not None:
+                attempt.reached_the_child = True
+            await asyncio.wait_for(stdin.drain(), self._write_timeout_s)
+        except asyncio.TimeoutError as e:
+            raise StdioServerError(
+                f"child stopped reading stdin: drain stalled {self._write_timeout_s:.0f}s "
+                f"sending {what} to {self.server_id}"
+            ) from e
+        except Exception as e:  # noqa: BLE001 - pipe broken, server gone
+            raise StdioServerError(
+                f"write failed sending {what} to {self.server_id}: {type(e).__name__}: {e}"
+            ) from e
+        finally:
+            self._write_lock.release()
 
     async def _send_notification(self, method: str, params: dict | None = None) -> None:
         """JSON-RPC notification -- no id, no response expected. Used by
@@ -212,21 +337,16 @@ class StdioServer:
             req["params"] = params
         payload = (json.dumps(req) + "\n").encode("utf-8")
         try:
-            async with self._write_lock:
-                self._proc.stdin.write(payload)
-                await self._proc.stdin.drain()
-        except Exception as e:  # noqa: BLE001 - pipe broken, reader will mark dead
+            await self._write_payload(payload, f"notification {method}")
+        except StdioServerError as e:
             # Notification failures are non-fatal (the recipient doesn't
             # ack) but worth a debug line so a partial-restart "succeeded
             # then died" is traceable later.
-            _log.debug(
-                "stdio %s: notification %s failed: %s",
-                self.server_id,
-                method,
-                e,
-            )
+            _log.debug("stdio %s: %s", self.server_id, e)
 
-    async def _call_method(self, method: str, params: dict | None = None) -> dict:
+    async def _call_method(
+        self, method: str, params: dict | None = None, *, label: str | None = None
+    ) -> dict:
         if self._closed:
             raise StdioServerError(f"stdio server {self.server_id} is closed")
         if self._dead:
@@ -241,16 +361,53 @@ class StdioServer:
         fut: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
         self._pending[rid] = fut
         payload = (json.dumps(req) + "\n").encode("utf-8")
+        attempt = _WriteAttempt()
         try:
-            async with self._write_lock:
-                self._proc.stdin.write(payload)
-                await self._proc.stdin.drain()
-        except Exception as e:  # noqa: BLE001 - pipe broken, server gone
-            # Pop the future so it doesn't leak in `_pending`; the reader
-            # task may also independently call `_mark_dead` shortly.
+            await self._write_payload(payload, f"{method} id={rid}", attempt)
+            return await fut
+        except (asyncio.CancelledError, StdioServerError):
+            # Two ways to reach here with the child still working: the caller
+            # stopped waiting (dispatch timeout, user interrupt), or the write
+            # timed out after the bytes were already buffered. Both are
+            # abandoned calls rather than failed ones. A write that never
+            # reached the pipe is a clean failure, and a future carrying an
+            # answer means the response beat the cancellation -- degrading the
+            # server on either would be a lie in the other direction.
+            if attempt.reached_the_child and not _answered(fut):
+                self._abandon(rid, label or method)
+            elif _answered(fut):
+                _log.warning(
+                    "stdio %s: %s answered as the caller gave up; the result is "
+                    "discarded and the call reported as a failure",
+                    self.server_id,
+                    label or method,
+                )
+            raise
+        finally:
+            # Leaving the entry here on a cancelled call silently disables idle
+            # reap for the server: `sleep()` refuses while `_pending` is
+            # non-empty, and nothing else ever pops it.
             self._pending.pop(rid, None)
-            raise StdioServerError(f"write failed: {type(e).__name__}: {e}") from e
-        return await fut
+
+    def _abandon(self, rid: int, tool: str) -> None:
+        """Remember a request whose caller gave up while the child works on."""
+        if len(self._abandoned) >= self._max_abandoned:
+            forgotten_rid, (forgotten_tool, _) = next(iter(self._abandoned.items()))
+            self._abandoned.pop(forgotten_rid)
+            _log.warning(
+                "stdio %s: abandoned-call map full, forgetting id=%s (%s)",
+                self.server_id,
+                forgotten_rid,
+                forgotten_tool,
+            )
+        self._abandoned[rid] = (tool, asyncio.get_running_loop().time())
+        _log.warning(
+            "stdio %s: abandoned %s (id=%s) still running in the child; "
+            "server degraded until it answers",
+            self.server_id,
+            tool,
+            rid,
+        )
 
     async def initialize(self) -> dict:
         """Real MCP initialize handshake. Sends protocolVersion +
@@ -332,6 +489,23 @@ class StdioServer:
         return _lessons_text(resp.get("result") or {})
 
     async def call_tool(self, name: str, args: dict) -> MCPCallResult:
+        self._forget_expired_abandoned()
+        if self._abandoned:
+            # A rejected call is still traffic: without this the server reads
+            # as maximally idle the instant it recovers, and the next reaper
+            # tick sleeps a child that has been asked for work throughout.
+            self._last_activity = asyncio.get_running_loop().time()
+            # Queueing behind an abandoned operation burns another full
+            # timeout and, on a mutating tool, would inherit an indeterminate
+            # outcome it has not earned. Fail fast and deterministically
+            # instead; the late response clears this state.
+            return MCPCallResult(
+                ok=False,
+                error=(
+                    f"{self.server_id} is busy with an abandoned operation "
+                    f"({self._abandoned_summary()}); its state is unknown"
+                ),
+            )
         # Hold the in-flight guard across the whole call -- wake, restart, AND
         # the RPC -- so the reaper can't sleep the server mid-dispatch (the
         # window between a successful `_wake` and `_call_method` populating
@@ -355,7 +529,7 @@ class StdioServer:
                     )
             try:
                 resp = await self._call_method(
-                    "tools/call", {"name": name, "arguments": args}
+                    "tools/call", {"name": name, "arguments": args}, label=name
                 )
             except StdioServerError as e:
                 return MCPCallResult(ok=False, error=str(e))
@@ -365,6 +539,31 @@ class StdioServer:
             return _translate_tool_result(resp.get("result") or {})
         finally:
             self._active_calls -= 1
+
+    def _forget_expired_abandoned(self) -> None:
+        """Stop degrading the server on a call that will never be answered.
+
+        The late response is the intended exit, but a child that hangs without
+        dying never sends one -- and then every call fast-fails and the reaper
+        never sleeps it. Forgetting the entry returns the server to ordinary
+        service; what actually happened to that write stays unknown.
+        """
+        now = asyncio.get_running_loop().time()
+        for rid, (tool, started) in list(self._abandoned.items()):
+            if now - started < self._abandon_ttl_s:
+                continue
+            self._abandoned.pop(rid, None)
+            _log.warning(
+                "stdio %s: abandoned %s (id=%s) never answered in %.0fs; "
+                "no longer degraded, outcome unknown",
+                self.server_id,
+                tool,
+                rid,
+                now - started,
+            )
+
+    def _abandoned_summary(self) -> str:
+        return ", ".join(tool for tool, _ in self._abandoned.values())
 
     async def _try_restart(self) -> bool:
         """Bounded auto-restart. Returns True if the server is live after
@@ -454,13 +653,20 @@ class StdioServer:
         call is in flight -- either an RPC already on the wire (`_pending`) or a
         `call_tool` anywhere in its wake-then-dispatch span (`_active_calls`).
         Together these close the window where the reaper would reap a server a
-        dispatch just woke."""
+        dispatch just woke.
+
+        It also refuses while a call is abandoned. Nobody is awaiting that one,
+        so neither of the other two conditions sees it -- and `_stop_child()`
+        would `kill()` the child mid-write, turning an unknown outcome into a
+        possibly partially-applied one."""
+        self._forget_expired_abandoned()
         async with self._restart_lock:
             if (
                 self._closed
                 or self._proc is None
                 or self._pending
                 or self._active_calls
+                or self._abandoned
             ):
                 return
             await self._stop_child()
@@ -481,6 +687,8 @@ class StdioServer:
             self._dormant = False
             self._dead = False
             self._died_reason = None
+            # A fresh child cannot answer the previous one's requests.
+            self._abandoned.clear()
             try:
                 await self.start()
                 await self.initialize()
@@ -588,6 +796,11 @@ def _result_or_raise(resp: dict) -> dict:
         err = resp["error"]
         raise StdioServerError(err.get("message", "rpc error"))
     return resp.get("result") or {}
+
+
+def _answered(fut: asyncio.Future[dict]) -> bool:
+    """True only if the child's response actually landed on the future."""
+    return fut.done() and not fut.cancelled()
 
 
 def _os_environ() -> dict[str, str]:

@@ -193,10 +193,17 @@ LLM.
   with a one-line "tools updated" note injected.
 - **Registry size cap.** Above ~30 tools small models start hallucinating
   tool names; either prune by session relevance or upgrade the model.
-- **Per-tool timeouts and circuit breaker.** Default 8 s timeout, cancellable;
+- **Per-tool timeouts and circuit breaker.** Default 8 s timeout;
   N consecutive failures opens the breaker and the tool is reported to the
   LLM as unavailable so it can apologise coherently. Prevents a Dunnes
-  captcha hang from blocking the voice loop.
+  captcha hang from blocking the voice loop. The timeout bounds the *wait*,
+  not the work: a stdio child keeps executing a request the client gave up
+  on. Such a call is recorded as abandoned, the server is degraded until it
+  answers (later calls fail fast, and the idle reaper may not kill a child
+  mid-write), and the late response is logged. Asking the server to stop --
+  `notifications/cancelled` -- and telling the model the outcome is
+  indeterminate rather than failed are both still to come; see
+  `DESIGN-dispatch-cancellation.md`.
 - **Permission gates on every side-effecting tool,** not only money/messages.
   Quest creation, calendar writes, basket changes, search refinement that
   triggers further tools — all gated. Hard-coded list, not LLM-decided.

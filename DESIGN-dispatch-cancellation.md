@@ -1,9 +1,18 @@
 # DESIGN -- a dispatch timeout must stop claiming the write failed
 
-Status: **designed, not implemented.** Roster run 28-08-2026 (Architect,
-Security, Concurrency/Reliability) against a four-part plan; two of those four
-parts were found to introduce new instances of the bug they targeted, and the
-design below is the corrected shape.
+Status: **slice 1 implemented except the cancellation send; slice 2 not
+started.** Roster run 28-08-2026 (Architect, Security,
+Concurrency/Reliability) against a four-part plan; two of those four parts were
+found to introduce new instances of the bug they targeted, and the design below
+is the corrected shape.
+
+Landed 28-08-2026 in `src/glados/mcp/stdio_client.py`: the `finally` that stops
+leaking `_pending`, the bounded `_abandoned` map, `sleep()` refusing while it is
+non-empty, the bounded write, the degraded fast-fail, and the late-arrival
+WARNING. Deferred by decision: the `notifications/cancelled` send, which buys
+nothing until the Dunnes C# server honours it. Everything under "Slice 2 --
+semantics" is untouched, so the model is still told a timed-out mutating call
+failed.
 
 ## The problem
 
@@ -222,6 +231,36 @@ lock releases, and whether a real Selenium child dies cleanly when reaped
 mid-write. The design must stay correct when the answer to all four is "no" --
 which is what the abandoned map and the degraded state are really for.
 
+## What implementation changed, beyond what the roster reviewed
+
+Three things the design did not account for, found by the code duck on
+28-08-2026 and fixed in the same commit.
+
+**An abandoned call needs a deadline, or the degraded state is permanent.** The
+design has exactly one exit from degraded: the late response. A child that
+hangs without ever dying never sends one, and then every call fast-fails, the
+reaper can never sleep the server, and nothing marks it dead -- strictly worse
+than the `_pending` leak this replaced. Entries now expire after
+`_ABANDON_TTL_S` (300s), logged loudly; the server returns to ordinary service
+and the outcome of that write stays unknown. Deliberately *not* a restart: a
+kill on that path is the mid-write hazard the whole design exists to avoid.
+
+**The abandoned/failed line is drawn at the pipe, not at the await.** The design
+frames abandonment as a property of a cancelled wait. It is really a property of
+whether the request left the client: a bounded `drain()` that times out has
+already buffered the bytes, so the child will run that request whenever it
+resumes reading -- abandoned, not failed. A write that gave up waiting for the
+write lock put nothing on the wire and is a clean failure. `_call_method` now
+decides on that fact rather than on which await was interrupted, which also
+closes a leak the design missed: a cancellation landing *inside* the write left
+the `_pending` entry behind, the very bug the slice was written to fix.
+
+**A cancelled task cancels the future it awaits.** So "did the child answer"
+cannot be asked as `fut.done()` -- a cancelled future is done and carries
+nothing. `_answered()` asks it correctly. The race it guards is real and now
+logged: a response that lands as the caller gives up is discarded, and the model
+is told the call failed.
+
 ## What this does NOT fix, stated plainly
 
 The Dunnes C# server does not honour `notifications/cancelled`. **The wedged
@@ -229,6 +268,19 @@ The Dunnes C# server does not honour `notifications/cancelled`. **The wedged
 the protocol-conformant thing and makes the server-side fix a one-sided change,
 but it must not be described as the fix -- all the user-visible value here is in
 the indeterminate outcome, the replay gate, the ledger and the degraded state.
+
+That is a statement about the *send*, and only about the send. It was once read
+as "slice 1 is blocked on Dunnes", which is wrong: everything else in slice 1
+fixes a live idle-reap leak and removes a real kill-the-child-mid-write hazard
+today, against any stdio server, with no dependency on the C# side. That is why
+slice 1 landed without the send.
+
+What a user can still hit while slice 2 is outstanding: the model is told a
+timed-out mutating call *failed*, so it may still retry a write that lands
+later. The degraded fast-fail now makes that retry return immediately with
+"state is unknown" instead of issuing a second write, which narrows the
+duplicate-cart-line window but does not close it -- the moment the late
+response clears the degraded state, a retry goes through.
 
 ## Documentation that is currently false
 
