@@ -524,6 +524,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         send=send,
         binding_for_client=rooms_cfg.find,
         clients_in_room=clients_in_room,
+        room_policy=rooms_cfg.policy_for,
         notify_observers=notify_observers,
         tts_cooldown_s=glados_cfg.tts.gate_cooldown_s,
         gate_drain_margin_s=glados_cfg.tts.gate_drain_margin_s,

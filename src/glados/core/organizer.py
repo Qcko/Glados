@@ -17,6 +17,7 @@ import hashlib
 import uuid
 from contextlib import aclosing
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Awaitable, Callable, Literal
 
 from pydantic import BaseModel
@@ -34,7 +35,7 @@ from .adapters import (
     LLMToolCall,
     ToolSpec,
 )
-from .config import ClientBinding
+from .config import ClientBinding, RoomPolicy
 from .language_guard import build_repair_messages, detect_drift, fallback_line
 from .logging_setup import FILE_ONLY
 from .protocols import (
@@ -76,6 +77,7 @@ _WARM_GATE_TIMEOUT_S = 30.0
 SendFn = Callable[[str, BaseModel], Awaitable[None]]
 BindingLookup = Callable[[str], ClientBinding | None]
 RoomLookup = Callable[[str], list[str]]
+RoomPolicyLookup = Callable[[str], RoomPolicy | None]
 # (room_id, message) -> forward to any admin observers of that room. The impl
 # owns the forward allowlist + envelope; the organizer just taps every broadcast.
 ObserverNotify = Callable[[str, BaseModel], Awaitable[None]]
@@ -403,6 +405,8 @@ class Organizer:
         system_prompt: str | None = None,
         reply_language: str = "en",
         tool_router: ToolRouter | None = None,
+        room_policy: "RoomPolicyLookup | None" = None,
+        now: "Callable[[], datetime] | None" = None,
     ) -> None:
         self.llm = llm
         # Gates the first turn behind the boot LLM warm-up (_await_llm_warm).
@@ -518,6 +522,14 @@ class Organizer:
         # Per-turn tool-scoping (ARCH section 13). None = no scoping (the model sees
         # every registered tool, the pre-feature behaviour).
         self._tool_router = tool_router
+        # What each room will accept being spoken INTO it, and the wall clock
+        # the quiet-hours window is judged against. The clock is deliberately
+        # NOT the loop clock the TTS gate uses: `get_running_loop().time()` is
+        # monotonic and cannot express 22:00. No policy configured for a room
+        # is the permissive default, which is what keeps an install with no
+        # `[[rooms]]` table behaving exactly as it did before slice 2a.
+        self._room_policy = room_policy or (lambda _room: None)
+        self._now = now or (lambda: datetime.now().astimezone())
 
     def set_memory_notes(self, notes: list[str]) -> None:
         """Install guard-wrapped server memory into the system prompt.
@@ -1889,6 +1901,13 @@ class Organizer:
             )
         if not self._room_has_speaker(target):
             return _intercom_refusal(f"no speaker is connected in the {target}")
+        blocked = self._policy_block(target, room_id)
+        if blocked is not None:
+            log.info("intercom refused: %s -> %s, %s", room_id, target, blocked)
+            trace.event("intercom_refused", target_room=target, policy=blocked)
+            return _intercom_refusal(
+                f"the {target} is not accepting messages right now"
+            )
         if target in outcome.announced_rooms:
             return _intercom_refusal(
                 f"a message has already been passed to the {target} this turn"
@@ -1906,6 +1925,26 @@ class Organizer:
         self._queues.enqueue(target, lambda: self._deliver_intercom(target, spoken))
         return MCPCallResult(ok=True, content={"status": "queued", "room": target})
 
+    def _policy_block(self, target: str, source_room: str) -> str | None:
+        """Why the TARGET room's own policy will not take this announcement,
+        or None if it will.
+
+        The reason is distinguished here and collapsed into one string at the
+        tool result on purpose. Both reasons are static config facts rather
+        than occupancy, so either is safe to disclose on its own -- but
+        distinguishable refusals let a caller map the policy table room by
+        room, and a quiet-hours window is a strong inferential proxy for
+        where somebody sleeps. The trace and the log keep the real reason.
+        """
+        policy = self._room_policy(target)
+        if policy is None:
+            return None
+        if not policy.allows_source(source_room):
+            return "source not allowed"
+        if policy.is_quiet_at(self._now().time()):
+            return "quiet hours"
+        return None
+
     async def _deliver_intercom(self, room_id: str, text: str) -> None:
         """Speak a handed-over message on the target room's worker.
 
@@ -1913,7 +1952,17 @@ class Organizer:
         sent it. That is what keeps the target coherent: its own gate and
         `PlaybackDone` key to a session that belongs to it, and `_inflight`
         holds the announcement against its room -- so "stop" spoken there
-        cancels this stream, and cannot reach the turn that sent it."""
+        cancels this stream, and cannot reach the turn that sent it.
+
+        Quiet hours are re-read here as well as at hand-over, because this
+        action can sit in the target's FIFO behind that room's own turn for
+        tens of seconds -- long enough for the window to open under it. The
+        sending room was already told `queued` and is not told otherwise;
+        `queued` never promised the message was spoken."""
+        policy = self._room_policy(room_id)
+        if policy is not None and policy.is_quiet_at(self._now().time()):
+            log.info("intercom dropped at delivery: %s is in quiet hours", room_id)
+            return
         session_id = f"intercom-{uuid.uuid4().hex}"
         task = asyncio.current_task()
         if task is not None:

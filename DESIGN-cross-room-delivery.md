@@ -218,6 +218,83 @@ gated, granted); the persona sentence.
 `announce_targets` allowlist and quiet hours in `rooms.toml`, and the per-room
 opt-out of confirmation.
 
+## Slice 2 revisited, 29-08-2026 -- split into 2a and 2b
+
+A second roster (Architect, Security, Concurrency) ran on the slice-2 plan and
+rejected two of its four parts. Slice 2 is therefore **2a, built**, and **2b,
+deferred with the reasons recorded here** so the next attempt does not rebuild
+the version that was rejected.
+
+**2a (built): the receiving room's standing policy.** A `[[rooms]]` table in
+`rooms.toml` -- `announce_sources` and `quiet_hours` -- evaluated in
+`_speak_into_room` after the existing confirmation gate.
+
+Two changes from the plan above, both deliberate:
+
+- **`announce_targets` is renamed `announce_sources` and is RECEIVER-side.**
+  One row now fully describes a room's exposure, alongside `quiet_hours`, and
+  a room's protection lives in that room's row rather than in the row of
+  whoever might announce at it. Sender-side would have put B's protection
+  somewhere B's occupant never looks.
+- **Both policy refusals return one undifferentiated string** -- "the
+  livingroom is not accepting messages right now". Each reason is a static
+  config fact and so safe to disclose alone, but distinguishable refusals let
+  a caller map the policy table room by room, and a quiet window is a strong
+  inferential proxy for where somebody sleeps. The real reason goes to the
+  trace and the log.
+
+Quiet hours are re-read at delivery as well as at hand-over: the action can
+sit in the target's FIFO behind that room's own turn for tens of seconds, so
+an announcement cleared at 21:59 must not speak at 22:00. The sending room
+was already told `queued` and is not told otherwise, which is exactly the
+honesty cost this design accepted from the start -- `queued` never promised
+the message was spoken.
+
+The clock is a separate injection point from the TTS gate's, deliberately:
+that one is `get_running_loop().time()`, monotonic, and cannot express 22:00.
+Two DST consequences are accepted rather than handled, both benign for a
+household intercom and both worse to rediscover later than to write down: on
+spring-forward a window lying entirely inside the skipped hour never fires,
+and on fall-back a window ending inside the repeated hour runs an hour long.
+
+**2b (deferred): confirm-in-B, and the per-room confirmation opt-out.**
+
+*Confirm-in-B was rejected by all three lenses independently.* The gate's
+slice-1 job is "did the human in A really ask for this?" -- answerable in A
+and structurally unanswerable in B, where the occupant sees the attacker's own
+plausible sentence with no way to know whether anyone in A spoke. It also
+changes `ARCHITECTURE.md` section 3's written invariants ("gates are per-user";
+"confirms are spoken back to the room that initiated") from a caller's
+authorisation into a receiver's consent -- a different question asked of a
+different party -- and the plan did not amend them. And because the gate sits
+UPSTREAM of the synchronous hand-over, room A's FIFO worker would block for up
+to `confirm_timeout_s` on a human in another room, with A's own occupant
+locked out of answering by `handle_tool_confirm_response`'s room scoping. Not
+the `indeterminate` hazard, but a new liveness one on A.
+
+If it is attempted again: B's say should be *in addition* to A's rather than
+instead of it, the cross-room timeout wants to be seconds rather than 30, A
+needs a "waiting on the livingroom" broadcast, and the protocol needs a
+`ToolConfirmCancelled` -- today a cancelled turn in A leaves an orphan modal
+in B until its own ttl expires, and no fake in this repo can prove otherwise.
+
+*The confirmation opt-out was rejected on a checked fact.* Its proposed
+safety net was that the provenance arms still gate -- and both are dead for
+the attack that matters. `outcome.untrusted_seen` is set at exactly one site,
+inside the `spec.untrusted` branch, so it fires only when an MCP tool result
+was `<external>`-wrapped this turn; STT of a television in room A never sets
+it. `tc.from_text` is `False` for every call on a structured-tool-call
+backend. So `requires_confirmation` is the only live gate for TV injection,
+and the opt-out deletes precisely that. If it is attempted again it must be
+conditioned on a signal that actually tracks provenance -- honour the opt-out
+only for turns originating in a `ui` client's typed text, never an
+STT-derived utterance.
+
+Note the pair as specified would have shipped confirm-in-B as **dead code for
+the livingroom** (only `desk`/`desk2` have a `ui` client, and a speaker-only
+room can never confirm) while shipping the opt-out as a **live gate removal
+for exactly that room** -- "B gets a say" delivering "B loses the gate".
+
 ## What proves it, and what cannot be proved
 
 Testable against the fakes this repo already has (`tests/test_tts_feedback_gate.py`
@@ -268,8 +345,10 @@ flowchart TD
         CONF{"requires_confirmation=True<br/>always, hardcoded in code"}
         CONF -->|denied| D["denied -- recorded, nothing spoken"]
         CONF -->|granted| V{"deliverable?<br/>known room, not the origin,<br/>has a speaker client"}
-        V -->|no| R["refused + reason<br/>DEVICE facts only, never occupancy"]
-        V -->|yes| CAP["cap length, strip control chars,<br/>prepend 'Message from the desk'<br/>(room, never the person)"]
+        V -->|yes| POL{"does the TARGET room<br/>accept it? announce_sources<br/>+ quiet_hours (slice 2a)"}
+        POL -->|no| R
+        V -->|no| R["refused + reason<br/>DEVICE facts only, never occupancy<br/>-- policy refusals collapse to one string"]
+        POL -->|yes| CAP["cap length, strip control chars,<br/>prepend 'Message from the desk'<br/>(room, never the person)"]
         CAP --> ENQ["_queues.enqueue(room B, ...)<br/>SYNCHRONOUS -- room A never waits"]
     end
 
@@ -277,7 +356,9 @@ flowchart TD
 
     subgraph roomb ["Room B's own worker owns it from here"]
         W["B's FIFO: after B's own turn,<br/>never racing it"]
-        W --> SP["_speak under a synthetic<br/>(room B, intercom) session"]
+        W --> QH{"quiet hours re-read HERE too<br/>-- the wait can outlast the window"}
+        QH -->|"opened while waiting"| DROP["dropped, logged<br/>A already heard 'queued'"]
+        QH -->|clear| SP["_speak under a synthetic<br/>(room B, intercom) session"]
         SP --> GATE["gate + PlaybackDone key to THAT session,<br/>so B's own turn is unaffected"]
         SP --> BARGE["'stop' in room B cancels the stream,<br/>NOT room A's turn"]
     end

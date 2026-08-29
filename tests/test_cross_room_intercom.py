@@ -11,14 +11,16 @@ own worker owns the audio from there.
 from __future__ import annotations
 
 import asyncio
+import tomllib
 from contextlib import asynccontextmanager
+from datetime import datetime, time as clock_time
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from glados.core.adapters import LLMMessage, LLMText, LLMToolCall, TtsChunkOut
-from glados.core.config import ClientBinding
+from glados.core.config import ClientBinding, QuietHours, RoomPolicy, RoomsConfig
 from glados.core.protocols import ToolConfirmResponse
 from glados.core.organizer import Organizer
 from glados.core.sessions import SessionRegistry
@@ -638,3 +640,264 @@ async def test_the_announcement_leaves_no_trace_in_the_target_rooms_history(
         # synthetic session that carried it holds no history of its own.
         assert org.sessions.latest("livingroom", "qcko") is None
         assert list(org._history) == [desk.session_id]  # noqa: SLF001
+
+
+# ---- slice 2a: the receiving room's own say ---------------------------
+
+
+def _rooms_toml(text: str) -> RoomsConfig:
+    return RoomsConfig(**tomllib.loads(text))
+
+
+_CLIENTS = """
+[[clients]]
+client_id = "desk-ui"
+room_id = "desk"
+role = "ui"
+
+[[clients]]
+client_id = "living-speaker"
+room_id = "livingroom"
+role = "speaker"
+"""
+
+
+def test_a_room_with_no_policy_row_keeps_the_pre_slice_behaviour() -> None:
+    """Absent config is the permissive default, which is the whole reason the
+    validations below have to be strict: a misspelled row must not be able to
+    counterfeit an absence."""
+    cfg = _rooms_toml(_CLIENTS)
+    assert cfg.policy_for("livingroom") is None
+
+
+def test_a_duplicate_or_misspelled_policy_row_fails_the_load() -> None:
+    """Each of these fails the ACL OPEN if it is allowed through -- a
+    duplicate silently loses one row, and a typo leaves the room the operator
+    meant to protect running policy-free."""
+    duplicate = _CLIENTS + """
+[[rooms]]
+room_id = "livingroom"
+
+[[rooms]]
+room_id = "livingroom"
+"""
+    with pytest.raises(ValidationError, match="duplicate room policy"):
+        _rooms_toml(duplicate)
+
+    unknown_room = _CLIENTS + """
+[[rooms]]
+room_id = "livingrom"
+"""
+    with pytest.raises(ValidationError, match="unknown room"):
+        _rooms_toml(unknown_room)
+
+    unknown_source = _CLIENTS + """
+[[rooms]]
+room_id = "livingroom"
+announce_sources = ["desk", "kitchen"]
+"""
+    with pytest.raises(ValidationError, match="unknown room: 'kitchen'"):
+        _rooms_toml(unknown_source)
+
+
+def test_a_misspelled_key_cannot_counterfeit_an_absent_policy() -> None:
+    """The nastier half of the same failure, and the reason these models
+    forbid extra keys: a singular `announce_source` is DROPPED under
+    pydantic's default, leaving a row that exists, passes every validation,
+    and permits everything -- a fully open ACL that reads at a glance as a
+    configured one. A typo'd table name must fail just as loudly."""
+    for typo in (
+        'announce_source = ["desk"]',
+        'quiet_hour = { start = "22:00", end = "07:00" }',
+    ):
+        with pytest.raises(ValidationError, match="[Ee]xtra"):
+            _rooms_toml(_CLIENTS + f"""
+[[rooms]]
+room_id = "livingroom"
+{typo}
+""")
+
+    with pytest.raises(ValidationError, match="[Ee]xtra"):
+        _rooms_toml(_CLIENTS + """
+[[room]]
+room_id = "livingroom"
+""")
+
+
+def test_an_empty_allowlist_is_an_opt_out_and_an_absent_one_is_not() -> None:
+    """`[] for none` is what rooms.toml advertises, and the two are one
+    keystroke apart in the code: `if not self.announce_sources` would turn a
+    room's full opt-out into a full opt-in and nothing else would notice."""
+    assert not RoomPolicy(room_id="livingroom", announce_sources=[]).allows_source("desk")
+    assert RoomPolicy(room_id="livingroom").allows_source("desk")
+
+
+def test_an_equal_ended_quiet_window_is_rejected_rather_than_guessed() -> None:
+    """"Always" and "never" are equally defensible readings of start == end,
+    so the operator says which."""
+    with pytest.raises(ValidationError, match="make them differ"):
+        _rooms_toml(_CLIENTS + """
+[[rooms]]
+room_id = "livingroom"
+quiet_hours = { start = "22:00", end = "22:00" }
+""")
+
+
+def test_a_quiet_window_wraps_midnight_at_both_edges() -> None:
+    """The common shape for a room someone sleeps in. Half-open: the start
+    minute is quiet, the end minute is not."""
+    hours = QuietHours(start=clock_time(22, 0), end=clock_time(7, 0))
+    assert hours.contains(clock_time(22, 0))
+    assert hours.contains(clock_time(3, 0))
+    assert hours.contains(clock_time(6, 59))
+    assert not hours.contains(clock_time(7, 0))
+    assert not hours.contains(clock_time(21, 59))
+
+    daytime = QuietHours(start=clock_time(9, 0), end=clock_time(17, 0))
+    assert daytime.contains(clock_time(12, 0))
+    assert not daytime.contains(clock_time(3, 0))
+
+
+def _policy(**kwargs) -> RoomPolicy:
+    return RoomPolicy(room_id="livingroom", **kwargs)
+
+
+def _at(hour: int) -> "datetime":
+    return _at_minute(hour, 0)
+
+
+def _at_minute(hour: int, minute: int) -> "datetime":
+    return datetime(2026, 8, 29, hour, minute).astimezone()
+
+
+async def test_a_source_off_the_allowlist_is_refused_and_speaks_nothing(
+    tmp_path: Path,
+) -> None:
+    """The receiving room's say, made as config when nobody is under attack
+    rather than as a live prompt under duress."""
+    tts = _FakeTts()
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "dinner is ready"})
+    async with _organizer(
+        tmp_path,
+        llm,
+        [DESK_UI, LIVING_SPEAKER, LIVING_MIC],
+        tts=tts,
+        room_policy=lambda r: _policy(announce_sources=["desk2"]) if r == "livingroom" else None,
+    ) as (org, sink):
+        confirms = asyncio.create_task(_grant_confirms(org, sink, "desk-ui"))
+        try:
+            await asyncio.wait_for(org.handle_user_text("desk-ui", "tell them"), 5.0)
+            await org.flush()
+        finally:
+            confirms.cancel()
+
+    assert "not accepting messages right now" in _tool_result_text(llm.passes)
+    assert _intercom_lines(tts) == []
+
+
+async def test_quiet_hours_refuse_in_words_the_allowlist_cannot_be_told_from(
+    tmp_path: Path,
+) -> None:
+    """Both refusals are static config facts, so either is safe to disclose
+    alone -- but distinguishable ones let a caller map the policy table room
+    by room, and a quiet window is a proxy for where somebody sleeps. The
+    real reason lives in the trace, not in what the model can read out."""
+    tts = _FakeTts()
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "dinner is ready"})
+    async with _organizer(
+        tmp_path,
+        llm,
+        [DESK_UI, LIVING_SPEAKER, LIVING_MIC],
+        tts=tts,
+        now=lambda: _at(23),
+        room_policy=lambda r: _policy(
+            quiet_hours=QuietHours(start=clock_time(22, 0), end=clock_time(7, 0))
+        ) if r == "livingroom" else None,
+    ) as (org, sink):
+        confirms = asyncio.create_task(_grant_confirms(org, sink, "desk-ui"))
+        try:
+            await asyncio.wait_for(org.handle_user_text("desk-ui", "tell them"), 5.0)
+            await org.flush()
+        finally:
+            confirms.cancel()
+
+    result = _tool_result_text(llm.passes)
+    assert "not accepting messages right now" in result
+    for leak in ("quiet", "hours", "allow", "asleep", "22:00"):
+        assert leak not in result.lower()
+    assert _intercom_lines(tts) == []
+
+
+async def test_an_allowed_source_outside_the_window_still_gets_through(
+    tmp_path: Path,
+) -> None:
+    """The policy must refuse the two cases it names and nothing else."""
+    tts = _FakeTts()
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "dinner is ready"})
+    async with _organizer(
+        tmp_path,
+        llm,
+        [DESK_UI, LIVING_SPEAKER, LIVING_MIC],
+        tts=tts,
+        now=lambda: _at(19),
+        room_policy=lambda r: _policy(
+            announce_sources=["desk"],
+            quiet_hours=QuietHours(start=clock_time(22, 0), end=clock_time(7, 0)),
+        ) if r == "livingroom" else None,
+    ) as (org, sink):
+        confirms = asyncio.create_task(_grant_confirms(org, sink, "desk-ui"))
+        try:
+            await asyncio.wait_for(org.handle_user_text("desk-ui", "tell them"), 5.0)
+            await org.flush()
+        finally:
+            confirms.cancel()
+
+    assert "queued" in _tool_result_text(llm.passes)
+    assert _intercom_lines(tts) == ["Message from the desk. dinner is ready"]
+
+
+async def test_a_window_that_opens_while_the_message_waits_drops_it(
+    tmp_path: Path,
+) -> None:
+    """The hand-over is an enqueue behind the target room's own turn, which
+    the design says can run for tens of seconds -- long enough for the window
+    to open under a message already approved. Checked at delivery as well as
+    at hand-over, so an announcement cleared at 21:59 cannot speak at 22:00."""
+    tts = _FakeTts()
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "dinner is ready"})
+    # The window opens BETWEEN the two reads: the hand-over sees 21:59 and
+    # clears it, the delivery sees 22:00. Driven off the call order rather
+    # than a sleep, so it does not depend on how the worker gets scheduled.
+    readings = iter([_at_minute(21, 59)])
+    async with _organizer(
+        tmp_path,
+        llm,
+        [DESK_UI, LIVING_SPEAKER, LIVING_MIC],
+        tts=tts,
+        now=lambda: next(readings, _at_minute(22, 0)),
+        room_policy=lambda r: _policy(
+            quiet_hours=QuietHours(start=clock_time(22, 0), end=clock_time(7, 0))
+        ) if r == "livingroom" else None,
+    ) as (org, sink):
+        confirms = asyncio.create_task(_grant_confirms(org, sink, "desk-ui"))
+        try:
+            await asyncio.wait_for(org.handle_user_text("desk-ui", "tell them"), 5.0)
+            await org.flush()
+        finally:
+            confirms.cancel()
+
+        # The sending room was told `queued` and is not told otherwise --
+        # `queued` never promised the message was spoken.
+        assert "queued" in _tool_result_text(llm.passes)
+        # Dropped before anything of it reached the target room: no audio, no
+        # bubble in its UI, and no synthetic session left registered.
+        assert _intercom_lines(tts) == []
+        # Nothing under the synthetic session the announcement would have run
+        # as -- the sending room's own reply speaks through the same fake, so
+        # the session id is what separates the two.
+        assert [
+            m
+            for _cid, m in sink
+            if str(m.get("session_id", "")).startswith("intercom-")
+        ] == []
+        assert org._inflight == {}  # noqa: SLF001

@@ -942,11 +942,17 @@ Each version is its own session-sized chunk. Heavy work is deferred.
       TTS into an arbitrary room and arm that room's feedback gate — egress
       routing by `room_id` is a first-class Organizer job (§3.5). The target
       room is just a parameter that today always equals the originating room.
-    - **The missing piece is the trigger, and it is NOT an MCP tool.** MCP
-      tools only return content to the LLM's message history; they cannot emit
-      audio into a room. So this is a **built-in Organizer capability** (the
-      first "tool the Organizer answers itself"), validating a target room and
-      reusing `_speak`/`_broadcast` — chosen over a callback-MCP (punches a
+    - **The missing piece is the trigger: a registry-declared spec the
+      Organizer answers itself, not a dispatched tool.** Declaration and
+      execution split. The spec IS registered — that is the only way the model
+      can see the capability, namespace it, and have it count against the
+      registry cap — but MCP tools only return content to the LLM's message
+      history and cannot emit audio into a room, so the effect stays a
+      **built-in Organizer capability** (the first "tool the Organizer answers
+      itself"): `_run_tool_calls` intercepts the reserved qualified name
+      *before* `mcp.dispatch`, which is also what keeps an announcement out of
+      the dispatch budget and so out of the `indeterminate` state. It validates
+      a target room and reuses `_speak`/`_broadcast` — chosen over a callback-MCP (punches a
       trust hole: an external subprocess driving any room's speaker is exactly
       the §9 escalation) or a v7 client capability (egress is server-side, not
       client-owned).

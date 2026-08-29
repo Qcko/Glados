@@ -21,3 +21,14 @@ client_id = "livingroom-speaker"
 room_id = "livingroom"
 role = "speaker"
 default_user = "qcko"
+
+# Optional per-room intercom policy (DESIGN-cross-room-delivery.md, slice 2a).
+# Receiver-side: each row says what that room will accept being spoken INTO
+# it. A room with no row here accepts an announcement from any other room at
+# any hour, which is the behaviour every install had before this table
+# existed. Times are server local time.
+#
+# [[rooms]]
+# room_id = "livingroom"
+# announce_sources = ["desk"]                    # omit for "any room"; [] for none
+# quiet_hours = { start = "22:00", end = "07:00" }

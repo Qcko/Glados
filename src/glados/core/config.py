@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import os
 import tomllib
+from datetime import time as clock_time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .protocols import Role
 
@@ -544,11 +545,104 @@ class ClientBinding(BaseModel):
     default_user: str = "default"
 
 
+class QuietHours(BaseModel):
+    """A wall-clock window during which a room accepts no announcements.
+
+    Wraps midnight when `start > end`, which is the common case for a room
+    someone sleeps in. `start == end` is rejected at load rather than
+    silently read as "always" or "never" -- the two readings are equally
+    defensible, so the operator has to say which they meant.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    start: clock_time
+    end: clock_time
+
+    def contains(self, at: clock_time) -> bool:
+        if self.start <= self.end:
+            return self.start <= at < self.end
+        return at >= self.start or at < self.end
+
+
+class RoomPolicy(BaseModel):
+    """What a room will accept being spoken INTO it -- the receiving room's
+    own say (`DESIGN-cross-room-delivery.md`, slice 2a).
+
+    Receiver-side on purpose: one row fully describes a room's exposure, and
+    a room's protection belongs in that room's row rather than in the row of
+    whoever might announce at it.
+
+    `announce_sources` absent means every other room may announce; an empty
+    list means none may, which is how a room opts out of the intercom.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    room_id: str
+    announce_sources: list[str] | None = None
+    quiet_hours: QuietHours | None = None
+
+    def allows_source(self, source_room: str) -> bool:
+        return self.announce_sources is None or source_room in self.announce_sources
+
+    def is_quiet_at(self, at: clock_time) -> bool:
+        return self.quiet_hours is not None and self.quiet_hours.contains(at)
+
+
 class RoomsConfig(BaseModel):
+    # `extra="forbid"` here and on the two models above is load-bearing, not
+    # tidiness: with pydantic's default the singular typo `announce_source`
+    # is dropped and leaves a row that passes every validation below while
+    # permitting everything. A misspelled key must not be able to counterfeit
+    # an absent policy any more than a misspelled room name can.
+    model_config = ConfigDict(extra="forbid")
+
     clients: list[ClientBinding] = []
+    rooms: list[RoomPolicy] = []
 
     def find(self, client_id: str) -> ClientBinding | None:
         return next((c for c in self.clients if c.client_id == client_id), None)
+
+    def policy_for(self, room_id: str) -> RoomPolicy | None:
+        return next((r for r in self.rooms if r.room_id == room_id), None)
+
+    @model_validator(mode="after")
+    def _coherent_room_policies(self) -> "RoomsConfig":
+        """Every way a policy row can be wrong fails the load.
+
+        This table is an ACL, and each of these mistakes fails it OPEN: a
+        duplicate row silently loses whichever copy loses, and a typo in a
+        room name means the room the operator meant to protect runs with
+        policy-free defaults. Absent config is the permissive default by
+        design -- so absence has to be deliberate, and a misspelling must
+        not be able to counterfeit it.
+        """
+        configured = {c.room_id for c in self.clients}
+        seen: set[str] = set()
+        for policy in self.rooms:
+            if policy.room_id in seen:
+                raise ValueError(
+                    f"duplicate room policy in rooms.toml: {policy.room_id!r}"
+                )
+            seen.add(policy.room_id)
+            if policy.room_id not in configured:
+                raise ValueError(
+                    f"rooms.toml policy names an unknown room: {policy.room_id!r}"
+                )
+            for source in policy.announce_sources or ():
+                if source not in configured:
+                    raise ValueError(
+                        f"rooms.toml announce_sources for {policy.room_id!r} "
+                        f"names an unknown room: {source!r}"
+                    )
+            hours = policy.quiet_hours
+            if hours is not None and hours.start == hours.end:
+                raise ValueError(
+                    f"rooms.toml quiet_hours for {policy.room_id!r} start and "
+                    "end are equal; make them differ to say which you mean"
+                )
+        return self
 
 
 def load_glados_config(path: Path) -> GladosConfig:
