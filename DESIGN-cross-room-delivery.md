@@ -1,6 +1,6 @@
 # DESIGN -- speaking into a room you are not in
 
-Status: **designed, not implemented. Awaiting sign-off.** Roster run 28-08-2026
+Status: **built (slices 1, 2a and 2b).** Roster run 28-08-2026
 (Architect, Security, Concurrency/Reliability) against the plan below, per the
 panel gate `ARCHITECTURE.md` section 13 sets for this feature. All three lenses
 rejected part of it, and two of the five parts were replaced outright.
@@ -257,7 +257,41 @@ household intercom and both worse to rediscover later than to write down: on
 spring-forward a window lying entirely inside the skipped hour never fires,
 and on fall-back a window ending inside the repeated hour runs an hour long.
 
-**2b (deferred): confirm-in-B, and the per-room confirmation opt-out.**
+**2b (built, 31-08-2026): the target room's VETO, and a per-room opt-out of
+the gap that carries it.** Confirm-in-B and the confirmation opt-out, the pair
+2b originally meant, stay rejected -- the reasons are below and they still
+stand. What replaced them asks nothing and listens for nothing new.
+
+`_deliver_intercom` speaks the attribution alone, holds, then speaks the
+message. The hold is the veto window, and ending it is the barge-in that has
+shipped since slice 1: `handle_audio_text` checks `_BARGE_IN_RE` *before* the
+mic gate, so a "stop" lands even though the attribution just closed the gate on
+the room it was spoken into. Everything an ask-first design needed -- a reply
+parser (racing "nevermind", already a barge-in token), an answer window inside
+the ~0.9s post-TTS dead zone, a gate-exempt intercept that would accept an echo
+of whatever that room last said -- is absent by construction rather than solved.
+
+The gap is measured from the horizon `_speak` armed the gate with, not from
+`_speak`'s return: the return means the last chunk was handed to the client,
+and a gap that elapses while the attribution is still audible is a veto nobody
+could take.
+
+`RoomPolicy.announce_veto_pause = false` opts a room out, and gives up a
+courtesy rather than a gate (`ARCHITECTURE.md` section 3). Two things landed
+with it because 2b is what makes them bite: `RoomQueueManager.enqueue` now
+takes an opt-in `max_depth` and the intercom passes 3 -- a human's own turn in
+their own room is still never refused -- and the depth refusal returns the same
+undifferentiated string a policy block does, because "that room is busy" is
+occupancy.
+
+The cost, accepted and stated: the message plays unless someone vetoes it, so
+an empty room and a silent one are the same room. A per-target-room cooldown
+was called mandatory under ask-first; under veto the preamble is part of an
+actual message rather than an extra ring, and the depth bound is what bounds
+pile-up. Considered, not built.
+
+**2b as originally specified (still rejected): confirm-in-B, and the per-room
+confirmation opt-out.**
 
 *Confirm-in-B was rejected by all three lenses independently.* The gate's
 slice-1 job is "did the human in A really ask for this?" -- answerable in A
@@ -312,6 +346,20 @@ overlap):
 - Two announcements into one room serialise; chunk sequences do not interleave.
 - Room A's history gains the tool result; room B's history gains nothing.
 - The spec's flags are what the code says, not what a config says.
+- **The confirmation gate cannot be reached around.** Three separate facts keep
+  it in front of every path to `_speak_into_room`, and all three now have a
+  test: `requires_confirmation` is hardcoded True on the spec, so the un-gated
+  arm of `_run_tool_calls` is dead for this tool; a denial returns before
+  `_dispatch_or_answer`; and the interception is on the qualified name inside
+  `_dispatch_or_answer`, downstream of both. The tests watch whether the
+  capability is ENTERED, not whether the room stayed silent -- a gate checked
+  after the hand-over leaves the room just as silent on a denial.
+- **The intercom never answers `indeterminate`**, which is what keeps the
+  in-flight ledger's arm -- the one that answers a re-issued call AHEAD of the
+  gate -- unreachable for this tool. Pinned across every outcome it can
+  return, because it is a one-line edit away: mutating the queued result to
+  `indeterminate=True` puts a second identical call straight onto the pre-gate
+  arm, which was confirmed by running that mutation.
 
 Not provable here: whether two overlapping streams are audible as garbage, real
 playback timing, and whether a household actually finds the confirmation
@@ -328,6 +376,21 @@ tolerable.
   text would be friendlier, and it also sidesteps `_capped_for_speech`, which is
   worth thinking about before allowing it.
 - The intercom is one-way. A reply from room B has no path back to room A.
+- **The veto gap's length is unmeasured against real capture hardware.** A
+  "stop" reaches `handle_audio_text` only after the VAD silence hangover
+  (800 ms) plus STT, so a gap shorter than that latency offers a veto nobody
+  can take in time. `_VETO_PAUSE_S` is 3.0s on that reasoning alone. When it is
+  too short the veto still lands, as a barge-in on a message already playing --
+  degraded rather than broken, and audited as an interrupt rather than a veto,
+  which is what makes the miss visible in the traces.
+- **The hold does not re-read the gate.** An early `PlaybackDone` from B's
+  speaker shortens `closed_until` while the hold is already sleeping, and the
+  gap runs on the estimate it started with. Costs a little accuracy in the
+  direction of waiting longer.
+- **An announcement now holds room B's worker** for the attribution, the
+  playback estimate, the gap and the message. B's occupant's own queued turn
+  waits behind all of it. The depth bound is what stops that compounding;
+  nothing shortens the single case.
 
 ## The shape
 
@@ -348,8 +411,9 @@ flowchart TD
         V -->|yes| POL{"does the TARGET room<br/>accept it? announce_sources<br/>+ quiet_hours (slice 2a)"}
         POL -->|no| R
         V -->|no| R["refused + reason<br/>DEVICE facts only, never occupancy<br/>-- policy refusals collapse to one string"]
-        POL -->|yes| CAP["cap length, strip control chars,<br/>prepend 'Message from the desk'<br/>(room, never the person)"]
-        CAP --> ENQ["_queues.enqueue(room B, ...)<br/>SYNCHRONOUS -- room A never waits"]
+        POL -->|yes| CAP["cap length, strip control chars,<br/>attribution 'Message from the desk'<br/>(room, never the person)"]
+        CAP --> ENQ{"_queues.enqueue(room B, ...)<br/>SYNCHRONOUS -- room A never waits.<br/>bounded: max 3 already pending"}
+        ENQ -->|"at the bound"| R
     end
 
     ENQ --> Q["returns 'queued' to the model<br/>-- passed on, NOT spoken"]
@@ -358,11 +422,15 @@ flowchart TD
         W["B's FIFO: after B's own turn,<br/>never racing it"]
         W --> QH{"quiet hours re-read HERE too<br/>-- the wait can outlast the window"}
         QH -->|"opened while waiting"| DROP["dropped, logged<br/>A already heard 'queued'"]
-        QH -->|clear| SP["_speak under a synthetic<br/>(room B, intercom) session"]
+        QH -->|clear| SP["speak the ATTRIBUTION alone, under a<br/>synthetic (room B, intercom) session"]
         SP --> GATE["gate + PlaybackDone key to THAT session,<br/>so B's own turn is unaffected"]
-        SP --> BARGE["'stop' in room B cancels the stream,<br/>NOT room A's turn"]
+        SP --> HOLD["hold: the attribution's playback estimate<br/>+ the veto gap (skipped if the room<br/>opted out via announce_veto_pause)"]
+        HOLD --> VETO{"'stop' in room B?<br/>ordinary barge-in, ahead of the mic gate<br/>-- no new listener, no reply parser"}
+        VETO -->|yes| KILL["vetoed: message never spoken,<br/>Cancelled to room B, audited as a veto"]
+        VETO -->|no| MSG["speak the MESSAGE"]
+        MSG --> BARGE["a 'stop' from here on is an ordinary<br/>barge-in on audio already playing --<br/>cancels the stream, NOT room A's turn"]
     end
 
-    ENQ --> W
+    ENQ -->|queued| W
     Q -.->|"A is already done;<br/>it never learns what B did"| T
 ```

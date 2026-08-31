@@ -104,6 +104,14 @@ class TurnRecord:
     # turn must not be able to loop the intercom, and a model that re-emits the
     # same call must not double-announce.
     announced_rooms: set[str] = field(default_factory=set)
+    # Rooms this turn asked for and was refused on a reason that is not stable
+    # for the length of the turn -- today, the target's queue depth. A policy
+    # block answers the same way every time it is asked, so re-asking learns
+    # nothing; a depth does not, so a refused-then-queued pair would tell the
+    # caller the moment that room fell quiet, which is the occupancy fact this
+    # direction may never disclose. One answer per room per turn removes the
+    # transition rather than the reason.
+    refused_rooms: set[str] = field(default_factory=set)
 
     def record_tool(
         self,

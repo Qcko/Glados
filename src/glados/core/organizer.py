@@ -243,6 +243,36 @@ _BARGE_IN_RE = re.compile(
 )
 
 
+# How long an announcement holds between its attribution and its message, so
+# whoever is in the target room can end it with an ordinary voice "stop"
+# (`_BARGE_IN_RE` above -- the veto is that path, not a second one). Measured
+# from the moment the room's mic gate reopens after the attribution, not from
+# the moment the chunks were handed to the client: a gap that elapses while
+# the attribution is still audible is not a gap anyone can answer in.
+#
+# The length has to cover the whole capture path, not just a human's reaction:
+# a "stop" only reaches `handle_audio_text` after the VAD silence hangover
+# (`silero_min_silence_ms`, 800 ms) plus STT. Under that, a veto spoken in
+# time still arrives late and lands as an ordinary barge-in on a message
+# already playing -- degraded, not broken, but not what was offered. Unmeasured
+# against real capture hardware; the number to revisit first if a veto in the
+# livingroom reliably arrives too late.
+_VETO_PAUSE_S = 3.0
+
+# Ceiling on the whole hold, including the wait for the preamble to play out.
+# The horizon read back from the gate is a real estimate whenever `_speak`
+# returned normally, so this only catches a gate left on its provisional
+# far-future value -- silence for `gate_max_s` between the attribution and
+# the message would read as a fault, not a courtesy.
+_MAX_VETO_HOLD_S = 30.0
+
+# How many actions may already be pending in a room before it stops taking
+# announcements. Bounds the head-of-line time one room can impose on another;
+# the per-turn cap (`TurnRecord.announced_rooms`) bounds a single turn, and
+# this bounds accumulation across turns.
+_ANNOUNCE_MAX_DEPTH = 3
+
+
 def _in_flight_key(call: LLMToolCall) -> tuple[str, str]:
     """Identity of a tool call for the per-turn in-flight ledger. Arguments are
     canonicalised so key order cannot disguise a re-issue as a new call."""
@@ -407,6 +437,7 @@ class Organizer:
         tool_router: ToolRouter | None = None,
         room_policy: "RoomPolicyLookup | None" = None,
         now: "Callable[[], datetime] | None" = None,
+        veto_pause_s: float = _VETO_PAUSE_S,
     ) -> None:
         self.llm = llm
         # Gates the first turn behind the boot LLM warm-up (_await_llm_warm).
@@ -530,6 +561,10 @@ class Organizer:
         # `[[rooms]]` table behaving exactly as it did before slice 2a.
         self._room_policy = room_policy or (lambda _room: None)
         self._now = now or (lambda: datetime.now().astimezone())
+        # The veto gap an announcement holds before its message. Injected so a
+        # test can shrink it: at its real length every intercom test would pay
+        # it in wall-clock, and a suite that slow gets run less often.
+        self._veto_pause_s = veto_pause_s
 
     def set_memory_notes(self, notes: list[str]) -> None:
         """Install guard-wrapped server memory into the system prompt.
@@ -1912,8 +1947,32 @@ class Organizer:
             return _intercom_refusal(
                 f"a message has already been passed to the {target} this turn"
             )
+        if target in outcome.refused_rooms:
+            return _intercom_refusal(
+                f"the {target} is not accepting messages right now"
+            )
+        preamble = f"Message from the {room_id}."
+        spoken = f"{preamble} {message}"
+        if not self._queues.enqueue(
+            target,
+            lambda: self._deliver_intercom(target, preamble, message),
+            max_depth=_ANNOUNCE_MAX_DEPTH,
+        ):
+            # Same undifferentiated refusal as a policy block, for the same
+            # reason: a distinguishable "that room is busy" is exactly the
+            # occupancy fact this direction may not disclose.
+            log.info(
+                "intercom refused: %s -> %s, queue at depth %d",
+                room_id,
+                target,
+                self._queues.queue_depth(target),
+            )
+            trace.event("intercom_refused", target_room=target, policy="queue depth")
+            outcome.refused_rooms.add(target)
+            return _intercom_refusal(
+                f"the {target} is not accepting messages right now"
+            )
         outcome.announced_rooms.add(target)
-        spoken = f"Message from the {room_id}. {message}"
         log.info(
             "intercom: %s -> %s, %d chars, hash=%s",
             room_id,
@@ -1922,7 +1981,6 @@ class Organizer:
             hashlib.sha256(spoken.encode("utf-8")).hexdigest()[:12],
         )
         trace.event("intercom_queued", target_room=target, chars=len(spoken))
-        self._queues.enqueue(target, lambda: self._deliver_intercom(target, spoken))
         return MCPCallResult(ok=True, content={"status": "queued", "room": target})
 
     def _policy_block(self, target: str, source_room: str) -> str | None:
@@ -1945,7 +2003,9 @@ class Organizer:
             return "quiet hours"
         return None
 
-    async def _deliver_intercom(self, room_id: str, text: str) -> None:
+    async def _deliver_intercom(
+        self, room_id: str, preamble: str, message: str
+    ) -> None:
         """Speak a handed-over message on the target room's worker.
 
         Under a synthetic session bound to the TARGET room, not the room that
@@ -1953,6 +2013,20 @@ class Organizer:
         `PlaybackDone` key to a session that belongs to it, and `_inflight`
         holds the announcement against its room -- so "stop" spoken there
         cancels this stream, and cannot reach the turn that sent it.
+
+        The target room's own say over an announcement is a VETO, not a
+        question: the attribution is spoken, a gap is held, and then the
+        message -- and the existing barge-in ends it. Nothing new listens for
+        consent, which is the point. Asking would need a reply parser (and
+        "nevermind" is already a barge-in token, so the two would race), an
+        answer window landing inside the ~0.9s post-TTS dead zone, and a
+        gate-exempt intercept that would accept an echo of whatever this room
+        said last. A veto has none of those parts because it reuses the one
+        path that already survives the gate by design.
+
+        The cost, stated: the message plays unless someone vetoes it, so it is
+        heard by an empty room as readily as a silent one. That is the trade
+        against never speaking at all.
 
         Quiet hours are re-read here as well as at hand-over, because this
         action can sit in the target's FIFO behind that room's own turn for
@@ -1968,16 +2042,54 @@ class Organizer:
         if task is not None:
             self._inflight[session_id] = (task, room_id)
         trace = self.traces.open(session_id)
+        veto_pause = policy is None or policy.announce_veto_pause
+        message_started = False
         cancelled = False
         try:
-            trace.event("intercom_speaking", room_id=room_id, chars=len(text))
-            await self._broadcast(
-                room_id, AssistantDelta(session_id=session_id, text=text)
+            trace.event(
+                "intercom_speaking",
+                room_id=room_id,
+                chars=len(preamble) + 1 + len(message),
+                veto_pause=veto_pause,
             )
-            await self._speak(session_id, room_id, text, trace)
+            if not veto_pause:
+                message_started = True
+                await self._say_into(
+                    session_id, room_id, f"{preamble} {message}", trace
+                )
+            else:
+                await self._say_into(session_id, room_id, preamble, trace)
+                await self._hold_veto_window(session_id, room_id, trace)
+                message_started = True
+                # The bubble follows the audio for this part alone. A veto has
+                # to leave the room with no record of what it stopped, and the
+                # target's client removes a cancelled session from its live
+                # bubbles without removing the text already appended to it --
+                # so a delta sent ahead of the audio would leave the vetoed
+                # message on screen in exactly the room that refused to hear
+                # it. Nothing is lost by the order: a message cancelled
+                # part-way was never fully said either.
+                await self._speak(session_id, room_id, message, trace)
+                await self._broadcast(
+                    room_id, AssistantDelta(session_id=session_id, text=message)
+                )
         except asyncio.CancelledError:
             cancelled = True
-            trace.event("cancelled")
+            # A cancel that arrives before the message began is the veto this
+            # design exists to offer; one that arrives during it is an
+            # ordinary barge-in on audio already playing. Same mechanism,
+            # different thing to have happened, and only the audit can tell
+            # them apart afterwards. The flag is set one step before `_speak`
+            # rather than at its first chunk, so a cancel landing in between
+            # is recorded as an interrupt though no audio went out: the audit
+            # may understate a veto, and must never claim one.
+            trace.event("intercom_vetoed" if not message_started else "cancelled")
+            log.info(
+                "intercom %s in %s: session=%s",
+                "vetoed" if not message_started else "interrupted",
+                room_id,
+                session_id,
+            )
         finally:
             entry = self._inflight.get(session_id)
             if entry is not None and entry[0] is task:
@@ -1987,6 +2099,42 @@ class Organizer:
                 await asyncio.shield(
                     self._broadcast(room_id, Cancelled(session_id=session_id))
                 )
+
+    async def _say_into(
+        self, session_id: str, room_id: str, text: str, trace
+    ) -> None:
+        """One spoken part of an announcement: the UI bubble and the audio."""
+        await self._broadcast(
+            room_id, AssistantDelta(session_id=session_id, text=text)
+        )
+        await self._speak(session_id, room_id, text, trace)
+
+    async def _hold_veto_window(self, session_id: str, room_id: str, trace) -> None:
+        """Wait out the preamble's playback, then hold the veto gap.
+
+        `_speak` returns when the last chunk is handed to the client, not when
+        it is heard, so the horizon the gate was just armed with is the only
+        estimate of when the preamble stops being audible. Only this session's
+        own gate counts -- another turn's horizon would be measuring somebody
+        else's audio."""
+        loop = asyncio.get_running_loop()
+        gate = self._tts_gate.get(room_id)
+        # `closed_until` is the playback estimate plus the cooldown tail, so
+        # the gap begins where the room's mic reopens -- which is the earliest
+        # a veto could be heard anyway. No gate at all is the speakerless case
+        # (`_arm_gate_after_send` pops it) and a gate under another session is
+        # a successor turn that has taken the room: neither says anything about
+        # this attribution, so both fall back to the configured gap alone
+        # rather than borrowing somebody else's horizon.
+        played_out = (
+            gate.closed_until
+            if gate is not None and gate.session_id == session_id
+            else loop.time()
+        )
+        until = min(played_out + self._veto_pause_s, loop.time() + _MAX_VETO_HOLD_S)
+        held = max(0.0, until - loop.time())
+        trace.event("intercom_veto_window", room_id=room_id, seconds=round(held, 3))
+        await asyncio.sleep(held)
 
     def _capped_for_speech(
         self, spec: "ToolSpec | None", result: MCPCallResult

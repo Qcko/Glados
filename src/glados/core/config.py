@@ -575,6 +575,15 @@ class RoomPolicy(BaseModel):
 
     `announce_sources` absent means every other room may announce; an empty
     list means none may, which is how a room opts out of the intercom.
+
+    `announce_veto_pause` is the room's say over an announcement already
+    cleared to arrive: with it on (the default) the message is preceded by
+    its attribution and a held gap, and whoever is in the room can end it
+    with the ordinary voice barge-in. Off, the announcement is spoken as
+    one utterance -- for a room where the gap is a nuisance rather than a
+    courtesy (a workshop, a room nobody sits in). Turning it off removes a
+    veto, never a gate: the sending room's confirmation is what authorised
+    the message, and it is unaffected either way.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -582,6 +591,7 @@ class RoomPolicy(BaseModel):
     room_id: str
     announce_sources: list[str] | None = None
     quiet_hours: QuietHours | None = None
+    announce_veto_pause: bool = True
 
     def allows_source(self, source_room: str) -> bool:
         return self.announce_sources is None or source_room in self.announce_sources

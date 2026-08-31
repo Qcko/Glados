@@ -11,6 +11,7 @@ own worker owns the audio from there.
 from __future__ import annotations
 
 import asyncio
+import json
 import tomllib
 from contextlib import asynccontextmanager
 from datetime import datetime, time as clock_time
@@ -22,7 +23,7 @@ from pydantic import BaseModel, ValidationError
 from glados.core.adapters import LLMMessage, LLMText, LLMToolCall, TtsChunkOut
 from glados.core.config import ClientBinding, QuietHours, RoomPolicy, RoomsConfig
 from glados.core.protocols import ToolConfirmResponse
-from glados.core.organizer import Organizer
+from glados.core.organizer import Organizer, _TtsGate
 from glados.core.sessions import SessionRegistry
 from glados.core.turn_outcome import TurnRecord
 from glados.core.traces import TraceStore
@@ -119,6 +120,9 @@ async def _organizer(tmp: Path, llm, bindings, *, tts=None, **kwargs):
         binding_for_client=by_id.get,
         clients_in_room=lambda r: [b.client_id for b in bindings if b.room_id == r],
         tts=tts,
+        # Real length is 2s and every announcement pays it. Shrunk here so the
+        # suite measures the ordering the veto window creates, not its duration.
+        veto_pause_s=kwargs.pop("veto_pause_s", 0.01),
         **kwargs,
     )
     try:
@@ -131,10 +135,25 @@ def _tool_result_text(passes: list[list[LLMMessage]]) -> str:
     return next(m.content or "" for m in passes[-1] if m.role == "tool")
 
 
-def _intercom_lines(tts: "_FakeTts") -> list[str]:
-    """Only the handed-over messages. The originating room also speaks the
-    turn's own reply through the same TTS, and that is not the intercom."""
-    return [t for t in tts.spoken if t.startswith("Message from the")]
+def _announcements(sink: list) -> list[str]:
+    """What each announcement put into its target room, reassembled from the
+    parts it was spoken in.
+
+    Keyed on the synthetic session, which is the only thing that separates an
+    announcement from the sending room's own reply -- the two go through the
+    same fake TTS, and under the veto pause an announcement is two syntheses
+    (the attribution, then the message) with the other room free to speak in
+    between. Deduplicated per session because a broadcast lands once per
+    client in the room."""
+    parts: dict[str, dict[str, list[str]]] = {}
+    for cid, m in sink:
+        session = str(m.get("session_id", ""))
+        if m.get("type") != "assistant_delta" or not session.startswith("intercom-"):
+            continue
+        parts.setdefault(session, {}).setdefault(cid, []).append(str(m["text"]))
+    return [
+        " ".join(next(iter(by_client.values()))) for by_client in parts.values()
+    ]
 
 
 async def _grant_confirms(org: Organizer, sink: list, client_id: str) -> None:
@@ -205,12 +224,17 @@ async def test_speak_into_returns_while_the_target_room_is_still_speaking(
     llm = _SpeakIntoLLM({"room": "livingroom", "message": "dinner is ready"})
     async with _organizer(
         tmp_path, llm, [DESK_UI, LIVING_SPEAKER, LIVING_MIC], tts=tts
-    ) as (org, _sink):
+    ) as (org, sink):
         org._queues.enqueue(  # noqa: SLF001
-            "livingroom", lambda: org._deliver_intercom("livingroom", "earlier")
+            "livingroom",
+            lambda: org._deliver_intercom(
+                "livingroom", "Message from the desk.", "earlier"
+            ),
         )
         await tts.wait_until_holding()
-        assert tts.spoken == ["earlier"]  # the livingroom really is stuck
+        # The livingroom really is stuck -- held on the message part, its
+        # attribution already spoken and its veto window already elapsed.
+        assert tts.spoken == ["Message from the desk.", "earlier"]
 
         call = LLMToolCall(
             call_id="c1",
@@ -229,7 +253,10 @@ async def test_speak_into_returns_while_the_target_room_is_still_speaking(
             # `create_task` would also return promptly and would also end up
             # spoken -- and would put two streams into one room at once.
             assert org._queues.queue_depth("livingroom") == 1  # noqa: SLF001
-            assert _intercom_lines(tts) == []
+            # Only the announcement already in flight, and only as far as it
+            # has got -- its message bubble follows its audio. The caller
+            # spoke nothing of the new one.
+            assert _announcements(sink) == [_PREAMBLE_TEXT]
         finally:
             trace.close()
             hold.set()
@@ -238,7 +265,10 @@ async def test_speak_into_returns_while_the_target_room_is_still_speaking(
     assert result.ok
     assert result.content == {"status": "queued", "room": "livingroom"}
     # It was handed over, not spoken by the caller.
-    assert _intercom_lines(tts) == ["Message from the desk. dinner is ready"]
+    assert _announcements(sink) == [
+        "Message from the desk. earlier",
+        "Message from the desk. dinner is ready",
+    ]
 
 
 async def test_a_queued_message_is_spoken_into_the_target_room(
@@ -256,7 +286,7 @@ async def test_a_queued_message_is_spoken_into_the_target_room(
         finally:
             confirms.cancel()
 
-    assert _intercom_lines(tts) == ["Message from the desk. dinner is ready"]
+    assert _announcements(sink) == ["Message from the desk. dinner is ready"]
     # The handed-over audio reaches the livingroom and nowhere else. Matched on
     # the synthetic session so the desk's own reply chunks cannot be mistaken
     # for it.
@@ -298,7 +328,7 @@ async def test_a_denied_confirmation_speaks_nothing(tmp_path: Path) -> None:
         finally:
             denier.cancel()
 
-    assert _intercom_lines(tts) == []
+    assert _announcements(sink) == []
 
 
 # ---- refusals: device facts only, never occupancy ---------------------
@@ -322,7 +352,7 @@ async def test_a_room_with_no_speaker_is_refused_not_silently_dropped(
     result = _tool_result_text(llm.passes)
     assert "refused" in result
     assert "no speaker" in result
-    assert _intercom_lines(tts) == []
+    assert _announcements(sink) == []
 
 
 async def test_speaking_into_your_own_room_is_refused(tmp_path: Path) -> None:
@@ -339,7 +369,7 @@ async def test_speaking_into_your_own_room_is_refused(tmp_path: Path) -> None:
             confirms.cancel()
 
     assert "already in" in _tool_result_text(llm.passes)
-    assert _intercom_lines(tts) == []
+    assert _announcements(sink) == []
 
 
 # ---- what reaches the speaker -----------------------------------------
@@ -453,11 +483,15 @@ async def test_stop_in_the_target_room_cancels_only_that_announcement(
     ) as (org, sink):
         org._queues.enqueue(  # noqa: SLF001
             "livingroom",
-            lambda: org._deliver_intercom("livingroom", "Message from the desk. one"),
+            lambda: org._deliver_intercom(
+                "livingroom", "Message from the desk.", "one"
+            ),
         )
         org._queues.enqueue(  # noqa: SLF001
             "desk",
-            lambda: org._deliver_intercom("desk", "Message from the livingroom. two"),
+            lambda: org._deliver_intercom(
+                "desk", "Message from the livingroom.", "two"
+            ),
         )
         await tts.wait_until_holding(2)
         living_session = _delta_session(sink, "Message from the desk")
@@ -569,7 +603,7 @@ async def test_one_turn_may_announce_into_a_room_only_once(tmp_path: Path) -> No
     assert len(results) == 2
     assert "queued" in results[0]
     assert "already been passed" in results[1]
-    assert _intercom_lines(tts) == ["Message from the desk. dinner is ready"]
+    assert _announcements(sink) == ["Message from the desk. dinner is ready"]
 
 
 async def test_two_announcements_into_one_room_do_not_interleave(
@@ -585,17 +619,22 @@ async def test_two_announcements_into_one_room_do_not_interleave(
     async with _organizer(
         tmp_path, llm, [DESK_UI, LIVING_SPEAKER, LIVING_MIC], tts=tts
     ) as (org, sink):
-        for message in ("Message from the desk. first", "Message from the desk. second"):
+        for message in ("first", "second"):
             org._queues.enqueue(  # noqa: SLF001
-                "livingroom", lambda m=message: org._deliver_intercom("livingroom", m)
+                "livingroom",
+                lambda m=message: org._deliver_intercom(
+                    "livingroom", "Message from the desk.", m
+                ),
             )
         await tts.wait_until_holding()
-        # The second has not started synthesising while the first is held.
-        assert tts.spoken == ["Message from the desk. first"]
+        # The second has not started synthesising while the first is held --
+        # not even its attribution, which is the part that would be audible
+        # over the first announcement.
+        assert tts.spoken == ["Message from the desk.", "first"]
         hold.set()
         await org.flush()
 
-    assert _intercom_lines(tts) == [
+    assert _announcements(sink) == [
         "Message from the desk. first",
         "Message from the desk. second",
     ]
@@ -792,7 +831,7 @@ async def test_a_source_off_the_allowlist_is_refused_and_speaks_nothing(
             confirms.cancel()
 
     assert "not accepting messages right now" in _tool_result_text(llm.passes)
-    assert _intercom_lines(tts) == []
+    assert _announcements(sink) == []
 
 
 async def test_quiet_hours_refuse_in_words_the_allowlist_cannot_be_told_from(
@@ -825,7 +864,7 @@ async def test_quiet_hours_refuse_in_words_the_allowlist_cannot_be_told_from(
     assert "not accepting messages right now" in result
     for leak in ("quiet", "hours", "allow", "asleep", "22:00"):
         assert leak not in result.lower()
-    assert _intercom_lines(tts) == []
+    assert _announcements(sink) == []
 
 
 async def test_an_allowed_source_outside_the_window_still_gets_through(
@@ -853,7 +892,7 @@ async def test_an_allowed_source_outside_the_window_still_gets_through(
             confirms.cancel()
 
     assert "queued" in _tool_result_text(llm.passes)
-    assert _intercom_lines(tts) == ["Message from the desk. dinner is ready"]
+    assert _announcements(sink) == ["Message from the desk. dinner is ready"]
 
 
 async def test_a_window_that_opens_while_the_message_waits_drops_it(
@@ -891,7 +930,7 @@ async def test_a_window_that_opens_while_the_message_waits_drops_it(
         assert "queued" in _tool_result_text(llm.passes)
         # Dropped before anything of it reached the target room: no audio, no
         # bubble in its UI, and no synthetic session left registered.
-        assert _intercom_lines(tts) == []
+        assert _announcements(sink) == []
         # Nothing under the synthetic session the announcement would have run
         # as -- the sending room's own reply speaks through the same fake, so
         # the session id is what separates the two.
@@ -901,3 +940,496 @@ async def test_a_window_that_opens_while_the_message_waits_drops_it(
             if str(m.get("session_id", "")).startswith("intercom-")
         ] == []
         assert org._inflight == {}  # noqa: SLF001
+
+
+# ---- slice 2b: the target room's veto ---------------------------------
+
+
+class _TimedTts:
+    """One chunk per synthesis, long enough that its playback estimate is a
+    measurable number, and the loop time each synthesis began."""
+
+    def __init__(self, seconds: float) -> None:
+        self._samples = int(22_050 * seconds)
+        self.calls: list[tuple[str, float]] = []
+
+    async def synthesize(self, text: str):
+        self.calls.append((text, asyncio.get_running_loop().time()))
+        yield TtsChunkOut(pcm=b"\x00\x00" * self._samples, sample_rate=22_050)
+
+
+async def test_the_veto_gap_starts_when_the_attribution_stops_being_audible(
+    tmp_path: Path,
+) -> None:
+    """`_speak` returns when the last chunk is handed to the client, not when
+    it is heard. A gap measured from that return elapses while the attribution
+    is still playing, so nobody could answer inside it and the veto would be
+    offered in name only. The hold is measured from the horizon the gate was
+    armed with instead -- pinned here with the configured gap set to zero, so
+    the only thing separating the two syntheses is the playback estimate."""
+    tts = _TimedTts(0.3)
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "unused"})
+    async with _organizer(
+        tmp_path,
+        llm,
+        [DESK_UI, LIVING_SPEAKER, LIVING_MIC],
+        tts=tts,
+        veto_pause_s=0.0,
+    ) as (org, _sink):
+        org._queues.enqueue(  # noqa: SLF001
+            "livingroom",
+            lambda: org._deliver_intercom(  # noqa: SLF001
+                "livingroom", "Message from the desk.", "dinner is ready"
+            ),
+        )
+        await org.flush()
+
+    spoken = [text for text, _at in tts.calls]
+    assert spoken == ["Message from the desk.", "dinner is ready"]
+    began = dict((text, at) for text, at in tts.calls)
+    assert began["dinner is ready"] - began["Message from the desk."] >= 0.3
+
+
+_PREAMBLE_TEXT = "Message from the desk."
+
+
+async def _wait_for_veto_window(tts: "_FakeTts") -> None:
+    """Block until an announcement has spoken its attribution and is holding."""
+    await _until(
+        lambda: _PREAMBLE_TEXT in tts.spoken, "the attribution to be spoken"
+    )
+
+
+@pytest.mark.parametrize("veto", ["stop", "nevermind"])
+async def test_a_veto_in_the_target_room_stops_the_message_being_spoken(
+    tmp_path: Path, veto: str
+) -> None:
+    """The whole of slice 2b. The room that is about to be spoken into gets
+    the attribution, then a gap, and ending it is the ordinary voice barge-in
+    -- no new listener, no reply parser, no consent window.
+
+    Parametrised over two barge-in tokens on purpose: `nevermind` is already
+    matched by `_BARGE_IN_RE`, so any later attempt to add an ask-first "no"
+    parser has to keep losing this race. Barge-in is checked before the mic
+    gate, which is what lets a veto land at all -- the attribution has just
+    closed the gate on the room it was spoken into."""
+    tts = _FakeTts()
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "unused"})
+    async with _organizer(
+        tmp_path,
+        llm,
+        [DESK_UI, LIVING_SPEAKER, LIVING_MIC],
+        tts=tts,
+        veto_pause_s=5.0,
+    ) as (org, sink):
+        org._queues.enqueue(  # noqa: SLF001
+            "livingroom",
+            lambda: org._deliver_intercom(  # noqa: SLF001
+                "livingroom", _PREAMBLE_TEXT, "dinner is ready"
+            ),
+        )
+        await _wait_for_veto_window(tts)
+
+        await org.handle_audio_text("livingroom-mic", veto)
+        await _until(
+            lambda: any(m.get("type") == "cancelled" for _cid, m in sink),
+            "the cancelled broadcast",
+        )
+        await org.flush()
+
+    # The message never reached the room: not as audio, and not as a bubble.
+    assert tts.spoken == [_PREAMBLE_TEXT]
+    assert _announcements(sink) == [_PREAMBLE_TEXT]
+    # The veto ended there -- it did not fall through into a turn of its own.
+    assert llm.passes == []
+    assert org._inflight == {}  # noqa: SLF001
+
+
+async def test_a_room_may_opt_out_of_the_gap_and_hears_one_utterance(
+    tmp_path: Path,
+) -> None:
+    """The opt-out removes the gap, not the announcement, and not the sending
+    room's confirmation -- what it costs the room is a veto, which is why it
+    is the room's own row that carries it."""
+    tts = _FakeTts()
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "unused"})
+    async with _organizer(
+        tmp_path,
+        llm,
+        [DESK_UI, LIVING_SPEAKER, LIVING_MIC],
+        tts=tts,
+        veto_pause_s=5.0,  # long enough that a gap taken would show as a hang
+        room_policy=lambda r: _policy(announce_veto_pause=False)
+        if r == "livingroom"
+        else None,
+    ) as (org, sink):
+        org._queues.enqueue(  # noqa: SLF001
+            "livingroom",
+            lambda: org._deliver_intercom(  # noqa: SLF001
+                "livingroom", _PREAMBLE_TEXT, "dinner is ready"
+            ),
+        )
+        await asyncio.wait_for(org.flush(), 2.0)
+
+    assert tts.spoken == ["Message from the desk. dinner is ready"]
+    assert _announcements(sink) == ["Message from the desk. dinner is ready"]
+
+
+async def test_announcements_stop_accumulating_in_a_room_that_is_not_keeping_up(
+    tmp_path: Path,
+) -> None:
+    """A queue is a buffer, and the per-turn cap only bounds one turn. Past a
+    depth the room stops taking announcements -- and says so in the words a
+    policy block uses, because "that room is busy" is the occupancy fact this
+    direction may never disclose."""
+    blocked = asyncio.Event()
+    tts = _FakeTts()
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "dinner is ready"})
+    async with _organizer(
+        tmp_path, llm, [DESK_UI, LIVING_SPEAKER, LIVING_MIC], tts=tts
+    ) as (org, _sink):
+        for _ in range(4):  # one runs, three wait
+            org._queues.enqueue("livingroom", blocked.wait)  # noqa: SLF001
+        await _until(
+            lambda: org._queues.queue_depth("livingroom") == 3,  # noqa: SLF001
+            "the queue to settle at its bound",
+        )
+
+        call = LLMToolCall(
+            call_id="c1",
+            server="room",
+            name="speak_into",
+            args={"room": "livingroom", "message": "dinner is ready"},
+        )
+        trace = org.traces.open("desk-test")
+        try:
+            result = await asyncio.wait_for(
+                org._speak_into_room(  # noqa: SLF001
+                    call, "s1", "desk", trace, TurnRecord()
+                ),
+                1.0,
+            )
+        finally:
+            trace.close()
+
+        assert result.ok
+        assert result.content == {
+            "status": "refused",
+            "reason": "the livingroom is not accepting messages right now",
+        }
+        assert org._queues.queue_depth("livingroom") == 3  # noqa: SLF001
+        # The room's own occupant is never turned away for a depth an
+        # announcement from elsewhere put there.
+        await org.handle_user_text("livingroom-mic", "what time is it")
+        assert org._queues.queue_depth("livingroom") == 4  # noqa: SLF001
+
+        # Dropped rather than run: what is being pinned is that the enqueue
+        # was accepted, and letting that turn drive the fake LLM would only
+        # measure the warm-up gate.
+        org._queues.clear("livingroom")  # noqa: SLF001
+        blocked.set()
+        await org.flush()
+
+    assert _announcements(_sink) == []
+
+
+def _trace_events(tmp: Path, session_prefix: str = "intercom-") -> list[str]:
+    """Every event kind recorded under an announcement's synthetic session."""
+    events: list[str] = []
+    for path in sorted(tmp.glob(f"{session_prefix}*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            events.append(json.loads(line)["event"])
+    return events
+
+
+async def test_a_veto_and_an_interruption_are_audited_apart(tmp_path: Path) -> None:
+    """Both stop an announcement through the same mechanism, and afterwards
+    only the audit can say which happened: whether the room refused a message
+    it had not heard, or cut one off part-way through. A single `cancelled`
+    for both would answer neither question."""
+    tts = _FakeTts()
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "unused"})
+    async with _organizer(
+        tmp_path,
+        llm,
+        [DESK_UI, LIVING_SPEAKER, LIVING_MIC],
+        tts=tts,
+        veto_pause_s=5.0,
+    ) as (org, sink):
+        org._queues.enqueue(  # noqa: SLF001
+            "livingroom",
+            lambda: org._deliver_intercom(  # noqa: SLF001
+                "livingroom", _PREAMBLE_TEXT, "dinner is ready"
+            ),
+        )
+        await _wait_for_veto_window(tts)
+        await org.handle_audio_text("livingroom-mic", "stop")
+        await _until(
+            lambda: any(m.get("type") == "cancelled" for _cid, m in sink),
+            "the cancelled broadcast",
+        )
+        await org.flush()
+
+    events = _trace_events(tmp_path)
+    assert "intercom_vetoed" in events
+    assert "cancelled" not in events
+
+
+async def test_an_interruption_during_the_message_is_not_recorded_as_a_veto(
+    tmp_path: Path,
+) -> None:
+    """The other half of the pair: audio is already out, and the room is
+    stopping something it has begun to hear."""
+    hold = asyncio.Event()
+    tts = _FakeTts(hold, hold_marker="dinner is ready")
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "unused"})
+    async with _organizer(
+        tmp_path,
+        llm,
+        [DESK_UI, LIVING_SPEAKER, LIVING_MIC],
+        tts=tts,
+        veto_pause_s=0.01,
+    ) as (org, sink):
+        org._queues.enqueue(  # noqa: SLF001
+            "livingroom",
+            lambda: org._deliver_intercom(  # noqa: SLF001
+                "livingroom", _PREAMBLE_TEXT, "dinner is ready"
+            ),
+        )
+        await tts.wait_until_holding()  # held inside the message's synthesis
+        await org.handle_audio_text("livingroom-mic", "stop")
+        await _until(
+            lambda: any(m.get("type") == "cancelled" for _cid, m in sink),
+            "the cancelled broadcast",
+        )
+        hold.set()
+        await org.flush()
+
+    events = _trace_events(tmp_path)
+    assert "cancelled" in events
+    assert "intercom_vetoed" not in events
+
+
+async def test_the_gap_does_not_borrow_another_sessions_playback_horizon(
+    tmp_path: Path,
+) -> None:
+    """The horizon read back from the gate is only this announcement's if the
+    gate is still this announcement's. A speakerless room has no gate at all
+    (`_arm_gate_after_send` pops it) and a successor turn overwrites it with
+    its own -- and that one can be seconds out, which would hold the message
+    for somebody else's audio. Unowned means fall back to the configured gap."""
+    tts = _FakeTts()
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "unused"})
+    async with _organizer(
+        tmp_path,
+        llm,
+        [DESK_UI, LIVING_SPEAKER, LIVING_MIC],
+        tts=tts,
+        veto_pause_s=0.01,
+    ) as (org, _sink):
+        org._tts_gate["livingroom"] = _TtsGate(  # noqa: SLF001
+            phase="draining",
+            session_id="somebody-elses-turn",
+            closed_until=asyncio.get_running_loop().time() + 30.0,
+        )
+        trace = org.traces.open("intercom-guard-test")
+        try:
+            await asyncio.wait_for(
+                org._hold_veto_window(  # noqa: SLF001
+                    "intercom-mine", "livingroom", trace
+                ),
+                1.0,
+            )
+        finally:
+            trace.close()
+
+        del org._tts_gate["livingroom"]  # noqa: SLF001
+        trace = org.traces.open("intercom-guard-test")
+        try:
+            await asyncio.wait_for(
+                org._hold_veto_window(  # noqa: SLF001
+                    "intercom-mine", "livingroom", trace
+                ),
+                1.0,
+            )
+        finally:
+            trace.close()
+
+
+# ---- the confirmation gate cannot be reached around --------------------
+
+
+class _TwiceIdenticallyLLM:
+    """The same `room.speak_into` call twice in one turn, argument for
+    argument -- the shape `_in_flight_key` canonicalises to one key."""
+
+    ARGS = {"room": "livingroom", "message": "dinner is ready"}
+
+    def __init__(self) -> None:
+        self.passes: list[list[LLMMessage]] = []
+
+    async def chat(self, messages, tools):
+        self.passes.append([m.model_copy(deep=True) for m in messages])
+        if len(self.passes) == 1:
+            for call_id in ("c1", "c2"):
+                yield LLMToolCall(
+                    call_id=call_id,
+                    server="room",
+                    name="speak_into",
+                    args=dict(self.ARGS),
+                )
+            return
+        yield LLMText(text="Passed it on.")
+
+
+def _watch_the_intercom(org: Organizer, sink: list) -> list[list[str]]:
+    """Record what room A had already been sent each time the intercom was
+    entered. Entering it at all is the thing being watched: a gate checked
+    after the hand-over would leave the room just as silent on a denial, so
+    "nothing was spoken" is not evidence that nothing was reached."""
+    seen: list[list[str]] = []
+    original = org._speak_into_room  # noqa: SLF001
+
+    async def watched(*args, **kwargs):
+        seen.append([msg.get("type") for _cid, msg in sink])
+        return await original(*args, **kwargs)
+
+    org._speak_into_room = watched  # noqa: SLF001
+    return seen
+
+
+async def _deny_confirms(org: Organizer, sink: list, client_id: str) -> None:
+    """Refuse every confirmation request as it appears, from `client_id`."""
+    seen: set[str] = set()
+    for _ in range(200):
+        for _cid, msg in list(sink):
+            rid = msg.get("request_id")
+            if msg.get("type") == "tool_confirm_request" and rid not in seen:
+                seen.add(rid)
+                await org.handle_tool_confirm_response(
+                    client_id, ToolConfirmResponse(request_id=rid, granted=False)
+                )
+        await asyncio.sleep(0.01)
+
+
+async def test_the_intercom_is_never_entered_without_a_granted_confirmation(
+    tmp_path: Path,
+) -> None:
+    """The gate holds by three facts and none of them is local to the
+    intercom: `requires_confirmation` is hardcoded True on the spec, so the
+    un-gated arm of `_run_tool_calls` is unreachable for this tool; a denial
+    returns before `_dispatch_or_answer`; and the interception is on the
+    qualified name inside `_dispatch_or_answer`, downstream of both. Each is
+    one edit away from a capability that puts chosen audio into a room nobody
+    is watching, and none of the three was pinned."""
+    tts = _FakeTts()
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "dinner is ready"})
+    async with _organizer(
+        tmp_path, llm, [DESK_UI, LIVING_SPEAKER, LIVING_MIC], tts=tts
+    ) as (org, sink):
+        entered = _watch_the_intercom(org, sink)
+        confirms = asyncio.create_task(_grant_confirms(org, sink, "desk-ui"))
+        try:
+            await asyncio.wait_for(org.handle_user_text("desk-ui", "tell them"), 5.0)
+            await org.flush()
+        finally:
+            confirms.cancel()
+
+    # Entered once, and the room had already been asked when it was.
+    assert len(entered) == 1
+    assert "tool_confirm_request" in entered[0]
+
+
+async def test_a_denied_confirmation_never_reaches_the_intercom_at_all(
+    tmp_path: Path,
+) -> None:
+    """The stronger form of "a denied confirmation speaks nothing": the
+    capability is not invoked, so silence is the gate's doing rather than a
+    later refusal's."""
+    tts = _FakeTts()
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "dinner is ready"})
+    async with _organizer(
+        tmp_path, llm, [DESK_UI, LIVING_SPEAKER, LIVING_MIC], tts=tts
+    ) as (org, sink):
+        entered = _watch_the_intercom(org, sink)
+        denials = asyncio.create_task(_deny_confirms(org, sink, "desk-ui"))
+        try:
+            await asyncio.wait_for(org.handle_user_text("desk-ui", "tell them"), 5.0)
+            await org.flush()
+        finally:
+            denials.cancel()
+
+    assert entered == []
+    assert _announcements(sink) == []
+    assert org._queues.queue_depth("livingroom") == 0  # noqa: SLF001
+
+
+async def test_the_intercom_never_answers_indeterminate(tmp_path: Path) -> None:
+    """What keeps the in-flight ledger's arm unreachable for this tool.
+
+    That arm answers a re-issued call ahead of the confirmation gate, and a
+    key only lands in the ledger when a mutating call comes back
+    `indeterminate`. The intercom is intercepted before `mcp.dispatch`, so it
+    is never inside the registry's timeout and has no indeterminate outcome to
+    return -- which is the fact that keeps the pre-gate arm dead here, and the
+    fact a single `return MCPCallResult(indeterminate=True)` would kill."""
+    tts = _FakeTts()
+    llm = _SpeakIntoLLM({"room": "livingroom", "message": "dinner is ready"})
+    async with _organizer(
+        tmp_path, llm, [DESK_UI, LIVING_SPEAKER, LIVING_MIC], tts=tts
+    ) as (org, _sink):
+        outcome = TurnRecord()
+        trace = org.traces.open("desk-test")
+        attempts = [
+            {"room": "livingroom", "message": "dinner is ready"},  # queued
+            {"room": "livingroom", "message": "again"},  # already announced
+            {"room": "desk", "message": "to myself"},  # own room
+            {"room": "kitchen", "message": "nobody there"},  # no speaker
+            {"room": "livingroom", "message": ""},  # nothing to say
+        ]
+        try:
+            for i, args in enumerate(attempts):
+                call = LLMToolCall(
+                    call_id=f"c{i}", server="room", name="speak_into", args=args
+                )
+                result = await org._speak_into_room(  # noqa: SLF001
+                    call, "s1", "desk", trace, outcome
+                )
+                assert result.indeterminate is False, args
+        finally:
+            trace.close()
+            await org.flush()
+
+        # Nothing the intercom returned could put a key in the ledger.
+        assert outcome.in_flight == set()
+
+
+async def test_a_re_issued_announcement_is_refused_after_its_gate_not_before(
+    tmp_path: Path,
+) -> None:
+    """A second identical call in one turn is answered by the per-turn cap,
+    which sits BELOW the confirmation gate -- not by the in-flight ledger,
+    which sits above it. Both refuse, so only the wording and the second
+    confirmation prompt tell them apart, and inverting the two would move the
+    intercom to the one arm of `_run_tool_calls` that answers without asking
+    the room."""
+    tts = _FakeTts()
+    llm = _TwiceIdenticallyLLM()
+    async with _organizer(
+        tmp_path, llm, [DESK_UI, LIVING_SPEAKER, LIVING_MIC], tts=tts
+    ) as (org, sink):
+        confirms = asyncio.create_task(_grant_confirms(org, sink, "desk-ui"))
+        try:
+            await asyncio.wait_for(org.handle_user_text("desk-ui", "tell them"), 5.0)
+            await org.flush()
+        finally:
+            confirms.cancel()
+
+    asked = [m for _cid, m in sink if m.get("type") == "tool_confirm_request"]
+    assert len(asked) == 2  # each attempt asked the room for itself
+
+    results = _tool_result_texts(llm.passes)
+    assert "queued" in results[0]
+    assert "already been passed" in results[1]
+    assert "already attempted" not in results[1].lower()
+    assert _announcements(sink) == ["Message from the desk. dinner is ready"]

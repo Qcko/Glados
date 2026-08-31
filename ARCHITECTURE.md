@@ -151,6 +151,15 @@ not an edge case.
   Protocol-level field, not per-server convention.
 - **Permission gates are per-user.** A confirm from one speaker does not
   authorise another. Confirms are spoken back to the room that initiated.
+- **A capability whose effect lands in another room gives that room a VETO.**
+  The intercom is the first: the target room hears the attribution, then a
+  held gap, and the ordinary voice barge-in ends the message before it is
+  spoken. A veto is not an authorisation gate and never substitutes for the
+  initiator's -- it is asked of the party the effect happens to, who cannot
+  know whether anyone in the initiating room really asked. So the two compose
+  in one direction only: the gate above still decides whether the effect may
+  be attempted, and the veto only ever removes it. Declining the veto (a room
+  may opt out of the gap) therefore costs a courtesy, never a permission.
 - **No context bleed.** Memory, prompts, and tool results are isolated per
   session.
 

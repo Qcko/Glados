@@ -48,11 +48,33 @@ class RoomQueueManager:
         # forward the signal -- see close() for the rationale).
         self._active_actions: dict[str, asyncio.Task] = {}
 
-    def enqueue(self, room_id: str, action: Action) -> None:
+    def enqueue(
+        self, room_id: str, action: Action, *, max_depth: int | None = None
+    ) -> bool:
         """Append `action` to `room_id`'s FIFO. Spawns the room's worker
         on first enqueue. Synchronous -- returns once the item is queued,
-        not once it completes."""
+        not once it completes.
+
+        `max_depth` bounds what the CALLER is willing to pile up behind:
+        with it set, an enqueue onto a room already holding that many
+        pending actions queues nothing and returns False. Opt-in per call
+        rather than a property of the queue, because the two callers want
+        opposite answers -- a human's own turn in their own room must never
+        be dropped on the floor, while an announcement from elsewhere costs
+        that room's occupant head-of-line time and is the thing a bound
+        exists to stop accumulating.
+
+        The depth counts everything pending, not announcements alone. A room
+        whose own occupant already has a backlog is the room an announcement
+        has least claim to join.
+        """
         queue = self._queues.get(room_id)
+        if queue is not None and max_depth is not None and queue.qsize() >= max_depth:
+            log.info(
+                "room %s queue at depth %d; refusing a bounded enqueue (max %d)",
+                room_id, queue.qsize(), max_depth,
+            )
+            return False
         if queue is None:
             queue = asyncio.Queue()
             self._queues[room_id] = queue
@@ -61,6 +83,7 @@ class RoomQueueManager:
                 name=f"room-worker:{room_id}",
             )
         queue.put_nowait(action)
+        return True
 
     def clear(self, room_id: str) -> int:
         """Drop pending actions from a room's queue. Returns the number
@@ -85,11 +108,34 @@ class RoomQueueManager:
         return queue.qsize() if queue is not None else 0
 
     async def flush(self) -> None:
-        """Wait until every room's queue is fully drained. Test hook --
-        production callers should not need this because in-flight turns
-        broadcast their own Done/Cancelled and observers wait on the wire."""
-        for queue in list(self._queues.values()):
-            await queue.join()
+        """Wait until every room's queue is fully drained, including queues
+        that did not exist when the call was made.
+
+        A single pass over a snapshot is not enough: a turn in one room can
+        hand work to another (the intercom), creating that room's queue and
+        its worker mid-flush. A snapshot pass returns while that work is still
+        running, and a caller that tears down straight afterwards cancels it --
+        which reads as the feature dropping messages rather than as the flush
+        being early. So this runs passes until it finds a fixed point: nothing
+        queued anywhere and no action still running.
+
+        Test hook -- production callers should not need this because in-flight
+        turns broadcast their own Done/Cancelled and observers wait on the
+        wire."""
+        while True:
+            # Yields once per pass so that a pass which finds nothing to await
+            # cannot spin: every suspension point below is conditional, and a
+            # loop whose only `await` is conditional is a busy-wait waiting to
+            # happen.
+            await asyncio.sleep(0)
+            queues = list(self._queues.values())
+            idle = all(queue.empty() for queue in queues) and all(
+                task.done() for task in self._active_actions.values()
+            )
+            if idle:
+                return
+            for queue in queues:
+                await queue.join()
 
     async def close(self) -> None:
         """Cancel all room workers and the action they're currently running.
@@ -111,6 +157,11 @@ class RoomQueueManager:
                 pass
         self._queues.clear()
         self._workers.clear()
+        # Cleared here too, not only by the worker's finally: both waits above
+        # are bounded, and a timeout leaves a not-done task in this map with
+        # the queue dict already emptied -- the one state in which `flush`'s
+        # pass finds nothing to await and spins on a live core.
+        self._active_actions.clear()
 
     async def _cancel_active_action(self, room_id: str) -> None:
         """If the worker for `room_id` is mid-action, cancel that action and
