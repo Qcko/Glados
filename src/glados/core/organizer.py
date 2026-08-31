@@ -2197,10 +2197,23 @@ class Organizer:
         broadcast is per-room; replies from outside the room are dropped
         by `handle_tool_confirm_response`."""
         request_id = uuid.uuid4().hex
-        # Short-circuit: no clients in the room means the broadcast would
-        # land nowhere and we'd waste the full ttl waiting for nobody.
-        # Common case is a UI client that just dropped mid-turn.
-        if not self.clients_in_room(room_id):
+        # Short-circuit: a room with nobody who can ANSWER would take the
+        # broadcast and then the full ttl of silence. Two ways to be that
+        # room, and for a long time only the first was checked:
+        #
+        #   - No clients at all -- typically a UI client that dropped
+        #     mid-turn.
+        #   - Clients, but none that can send `tool_confirm_response`. A
+        #     speaker-only room (mic + speaker, no screen) is exactly this:
+        #     the request goes out to a microphone and a loudspeaker,
+        #     neither of which has any way to answer, and the room's FIFO
+        #     worker is held for `confirm_timeout_s` before denying anyway.
+        #
+        # Both deny, so this changes no authorisation -- a gated call from a
+        # room that cannot confirm was always going to be refused. What it
+        # changes is that the room is refused in milliseconds instead of
+        # being mute for half a minute first.
+        if not self._room_can_confirm(room_id):
             trace.event(
                 "tool_confirm_no_clients",
                 request_id=request_id,
@@ -2248,6 +2261,21 @@ class Organizer:
         finally:
             self._pending_confirms.pop(request_id, None)
             self._confirm_room.pop(request_id, None)
+
+    def _room_can_confirm(self, room_id: str) -> bool:
+        """Whether anyone in `room_id` could answer a confirmation request.
+
+        `tool_confirm_response` is sent by the browser client only -- the room
+        clients (`client_room/mic.py`, `speaker.py`) send `hello` and
+        `playback_done` and nothing else -- so the answer is "a `ui` client is
+        connected here". Role rather than a declared capability because role is
+        what the protocol has today; a client that advertises its own
+        capabilities (ARCH section 13, v7) is where this lookup should move."""
+        for cid in self.clients_in_room(room_id):
+            binding = self.binding_for_client(cid)
+            if binding is not None and binding.role == "ui":
+                return True
+        return False
 
     async def handle_tool_confirm_response(
         self, client_id: str, response: ToolConfirmResponse
