@@ -145,6 +145,48 @@ class OllamaLLM:
             await self._client.aclose()
             self._client = None
 
+    async def price_prompt(
+        self, messages: list[LLMMessage], tools: list[ToolSpec]
+    ) -> int | None:
+        """Exactly how many tokens this prompt costs, per the model itself.
+
+        `num_predict=0` asks the server to evaluate the prompt and generate
+        nothing, and the reply still carries `prompt_eval_count`. That is the
+        real tokenizer through the real code path -- no bundled `tokenizer.json`
+        to drift out of step with a swapped model, and no character estimate
+        (measured 15% LOW, which is the unsafe direction for a budget).
+
+        The catch, and why this prices boot-time checks rather than every turn:
+        an over-long prompt is truncated here too, so the answer saturates at
+        `num_ctx` and says THAT you overflowed without saying by how much. It
+        can verify a prompt fits; it cannot compute how much to shed.
+
+        Returns None if the daemon cannot be reached or answers without a
+        count -- the caller decides whether an unknown size is fatal, since a
+        boot check and a per-turn check disagree about that.
+        """
+        payload = {
+            "model": self._model,
+            "messages": [self._to_ollama_msg(m) for m in messages],
+            "stream": False,
+            "keep_alive": self._keep_alive,
+            "options": {**self._build_options(), "num_predict": 0},
+        }
+        if tools:
+            name_map = {self._sanitise(t): t for t in tools}
+            payload["tools"] = [
+                self._to_ollama_tool(k, v) for k, v in name_map.items()
+            ]
+        try:
+            response = await self._ensure_client().post(
+                f"{self._host}/api/chat", json=payload
+            )
+            response.raise_for_status()
+        except httpx.HTTPError:
+            log.warning("could not price the prompt against %s", self._model)
+            return None
+        return response.json().get("prompt_eval_count")
+
     async def chat(
         self, messages: list[LLMMessage], tools: list[ToolSpec]
     ) -> AsyncIterator[LLMEvent]:

@@ -8,9 +8,15 @@ found", which reads exactly like the truth."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from glados.core.tool_payload_cap import PayloadCap, cap_tool_payload
+from glados.core.tool_payload_cap import (
+    PayloadCap,
+    cap_tool_payload,
+    clamp_result_bytes,
+)
 
 
 def _items(n: int) -> list[dict]:
@@ -154,3 +160,53 @@ def test_a_short_list_still_counts_as_recognised() -> None:
 
 def test_a_missing_key_is_not_recognised() -> None:
     assert not cap_tool_payload({"nope": _items(9)}, PayloadCap(max_items=5, items_key="items")).recognised
+
+
+# ---- the security ceiling (bytes), distinct from the UX cap above --------
+
+
+def test_a_short_result_is_untouched() -> None:
+    clamped = clamp_result_bytes("hello", 100)
+    assert clamped.text == "hello"
+    assert not clamped.clamped
+    assert clamped.original_bytes == clamped.kept_bytes == 5
+
+
+def test_an_oversized_result_is_cut_to_the_ceiling() -> None:
+    clamped = clamp_result_bytes("x" * 100, 10)
+    assert clamped.clamped
+    assert len(clamped.text.encode("utf-8")) == 10
+    assert clamped.original_bytes == 100
+    assert clamped.kept_bytes == 10
+
+
+def test_the_ceiling_counts_bytes_not_characters() -> None:
+    """The whole reason this is a byte cap.
+
+    `json.dumps` defaults to `ensure_ascii=True`, so one CJK character becomes
+    a six-character escape. A character ceiling would under-count
+    attacker-chosen content roughly sixfold, in the unsafe direction.
+    """
+    payload = json.dumps({"t": "\u4f60\u597d"})
+    assert len(payload) > 6 * 2
+    clamped = clamp_result_bytes(payload, 8)
+    assert clamped.clamped
+    assert len(clamped.text.encode("utf-8")) <= 8
+
+
+def test_truncation_never_splits_a_multibyte_character() -> None:
+    """A sliced UTF-8 sequence must be dropped, not emitted as a replacement.
+
+    The cut lands mid-character by construction here: a 3-byte character with
+    a 2-byte allowance.
+    """
+    clamped = clamp_result_bytes("\u4f60\u597d", 2)
+    assert clamped.clamped
+    clamped.text.encode("utf-8").decode("utf-8")
+    assert "\ufffd" not in clamped.text
+
+
+def test_a_ceiling_of_zero_keeps_nothing_and_still_returns() -> None:
+    clamped = clamp_result_bytes("anything", 0)
+    assert clamped.text == ""
+    assert clamped.clamped

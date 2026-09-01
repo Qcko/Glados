@@ -54,7 +54,7 @@ from .protocols import (
 )
 from .room_queues import RoomQueueManager
 from .sessions import SessionRegistry
-from .tool_payload_cap import PayloadCap, cap_tool_payload
+from .tool_payload_cap import PayloadCap, cap_tool_payload, clamp_result_bytes
 from .traces import TraceStore
 from .turn_outcome import (
     TurnRecord,
@@ -199,6 +199,53 @@ _SILENT_TURN_AFTER_MUTATION_REPLIES = (
 # tells the model that anything inside that wrapper is data rather than
 # instructions, so an instruction delivered there is one it has been told to
 # ignore. It explains; the in-flight ledger below is what actually enforces.
+# Said OUTSIDE the `<external>` wrapper, so it is GLaDOS speaking rather than
+# payload. A marker inside would sit in the region the system prompt tells the
+# model to ignore, which is the one place it cannot do its job -- and an
+# attacker cannot forge this line, because the defang denies them any way to
+# write after the closing tag.
+_CLAMPED_NOTE = (
+    "GLaDOS note, not tool output: that result was longer than allowed and was "
+    "cut off. Treat it as incomplete; say so rather than inventing the rest."
+)
+
+# Default ceiling on one serialized tool result, in UTF-8 bytes. Sized against
+# the shipped 12288-token window: generous for any legitimate result (a Dunnes
+# basket, an agenda) while leaving a flooding payload nowhere near the ~4k
+# tokens it needs to evict the system prompt. Config overrides it; nothing
+# disables it.
+_MAX_RESULT_BYTES = 2048
+
+# Ceiling on the tool bytes RETAINED across the session's history, which is what
+# turns the per-result clamp into a bound on the whole prompt. A turn-count cap
+# cannot do this job -- eight turns of full-sized results is eight times a
+# number chosen by the attacker.
+#
+# Sized from measurements, not a guess. Dense content prices at 1.14
+# bytes/token on the shipped model (English prose is 4.49), so 4096 bytes is
+# ~3.6k tokens. Against the 12288 window that leaves
+# `system+tools (~3.9k, SESSION.md 19-08-2026) + 3.6k + num_predict 4096`
+# = ~11.6k, which fits with roughly 700 tokens to spare. The per-result cap is
+# deliberately half of this, so two full-sized results can be retained rather
+# than one shedding the other immediately.
+#
+# The tool-schema half of that prefix is an ESTIMATE carried from an older
+# measurement; the boot check prices the real one and refuses to start if this
+# no longer holds, naming the knob to turn.
+_MAX_HISTORY_EXTERNAL_BYTES = 4096
+
+
+def _turn_starts(messages: list[LLMMessage]) -> list[int]:
+    """Indices where a turn begins. A turn starts at a user message."""
+    return [i for i, m in enumerate(messages) if m.role == "user"]
+
+
+def _external_bytes(messages: list[LLMMessage]) -> int:
+    return sum(
+        len((m.content or "").encode("utf-8")) for m in messages if m.role == "tool"
+    )
+
+
 _INDETERMINATE_NOTE = (
     "GLaDOS note, not tool output: that call was sent but never answered, so it "
     "may already have taken effect. Do not issue it again. Say the outcome is "
@@ -438,7 +485,11 @@ class Organizer:
         room_policy: "RoomPolicyLookup | None" = None,
         now: "Callable[[], datetime] | None" = None,
         veto_pause_s: float = _VETO_PAUSE_S,
+        max_result_bytes: int = _MAX_RESULT_BYTES,
+        max_history_external_bytes: int = _MAX_HISTORY_EXTERNAL_BYTES,
     ) -> None:
+        self._max_result_bytes = max_result_bytes
+        self._max_history_external_bytes = max_history_external_bytes
         self.llm = llm
         # Gates the first turn behind the boot LLM warm-up (_await_llm_warm).
         # Defaults to SET ("warm") so an Organizer built without a server
@@ -1297,14 +1348,67 @@ class Organizer:
         if outcome.untrusted_seen:
             self._untrusted_sessions.add(session_id)
 
+    def budget_inputs(self) -> tuple[str, int]:
+        """What the boot budget check needs from the turn assembler.
+
+        The two quantities that decide whether a session can overflow the
+        window live here -- the system prompt actually in force (config
+        override included) and the ceiling on retained tool bytes. Handing them
+        over beats server.py reading private attributes, and keeps the check
+        honest if either changes.
+        """
+        return self._system_prompt, self._max_history_external_bytes
+
     def _cap_history(self, messages: list[LLMMessage]) -> list[LLMMessage]:
-        """Keep only the last `_history_max_turns` turns. A turn starts at a
-        user message, so slice from the Nth-from-last user message -- that keeps
-        each kept turn whole (its assistant + tool messages travel with it)."""
-        user_idxs = [i for i, m in enumerate(messages) if m.role == "user"]
+        """Keep only the last `_history_max_turns` turns, then only as many of
+        those as fit the external-bytes ceiling.
+
+        A turn starts at a user message, so slicing from the Nth-from-last user
+        message keeps each kept turn whole (its assistant + tool messages travel
+        with it). Both bounds slice on the same boundary, for the same reason: a
+        tool message severed from the assistant message that called it is
+        conversation state some backends reject outright.
+        """
+        return self._within_external_budget(
+            self._within_turn_count(messages)
+        )
+
+    def _within_turn_count(self, messages: list[LLMMessage]) -> list[LLMMessage]:
+        user_idxs = _turn_starts(messages)
         if len(user_idxs) <= self._history_max_turns:
             return messages
         return messages[user_idxs[-self._history_max_turns]:]
+
+    def _within_external_budget(
+        self, messages: list[LLMMessage]
+    ) -> list[LLMMessage]:
+        """Drop the oldest whole turns until retained tool bytes fit the ceiling.
+
+        A turn-count cap alone does not bound a session, and the gap is not
+        theoretical: priced against the shipped model, adversarially dense
+        content costs **1.14 bytes per token** against 4.49 for English prose.
+        So eight retained turns of capped results is eight times a number
+        measured near the 1:1 ceiling -- at a 4096-byte result cap that is
+        ~29k tokens against a 12288 window, and the front-truncation that
+        deletes the section 7 rule is back, assembled across turns instead of
+        in one payload.
+
+        Only `role="tool"` content counts. User and assistant text is GLaDOS's
+        own conversation, bounded by the turn cap and by how much a person says
+        out loud; the attacker-sized quantity is what tools bring in.
+        """
+        if self._max_history_external_bytes <= 0:
+            return messages
+        while _external_bytes(messages) > self._max_history_external_bytes:
+            starts = _turn_starts(messages)
+            if len(starts) <= 1:
+                # One turn left and still over. Shedding further would sever a
+                # tool message from its call, and the per-result clamp already
+                # bounds this turn -- so keep it and let the pre-send check
+                # speak up rather than corrupt the conversation shape.
+                return messages
+            messages = messages[starts[1]:]
+        return messages
 
     async def _run_one_llm_pass(
         self,
@@ -1852,8 +1956,26 @@ class Organizer:
             # client and `traces/` keep the whole result and only the SPOKEN
             # channel is narrowed. A cap upstream of those would destroy data
             # rather than abbreviate speech.
-            content = self._capped_for_speech(spec, result)
+            content = self._capped_for_model(spec, result)
             raw = json.dumps(content) if result.ok else (result.error or "error")
+            # The security ceiling, applied to the SERIALIZED string and before
+            # the defang below. Order is load-bearing: clamping the wrapped
+            # string would drop the closing tag and manufacture the very
+            # wrapper escape the defang exists to prevent. Truncating ahead of
+            # the defang cannot create a close tag either -- a sliced
+            # `</external>` is inert text.
+            clamped = clamp_result_bytes(raw, self._max_result_bytes)
+            if clamped.clamped:
+                trace.event(
+                    "external_result_capped",
+                    call_id=tc.call_id,
+                    server=tc.server,
+                    tool=tc.name,
+                    untrusted=bool(spec is not None and spec.untrusted),
+                    original_bytes=clamped.original_bytes,
+                    kept_bytes=clamped.kept_bytes,
+                )
+            raw = clamped.text
             # `spec` already fetched above for the requires_confirmation
             # check -- reuse rather than another registry lookup.
             if spec is not None and spec.untrusted and not answered_from_ledger:
@@ -1876,6 +1998,8 @@ class Organizer:
                 # would also hand the model our own refusal inside the region
                 # the system prompt tells it to ignore.
                 wrapped = raw
+            if clamped.clamped:
+                wrapped = f"{wrapped}\n{_CLAMPED_NOTE}"
             if mutating and result.indeterminate:
                 # Appended after the wrapper closes, so this line is GLaDOS
                 # speaking to the model rather than payload the model has been
@@ -2136,13 +2260,18 @@ class Organizer:
         trace.event("intercom_veto_window", room_id=room_id, seconds=round(held, 3))
         await asyncio.sleep(held)
 
-    def _capped_for_speech(
+    def _capped_for_model(
         self, spec: "ToolSpec | None", result: MCPCallResult
     ) -> object:
         """The payload the model should see. Never raises: a cap that cannot be
         applied returns the result untouched, because the tolerable failure is
         the long list we already have, not a dead turn or a silent "nothing
-        found" that reads exactly like the truth."""
+        found" that reads exactly like the truth.
+
+        Named for the model, not for speech, because that is what it feeds --
+        its output is what gets wrapped and sent. The motivation was spoken
+        length; the effect was never limited to it, and the old name misled a
+        design review into believing the prompt path had no cap at all."""
         if not result.ok or spec is None or spec.max_items is None:
             return result.content
         try:

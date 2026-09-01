@@ -101,3 +101,37 @@ def _rebuilt(content: Any, items_key: str | None, shown: list[Any], withheld: in
     # count of something else, and the model must not read it as this one.
     rebuilt[WITHHELD_KEY] = withheld
     return rebuilt
+
+
+@dataclass(frozen=True)
+class ClampedBytes:
+    text: str
+    clamped: bool
+    original_bytes: int
+    kept_bytes: int
+
+
+def clamp_result_bytes(raw: str, limit_bytes: int) -> ClampedBytes:
+    """Hard ceiling on a serialized tool result, in UTF-8 BYTES.
+
+    Distinct from `cap_tool_payload` above and deliberately not merged with it.
+    That one is a UX cap: per-tool, opt-in, item-counted, and legitimately
+    absent. This is a security cap: global, mandatory, byte-valued, and with no
+    opt-out -- because the payload that carried the measured attack was a single
+    long string, which is precisely the shape an item cap declines to touch.
+
+    Bytes rather than characters because the string is measured AFTER
+    `json.dumps`, whose default `ensure_ascii=True` expands one non-ASCII
+    character into a six-character backslash-u escape. A character ceiling would
+    be a sixfold under-count for attacker-chosen content, in the unsafe
+    direction.
+
+    Truncation lands on a UTF-8 boundary: slicing bytes can cut a multi-byte
+    sequence in half, and `errors="ignore"` drops that partial tail rather than
+    emitting a replacement character the model would read as content.
+    """
+    encoded = raw.encode("utf-8")
+    if len(encoded) <= limit_bytes:
+        return ClampedBytes(raw, False, len(encoded), len(encoded))
+    kept = encoded[:limit_bytes].decode("utf-8", errors="ignore")
+    return ClampedBytes(kept, True, len(encoded), len(kept.encode("utf-8")))

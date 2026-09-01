@@ -62,6 +62,7 @@ from .logging_setup import setup_logging
 from . import memory_gate
 from .ollama_lifecycle import OllamaLifecycle
 from .organizer import Organizer
+from .prompt_budget import measure_boot_budget
 from .secrets import KeyringSecrets, SecretsStore
 from .protocols import (
     AdminClientMessage,
@@ -538,6 +539,56 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         tool_router=tool_router,
     )
 
+    async def _assert_prompt_budget(_app: FastAPI, cfg) -> None:
+        """Refuse to start if a session could overflow the context window.
+
+        Front-truncation is silent: the failure this prevents produces no error
+        and no log line, just a model that stopped being told to treat external
+        content as data. So the check belongs at boot, where a human is
+        watching and the message can name the knob, rather than mid-turn where
+        GLaDOS would have to apologise out loud.
+
+        Skipped rather than fatal when the backend cannot price a prompt -- a
+        fake in tests, a daemon that is not up yet, or an adapter whose window
+        is not its own to know (llama.cpp reads the real one from the server's
+        launch flags). An unknown budget is not a failed one.
+        """
+        if cfg.llm.num_ctx is None or cfg.llm.num_predict is None:
+            log.info("prompt budget not checked: num_ctx/num_predict unset")
+            return
+        system_prompt, external_ceiling = _app.state.organizer.budget_inputs()
+        verdict = await measure_boot_budget(
+            _app.state.llm,
+            system_prompt=system_prompt,
+            tools=_app.state.mcp.specs(),
+            max_history_external_bytes=external_ceiling,
+            num_ctx=cfg.llm.num_ctx,
+            num_predict=cfg.llm.num_predict,
+        )
+        if verdict is None:
+            # On ollama the window is known by construction (the validator
+            # above refuses None), so a prompt that cannot be priced is a
+            # daemon problem, not an unknowable budget -- and silently
+            # skipping is how the check goes missing on the instance that
+            # most needs it. Loud, but still not fatal: a daemon that is slow
+            # to come up must not brick the boot.
+            log.warning(
+                "prompt budget NOT CHECKED: %s backend could not price a "
+                "prompt. The context-flooding guarantee is unverified for "
+                "this run.",
+                cfg.llm.backend,
+            )
+            return
+        if not verdict.fits:
+            raise RuntimeError("prompt budget: " + verdict.detail)
+        log.info(
+            "prompt budget ok: %s (system+tools %d, retained %d, reply %d)",
+            verdict.detail,
+            verdict.fixed_prefix_tokens,
+            verdict.retained_external_tokens,
+            verdict.num_predict,
+        )
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         # Make sure the Ollama daemon is up before the first turn can land.
@@ -666,6 +717,11 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         # and fabricates (SESSION 2026-06-15); a turn that beats this is held by
         # the organizer's _await_llm_warm until the model is warm. Mark cold
         # synchronously BEFORE yield so no turn can slip past while it's loading.
+        # Proof, before any turn can land, that the worst case this
+        # configuration can assemble still fits the model's window. Runs here
+        # because it needs the FULL tool list -- the schema block is a large
+        # part of the fixed prefix and it grows as servers are added.
+        await _assert_prompt_budget(_app, glados_cfg)
         _app.state.organizer.expect_llm_warmup()
         llm_warm_task = asyncio.create_task(
             _app.state.organizer.warm_up_llm(), name="llm-warmup"

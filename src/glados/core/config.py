@@ -225,6 +225,41 @@ class LLMConfig(BaseModel):
     _TEXT_TOOL_MODELS = ("ministral",)
 
     @model_validator(mode="after")
+    def _ollama_needs_an_explicit_window(self) -> "LLMConfig":
+        """`num_ctx = None` omits the key and hands the window back to Ollama.
+
+        Ollama's own default is small, and a small window is the whole T3
+        attack: the prompt is truncated from the front and the system prompt
+        carrying the section 7 `<external>` rule goes first, with no error and
+        no log line. `None` is therefore not "use a sensible default" here, it
+        is "disable a security property quietly" -- and it defeats the boot
+        budget check too, which cannot judge a window it does not know.
+
+        Left alone on `llamacpp`, where the real window is the server's launch
+        `-c` and this field is only an expectation, and on `fake`, which never
+        sends the option anywhere.
+        """
+        if self.backend != "ollama":
+            return self
+        if self.num_ctx is None:
+            raise ValueError(
+                "llm.num_ctx must be set explicitly on the ollama backend: "
+                "omitting it falls back to Ollama's small default, which "
+                "silently truncates the system prompt away"
+            )
+        # The coupled half. `num_predict = None` leaves generation unbounded,
+        # so a long reply eats the same window from the other end -- and it
+        # also makes the boot budget uncomputable, which skips the check
+        # rather than failing it.
+        if self.num_predict is None:
+            raise ValueError(
+                "llm.num_predict must be set explicitly on the ollama backend: "
+                "unbounded generation consumes the same window the prompt "
+                "must fit inside"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _text_tool_format_matches_model(self) -> "LLMConfig":
         """A model whose calls arrive as text needs the parser turned on.
 
