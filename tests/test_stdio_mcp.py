@@ -695,3 +695,114 @@ async def test_toy_stdio_dispatch_round_trip(stdio_app: TestClient) -> None:
     result = await registry.dispatch("toy_stdio", "add", {"a": 2, "b": 3}, env)
     assert result.ok
     assert result.content == {"sum": 5}
+
+
+# ---- an intentional stop is not a death ---------------------------------
+
+
+async def test_a_stop_does_not_report_the_child_dying_as_a_death(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """EOF during a teardown we asked for is expected, not a crash.
+
+    `_stop_child` cancels the reader before closing stdin precisely so the
+    self-inflicted EOF cannot reach `_mark_dead`, but that ordering does
+    nothing about a child which exits on its own inside the same window. The
+    `_stopping` guard covers that case. Set here directly because the race it
+    closes is, by nature, not reproducible on demand.
+
+    The state flags are NOT the point -- `sleep` and `_wake` both reset them
+    afterwards. The point is the log: an ordinary shutdown must not leave a
+    `died: subprocess closed stdout (EOF)` at ERROR for somebody to chase.
+    """
+    server = _make_inline_server(_INLINE_SERVER, server_id="stopper")
+    await server.start()
+    await server.initialize()
+    try:
+        with caplog.at_level(logging.ERROR, logger="glados.mcp.stdio_client"):
+            server._stopping = True
+            server._mark_dead("subprocess closed stdout (EOF)")
+            server._stopping = False
+        assert server._dead is False
+        assert server._died_reason is None
+        assert not [r for r in caplog.records if "died" in r.getMessage()]
+    finally:
+        await server.aclose()
+
+
+async def test_closing_still_reports_the_close_after_the_stop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The guard must not swallow `aclose`'s own death notice.
+
+    `aclose` calls `_stop_child` and then `_mark_dead("server closed")`, which
+    is what fails every pending caller. A `_stopping` flag left set -- or
+    cleared too late -- would silently turn that into a no-op and strand them,
+    which is the one way this change could do real damage.
+    """
+    server = _make_inline_server(_INLINE_SERVER, server_id="closer")
+    await server.start()
+    await server.initialize()
+    with caplog.at_level(logging.ERROR, logger="glados.mcp.stdio_client"):
+        await server.aclose()
+    assert server._stopping is False
+    assert server._dead is True
+    assert server._died_reason == "server closed"
+    assert any("server closed" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_pending_call_still_fails_when_the_server_is_closed() -> None:
+    """The behaviour behind the previous test, stated as the caller sees it."""
+    server = _make_inline_server(_INLINE_SERVER, server_id="pending")
+    await server.start()
+    await server.initialize()
+    waiter = asyncio.get_running_loop().create_future()
+    server._pending[999] = waiter
+    await server.aclose()
+    assert waiter.done()
+    with pytest.raises(StdioServerError):
+        waiter.result()
+
+
+async def test_the_stop_holds_the_guard_for_the_whole_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_stop_child` must actually SET the flag, or the guard is dead code.
+
+    The other guard tests set `_stopping` themselves to reach the branch, so
+    none of them would notice if the teardown stopped raising it -- the guard
+    would then be unreachable and the spurious-death log would quietly return.
+
+    Sampled at BOTH ends of the window. The reader is settled first and the
+    child is awaited last, so a flag raised and then dropped early would leave
+    the second half unguarded while every assertion about the first half still
+    passed.
+    """
+    import glados.mcp.stdio_client as stdio_module
+
+    server = _make_inline_server(_INLINE_SERVER, server_id="holds")
+    await server.start()
+    await server.initialize()
+
+    at_settle: list[bool] = []
+    at_child_wait: list[bool] = []
+    real_settle = stdio_module._settle
+    real_wait = server._proc.wait
+
+    async def spying_settle(task):
+        at_settle.append(server._stopping)
+        await real_settle(task)
+
+    async def spying_wait():
+        at_child_wait.append(server._stopping)
+        return await real_wait()
+
+    monkeypatch.setattr(stdio_module, "_settle", spying_settle)
+    monkeypatch.setattr(server._proc, "wait", spying_wait)
+    await server.aclose()
+
+    assert at_settle, "the teardown never reached _settle"
+    assert at_child_wait, "the teardown never awaited the child"
+    assert all(at_settle), "the guard was not held while settling the reader"
+    assert all(at_child_wait), "the guard was not held while awaiting the child"
+    assert server._stopping is False

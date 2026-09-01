@@ -155,6 +155,19 @@ class StdioServer:
         self._dead = False
         self._died_reason: str | None = None
         self._closed = False
+        # True only for the duration of `_stop_child`. A child that exits of
+        # its own accord inside that window makes the reader observe EOF, which
+        # is `_read_loop`'s death signal -- and a death we asked for is not a
+        # death worth reporting.
+        #
+        # Its one live effect is the idle reap: of the three callers of
+        # `_stop_child`, `aclose` clears this before its own deliberate
+        # `_mark_dead`, and `_try_restart` only runs when `_dead` is already set
+        # (where `_mark_dead` was a no-op regardless). That leaves `sleep`,
+        # where the payoff is not state -- `sleep` resets `_dead` itself -- but
+        # the log: reaping an idle server must not leave a
+        # `died: subprocess closed stdout (EOF)` at ERROR for somebody to chase.
+        self._stopping = False
         # Auto-restart budget: up to `max_restarts` attempts within a
         # rolling `restart_window_s` window. Successful restarts also
         # count -- three crashes in a minute is a sign of a deeper problem
@@ -276,7 +289,7 @@ class StdioServer:
         return True
 
     def _mark_dead(self, reason: str) -> None:
-        if self._dead:
+        if self._dead or self._stopping:
             return
         self._dead = True
         self._died_reason = reason
@@ -622,34 +635,49 @@ class StdioServer:
     async def _stop_child(self) -> None:
         """Tear down the child process and its reader/stderr tasks. Cancels
         the reader BEFORE closing stdin so the resulting EOF can't race
-        `_mark_dead`. Leaves `_proc = None`. Shared by `aclose` (permanent),
-        `sleep` (dormant) and `_try_restart` (replacing a dead instance) -- the
-        caller sets the resulting state flag."""
-        await _settle(self._reader_task)
-        await _settle(self._stderr_task)
-        if self._proc is not None:
-            try:
-                if self._proc.stdin is not None and not self._proc.stdin.is_closing():
-                    self._proc.stdin.close()
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                await asyncio.wait_for(self._proc.wait(), timeout=_STOP_GRACE_S)
-            except asyncio.TimeoutError:
-                self._proc.kill()
+        `_mark_dead`, and holds `_stopping` for the whole teardown so a child
+        that exits on its own inside the window is not reported as a death
+        either. Leaves `_proc = None`. Shared by `aclose` (permanent), `sleep`
+        (dormant) and `_try_restart` (replacing a dead instance) -- the caller
+        sets the resulting state flag.
+
+        `_stopping` is a plain bool rather than a depth count, which is only
+        safe because every one of those three callers holds `_restart_lock`
+        across the await. A fourth caller added without it would let an inner
+        teardown clear the flag out from under an outer one."""
+        self._stopping = True
+        try:
+            await _settle(self._reader_task)
+            await _settle(self._stderr_task)
+            if self._proc is not None:
+                try:
+                    if self._proc.stdin is not None and not self._proc.stdin.is_closing():
+                        self._proc.stdin.close()
+                except Exception:  # noqa: BLE001
+                    pass
                 try:
                     await asyncio.wait_for(self._proc.wait(), timeout=_STOP_GRACE_S)
                 except asyncio.TimeoutError:
-                    # A Chrome tree that TerminateProcess did not reap would
-                    # otherwise hang here forever -- and `_try_restart` reaches
-                    # this from inside a dispatch the registry is timing.
-                    _log.warning(
-                        "stdio %s: child survived kill(); abandoning the handle",
-                        self.server_id,
-                    )
-        self._proc = None
-        self._reader_task = None
-        self._stderr_task = None
+                    self._proc.kill()
+                    try:
+                        await asyncio.wait_for(self._proc.wait(), timeout=_STOP_GRACE_S)
+                    except asyncio.TimeoutError:
+                        # A Chrome tree that TerminateProcess did not reap would
+                        # otherwise hang here forever -- and `_try_restart` reaches
+                        # this from inside a dispatch the registry is timing.
+                        _log.warning(
+                            "stdio %s: child survived kill(); abandoning the handle",
+                            self.server_id,
+                        )
+        finally:
+            # Cleared before the caller runs, so `aclose`'s own
+            # `_mark_dead("server closed")` still lands and still fails every
+            # pending caller. The handles are dropped here too: a teardown that
+            # raised part-way still leaves no half-owned child behind.
+            self._stopping = False
+            self._proc = None
+            self._reader_task = None
+            self._stderr_task = None
 
     async def sleep(self) -> None:
         """Put a lazy server dormant: stop the child but stay reanimatable.
