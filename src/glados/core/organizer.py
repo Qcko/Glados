@@ -234,10 +234,34 @@ _MAX_RESULT_BYTES = 2048
 # no longer holds, naming the knob to turn.
 _MAX_HISTORY_EXTERNAL_BYTES = 4096
 
+# Spoken when a turn's own tool results outgrow the in-flight ceiling. Fixed
+# text, assembled here rather than by the model: the bytes that triggered this
+# are attacker-chosen, and a reply that quoted or summarised them would hand
+# the payload the voice channel the cap exists to deny it.
+_HOP_BUDGET_MSG = (
+    "That brought back more than I can hold in one go, so I stopped there "
+    "rather than lose track of what I was told. Ask for a smaller piece of it."
+)
+
+# Said instead when a mutating call already landed, or timed out, earlier in
+# the same turn. The line above would be a claim that nothing happened, which
+# is the false reassurance every other guard here exists to prevent.
+_HOP_BUDGET_MSG_AFTER_ACTION = (
+    "That brought back more than I can hold in one go, so I stopped there. "
+    "Something I did earlier in this turn may already have taken effect -- "
+    "check before asking me again."
+)
+
 
 def _turn_starts(messages: list[LLMMessage]) -> list[int]:
     """Indices where a turn begins. A turn starts at a user message."""
     return [i for i, m in enumerate(messages) if m.role == "user"]
+
+
+def _holds_a_directive(messages: list[LLMMessage]) -> bool:
+    """A system message below the prompt is the harness speaking to the model
+    for this turn, never conversation -- so it is not ours to shed."""
+    return any(m.role == "system" for m in messages)
 
 
 def _external_bytes(messages: list[LLMMessage]) -> int:
@@ -798,6 +822,7 @@ class Organizer:
                 and classify(outcome) == "failed"
                 and not outcome.may_have_mutated()
                 and not said_nothing(outcome)
+                and not outcome.budget_exceeded
             ):
                 # Capability recovery (ARCH section 13) runs BEFORE difficulty
                 # escalation: a scoped failure most likely hid the tool the turn
@@ -809,6 +834,12 @@ class Organizer:
                 # that timed out counts, because the child may be running it as
                 # this decides. A later escalation then retries the full set,
                 # not the scoped one.
+                #
+                # A turn stopped by the hop budget is excluded for the same
+                # reason as a silent one, only more so: it failed on BYTES, and
+                # the full tool set is a bigger schema block, so the retry
+                # arrives at the same ceiling with less room than the attempt
+                # that already hit it.
                 #
                 # A turn that said NOTHING is excluded: that failure is the
                 # model exhausting its token budget before it started replying,
@@ -1156,6 +1187,15 @@ class Organizer:
             session_id, room_id, envelope, text, messages, trace, outcome
         )
         for _ in range(_MAX_TOOL_LOOP):
+            fitted = self._shed_for_hop(messages)
+            if fitted is None:
+                outcome.budget_exceeded = True
+                final_text = await self._handle_hop_budget(
+                    session_id, room_id, messages, outcome, trace
+                )
+                messages.append(LLMMessage(role="assistant", content=final_text))
+                break
+            messages = fitted
             pending_calls, assistant_text = await self._run_one_llm_pass(
                 llm, session_id, room_id, messages, trace, specs
             )
@@ -1246,12 +1286,19 @@ class Organizer:
         fire that side effect a second time (double cart-add / checkout). Better
         a visible primary `failed` than a duplicated mutation. "May" is the
         operative word -- a mutating call that timed out is recorded `ok=False`
-        and is exactly the case where a replay is least safe."""
+        and is exactly the case where a replay is least safe.
+
+        A turn stopped by the hop budget never escalates either. Escalation
+        answers "was the brain not good enough"; that turn ran out of WINDOW,
+        which a smarter model at the same `num_ctx` does not fix. Re-driving it
+        would dispatch the flooding tool a second time and speak the same fixed
+        line again, for a failure that is deterministic in bytes."""
         return (
             target == "primary"
             and self._escalate_on_failed
             and self._specialist_llm is not None
             and not outcome.may_have_mutated()
+            and not outcome.budget_exceeded
             and classify(outcome) == "failed"
         )
 
@@ -1410,6 +1457,52 @@ class Organizer:
             messages = messages[starts[1]:]
         return messages
 
+    def _shed_for_hop(
+        self, messages: list[LLMMessage]
+    ) -> list[LLMMessage] | None:
+        """Bring a prompt about to be SENT inside the retained-bytes ceiling,
+        or report that it cannot be. `None` means stop the turn.
+
+        The gap `prompt_budget` names in its own docstring. `_cap_history` runs
+        when a turn COMMITS, so it bounds what the next turn starts from and
+        nothing else -- but the tool loop appends each pass's results as it
+        goes, and eight passes of capped results is eight times the ceiling the
+        boot check priced. Front-truncation is silent, so the turn that grew
+        past the window is exactly the turn that stops being governed by the
+        section 7 rule while it reads attacker-chosen bytes. Checking here, at
+        every send rather than at turn start, is what makes the boot
+        inequality true of every prompt instead of only the first.
+
+        The ceiling is deliberately the same `_max_history_external_bytes` the
+        boot check priced, not a second number derived for this path. Two
+        ceilings that are supposed to agree are two ceilings that will drift,
+        and the one the boot check measured is the one whose fit is proven.
+
+        Shedding stops at the current turn's own boundary: the oldest whole
+        turns go first, and when the live turn alone is over there is nothing
+        left to drop that would not sever a tool message from the assistant
+        message that called it. That is the case worth failing on -- it takes a
+        tool returning capped-to-the-limit results several passes running,
+        which is the flooding shape, not an ordinary turn.
+
+        `messages[0]` is the system prompt and never sheds; dropping the rule
+        to make room for the content it governs would be the attack, performed
+        by the defence. Neither does a system message further in, which is a
+        harness directive riding with the turn rather than conversation --
+        today `_finish_the_job`'s nudge, sitting just before the live user
+        message. Shedding it would silently downgrade that documented single
+        bounded retry to a bare replay of the utterance that just confabulated,
+        so the turn stops instead."""
+        if self._max_history_external_bytes <= 0:
+            return messages
+        system, rest = messages[0], messages[1:]
+        while _external_bytes(rest) > self._max_history_external_bytes:
+            starts = _turn_starts(rest)
+            if len(starts) <= 1 or _holds_a_directive(rest[: starts[1]]):
+                return None
+            rest = rest[starts[1]:]
+        return [system, *rest]
+
     async def _run_one_llm_pass(
         self,
         llm: LLM,
@@ -1484,6 +1577,36 @@ class Organizer:
             room_id, AssistantDelta(session_id=session_id, text=msg)
         )
         trace.event("tool_loop_exhausted", limit=_MAX_TOOL_LOOP)
+        return msg
+
+    async def _handle_hop_budget(
+        self,
+        session_id: str,
+        room_id: str,
+        messages: list[LLMMessage],
+        outcome: TurnRecord,
+        trace,
+    ) -> str:
+        """End a turn whose in-flight tool bytes will not fit the window.
+
+        The trace carries the sizes because the spoken line deliberately does
+        not: an operator needs to know which turn blew the ceiling and by how
+        much, and that is the surface where attacker-chosen bytes cannot be
+        mistaken for GLaDOS speaking."""
+        msg = (
+            _HOP_BUDGET_MSG_AFTER_ACTION
+            if outcome.may_have_mutated()
+            else _HOP_BUDGET_MSG
+        )
+        await self._broadcast(
+            room_id, AssistantDelta(session_id=session_id, text=msg)
+        )
+        trace.event(
+            "hop_budget_exceeded",
+            external_bytes=_external_bytes(messages[1:]),
+            ceiling=self._max_history_external_bytes,
+            may_have_mutated=outcome.may_have_mutated(),
+        )
         return msg
 
     async def _emit_turn_outcome(

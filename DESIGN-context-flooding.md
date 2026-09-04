@@ -1,6 +1,6 @@
 # DESIGN -- T3: context flooding evicts the `<external>` rule
 
-Status: **B1, B2, B4 built; B3 and B5 partial; D4 deferred.** Roster run
+Status: **B1, B2, B3, B4 built; B5 partial; D4 deferred.** Roster run
 01-09-2026 (Architect, Security, Model/Inference-Performance). This document is
 the *how*; the threat and the measurements live in `SESSION.md` under T3, and
 the proof artifact is `scripts/flood_probe.py` (`bfa419a`).
@@ -122,7 +122,7 @@ flowchart TD
     W --> M["marker appended OUTSIDE the wrapper<br/>-- attacker cannot write here"]
     M --> H["append to messages"]
     H --> HB["B1b -- shed oldest WHOLE turns<br/>until retained tool bytes fit"]
-    HB --> B{"B3 -- prompt + num_predict<br/>&lt;= num_ctx ?<br/>(not built yet)"}
+    HB --> B{"B3 -- in-flight tool bytes<br/>&lt;= retained ceiling ?"}
     B -- yes --> S["send to the model"]
     B -- no --> SH["shed whole history turns,<br/>coarse chunks"]
     SH --> B2{"fits now?"}
@@ -191,9 +191,15 @@ real but not generous, and the tool-block figure is carried from an older
 measurement rather than priced here; the boot check prices the live one and
 refuses to start if it no longer holds.
 
-Still open: B3 (a per-hop assertion inside the tool loop) and the second half
-of B5 (estimate-versus-actual drift, and alerting on ratio and streak rather
-than occurrence).
+B3 shipped as `Organizer._shed_for_hop`, and it asserts the retained-BYTES
+ceiling at every send rather than an estimated token count. Re-deriving tokens
+per hop would have meant a second estimator with its own constants, disagreeing
+with the boot check's measurement in a direction nobody would notice; holding
+the byte ceiling the boot check actually priced makes the inequality above true
+of every prompt a turn assembles, using the one number that was measured.
+
+Still open: the second half of B5 (estimate-versus-actual drift, and alerting
+on ratio and streak rather than occurrence).
 
 ## Before D4 ships
 

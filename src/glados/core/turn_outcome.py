@@ -4,7 +4,8 @@ A turn can end three ways from the harness/router's point of view:
 
 - ``done`` -- the model did what was asked (or answered conversationally).
 - ``needs-user`` -- the model handed back with a question without acting.
-- ``failed`` -- a tool error went unrecovered, or the tool loop blew its budget.
+- ``failed`` -- a tool error went unrecovered, or the tool loop blew its
+  budget of passes or of prompt bytes.
 
 The classification is derived from *observable* tool results, never from the
 model's self-report. A drifting local model narrates failure cheerfully (see
@@ -77,6 +78,11 @@ class TurnRecord:
     tools: list[ToolRecord] = field(default_factory=list)
     final_text: str = ""
     loop_exhausted: bool = False
+    # The turn's own tool results outgrew the in-flight byte ceiling, so it
+    # was stopped before a send that would have been truncated from the
+    # front. Distinct from `loop_exhausted`: the loop had passes left, the
+    # window did not. See `Organizer._shed_for_hop`.
+    budget_exceeded: bool = False
     # True when the user's request was an imperative to change external state
     # (set by the organizer via core/utterance.is_action_request). Drives the
     # goal-check: such a turn is only `done` if a mutating call actually landed.
@@ -157,7 +163,7 @@ def classify(turn: TurnRecord) -> TurnOutcomeKind:
     Priority order matters: an unrecovered tool error is ``failed`` even when
     the turn ends on a question (T6 ended on a cheerful question *after* two
     errors -- that is a failure, not a clarification request)."""
-    if turn.loop_exhausted:
+    if turn.loop_exhausted or turn.budget_exceeded:
         return "failed"
     if _has_unrecovered_error(turn.tools):
         return "failed"

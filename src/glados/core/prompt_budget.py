@@ -10,12 +10,18 @@ the tool bytes RETAINED across a session, so "does a retained session fit?" has
 an answer at boot -- checked once, where a human is watching, rather than
 measured on every turn while a listener waits.
 
-**This is a necessary condition, not a proof, and the gap is named.** History is
-capped when a turn COMMITS, so a turn in flight can carry more: the tool loop
-runs several passes and each appends its own capped results before any of it is
-committed. Bounding that needs the per-hop assertion the design calls B3, which
-is not built. Until it is, a passing check here means "a retained session fits",
-not "no prompt can overflow".
+History is capped when a turn COMMITS, so this check alone would only bind what
+a turn STARTS from: the tool loop runs several passes and each appends its own
+capped results before any of it is committed. `Organizer._shed_for_hop` (the
+design's B3) closes that by holding the same ceiling at every send inside the
+loop, so what is priced here is what is actually assembled -- not just on the
+first prompt of a turn but on all of them.
+
+What that pair does NOT bound is conversation prose. The inequality below has a
+term for the system prompt, the tool schemas, the retained tool bytes and the
+reply, and no term for what the user and GLaDOS say to each other; that is held
+down by the turn cap and by how much a person says out loud, which is a
+judgement rather than a proof.
 
 The history ceiling is what this prices, NOT the per-result cap multiplied by
 the turn depth. Those two disagree, and the retained-bytes ceiling is the one
