@@ -54,6 +54,7 @@ from .protocols import (
 )
 from .room_queues import RoomQueueManager
 from .sessions import SessionRegistry
+from .prompt_pressure import StreakAlarm, log_alarms
 from .tool_payload_cap import PayloadCap, cap_tool_payload, clamp_result_bytes
 from .traces import TraceStore
 from .turn_outcome import (
@@ -514,6 +515,11 @@ class Organizer:
     ) -> None:
         self._max_result_bytes = max_result_bytes
         self._max_history_external_bytes = max_history_external_bytes
+        # One clamp is a big page and says nothing. A RUN of clamps is a tool
+        # returning capped-to-the-limit results pass after pass, which is the
+        # flooding shape -- and it was indistinguishable from the ordinary case
+        # while both spoke at the same volume on every occurrence.
+        self._clamp_alarm = StreakAlarm("external_clamp_pressure")
         self.llm = llm
         # Gates the first turn behind the boot LLM warm-up (_await_llm_warm).
         # Defaults to SET ("warm") so an Organizer built without a server
@@ -1503,6 +1509,53 @@ class Organizer:
             rest = rest[starts[1]:]
         return [system, *rest]
 
+    def _note_clamp(self, clamped, tc, spec, trace) -> None:
+        """Record every clamp; alarm only on a run of them.
+
+        The trace event stays per-occurrence and unchanged, because a trace is
+        a record and an operator reconstructing a turn needs every clamp in it.
+        What changes is that it is no longer ALSO the alert: it fired on every
+        Dunnes page, which is the muting failure the B5 table names, and the
+        turn where a tool returns capped-to-the-limit results pass after pass
+        looked exactly like the turn where one page was long.
+
+        A result that fits resets the streak, so what survives to speak is
+        consecutive clamps rather than a tally of unrelated big pages across a
+        session. The ratio carried is how far over the ceiling the worst of
+        them was -- a page 1.1x the cap and a payload 40x it are the same event
+        under a boolean, and only one of them is an attack shape.
+        """
+        if not clamped.clamped:
+            self._clamp_alarm.reset()
+            return
+        untrusted = bool(spec is not None and spec.untrusted)
+        trace.event(
+            "external_result_capped",
+            call_id=tc.call_id,
+            server=tc.server,
+            tool=tc.name,
+            untrusted=untrusted,
+            original_bytes=clamped.original_bytes,
+            kept_bytes=clamped.kept_bytes,
+        )
+        alarm = self._clamp_alarm.observe(
+            clamped.original_bytes / max(1, clamped.kept_bytes),
+            f"tool {tc.server}/{tc.name} returned results over the "
+            f"{self._max_result_bytes}-byte ceiling on consecutive passes "
+            f"(untrusted={untrusted}) -- sustained clamping is what a flooding "
+            f"payload looks like from here, not what one long page looks like",
+        )
+        if alarm is not None:
+            trace.event(
+                "external_clamp_pressure",
+                server=tc.server,
+                tool=tc.name,
+                untrusted=untrusted,
+                streak=alarm.streak,
+                worst_ratio=round(alarm.ratio, 2),
+            )
+            log_alarms(log, [alarm], source=f"{tc.server}/{tc.name}")
+
     async def _run_one_llm_pass(
         self,
         llm: LLM,
@@ -2088,16 +2141,7 @@ class Organizer:
             # the defang cannot create a close tag either -- a sliced
             # `</external>` is inert text.
             clamped = clamp_result_bytes(raw, self._max_result_bytes)
-            if clamped.clamped:
-                trace.event(
-                    "external_result_capped",
-                    call_id=tc.call_id,
-                    server=tc.server,
-                    tool=tc.name,
-                    untrusted=bool(spec is not None and spec.untrusted),
-                    original_bytes=clamped.original_bytes,
-                    kept_bytes=clamped.kept_bytes,
-                )
+            self._note_clamp(clamped, tc, spec, trace)
             raw = clamped.text
             # `spec` already fetched above for the requires_confirmation
             # check -- reuse rather than another registry lookup.

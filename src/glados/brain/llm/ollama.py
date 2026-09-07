@@ -30,13 +30,9 @@ from ...core.adapters import (
     LLMToolCall,
     ToolSpec,
 )
+from ...core.prompt_pressure import PromptPressureMonitor, log_alarms
 
 log = logging.getLogger(__name__)
-
-# Fraction of num_ctx the assembled prompt may reach before each turn warns.
-# Ollama truncates from the front without reporting it, so the only signal that
-# the system prompt is about to be evicted is the prompt size itself.
-_CONTEXT_PRESSURE_RATIO = 0.8
 
 
 class OllamaLLM:
@@ -84,9 +80,13 @@ class OllamaLLM:
         # Context pressure is a standing condition, not an event: on a workload
         # whose tool block is genuinely large it would be true on EVERY turn,
         # and a warning that fires every turn stops being read -- which is how
-        # the missing-num_ctx bug survived this long. Warn on the first crossing
-        # only; the per-turn numbers stay available at info level.
-        self._context_pressure_warned = False
+        # the missing-num_ctx bug survived this long. The monitor holds that
+        # judgement (a run of breaches speaks, a single one does not) along
+        # with the estimate-versus-actual drift check; the per-turn numbers
+        # stay available at info level regardless.
+        self._pressure = PromptPressureMonitor(
+            num_ctx=num_ctx, num_predict=num_predict
+        )
         # Ollama's /api/chat `keep_alive`: a number is SECONDS (with -1 the
         # "resident forever" sentinel), a string must be a unit duration
         # ("30m", "1h"). A bare-number string like "-1" is rejected (400), so
@@ -187,10 +187,22 @@ class OllamaLLM:
             return None
         return response.json().get("prompt_eval_count")
 
+    def adopt_boot_budget(
+        self, fixed_prefix_tokens: int, *, bytes_per_token: float | None = None
+    ) -> None:
+        """Hand the adapter what the boot check priced, so the drift alarm has
+        something to compare a live `prompt_eval_count` against."""
+        self._pressure.adopt_boot_budget(
+            fixed_prefix_tokens, bytes_per_token=bytes_per_token
+        )
+
     async def chat(
         self, messages: list[LLMMessage], tools: list[ToolSpec]
     ) -> AsyncIterator[LLMEvent]:
         name_map = {self._sanitise(t): t for t in tools}
+        # Priced from the messages BEFORE the send, because that is the only
+        # moment the estimate and the thing it estimates are the same object.
+        estimated = self._pressure.estimate_for(messages)
         payload = {
             "model": self._model,
             "messages": [self._to_ollama_msg(m) for m in messages],
@@ -230,7 +242,11 @@ class OllamaLLM:
                     isinstance(e, (LLMText, LLMToolCall)) for e in events
                 )
                 if chunk.get("done"):
-                    self._log_usage(chunk, produced_speakable=produced_speakable)
+                    self._log_usage(
+                        chunk,
+                        produced_speakable=produced_speakable,
+                        estimated_tokens=estimated,
+                    )
                 for event in self._filtered(events, held):
                     yield event
             for event in self._drain(name_map, held):
@@ -316,7 +332,13 @@ class OllamaLLM:
             options["repeat_penalty"] = self._repeat_penalty
         return options
 
-    def _log_usage(self, chunk: dict, *, produced_speakable: bool) -> None:
+    def _log_usage(
+        self,
+        chunk: dict,
+        *,
+        produced_speakable: bool,
+        estimated_tokens: int | None = None,
+    ) -> None:
         # The final chunk carries Ollama's own token accounting. Dropping it (as
         # this adapter did until 2026-08-17) is what made front-truncation
         # invisible: the prompt silently loses its head and nothing reports it.
@@ -360,21 +382,13 @@ class OllamaLLM:
                 self._num_predict,
                 reply_tokens,
             )
-        if self._num_ctx is None:
-            return
-        if prompt_tokens > self._num_ctx * _CONTEXT_PRESSURE_RATIO:
-            if self._context_pressure_warned:
-                return
-            self._context_pressure_warned = True
-            log.warning(
-                "assembled prompt is %s tokens against num_ctx=%s for model %s -- "
-                "Ollama truncates from the FRONT, so the system prompt (and with "
-                "it the <external> untrusted-content rule) is what gets evicted "
-                "first. Raise num_ctx or shrink the tool list / history.",
-                prompt_tokens,
-                self._num_ctx,
-                self._model,
-            )
+        log_alarms(
+            log,
+            self._pressure.observe(
+                prompt_tokens, estimated_tokens=estimated_tokens
+            ),
+            source=self._model,
+        )
 
     @staticmethod
     def _sanitise(spec: ToolSpec) -> str:

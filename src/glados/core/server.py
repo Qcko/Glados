@@ -581,6 +581,48 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             return
         if not verdict.fits:
             raise RuntimeError("prompt budget: " + verdict.detail)
+        # Hand the priced prefix to the adapter rather than dropping it. The
+        # boot check proves an inequality about prompts nobody has assembled
+        # yet, and without this the proof has no way of ever being contradicted
+        # by the prompts that actually get sent -- which is the whole of B5's
+        # runtime half. Optional on the protocol: a backend that cannot price a
+        # prompt returns None above and never reaches here.
+        adopt = getattr(_app.state.llm, "adopt_boot_budget", None)
+        if adopt is None:
+            # Needed for fakes, which have no such method -- but a rename or a
+            # wrapper around state.llm would disable the drift check with
+            # nothing anywhere saying so, and silent-loss-of-a-check is the
+            # exact failure class this slice exists to end.
+            log.warning(
+                "prompt drift NOT MONITORED: %s does not accept the boot "
+                "budget. Coupling checks still run; estimate-versus-actual "
+                "does not.",
+                type(_app.state.llm).__name__,
+            )
+        else:
+            # The density the check ACHIEVED, not the ceiling it asserts
+            # against. Estimating at the ceiling would price legitimately dense
+            # content above the estimate and alarm on it -- see
+            # PromptPressureMonitor.adopt_boot_budget.
+            adopt(
+                verdict.fixed_prefix_tokens,
+                bytes_per_token=(
+                    external_ceiling / verdict.retained_external_tokens
+                    if verdict.retained_external_tokens > 0
+                    else None
+                ),
+            )
+        # The router's specialist model is a separate adapter with its own
+        # system prompt and tool block, so this verdict does not describe it and
+        # handing it over would be worse than leaving it unset. Said out loud
+        # because "not covered" and "forgot to cover" look identical in a log.
+        specialist = getattr(_app.state, "specialist_llm", None)
+        if specialist is not None and specialist is not _app.state.llm:
+            log.info(
+                "prompt drift not monitored on the router's specialist model: "
+                "it is a distinct adapter whose prefix is not what this budget "
+                "priced. Coupling checks still run there."
+            )
         log.info(
             "prompt budget ok: %s (system+tools %d, retained %d, reply %d)",
             verdict.detail,

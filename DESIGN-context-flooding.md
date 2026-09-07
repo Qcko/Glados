@@ -1,9 +1,9 @@
 # DESIGN -- T3: context flooding evicts the `<external>` rule
 
-Status: **B1, B2, B3, B4 built; B5 partial; D4 deferred.** Roster run
-01-09-2026 (Architect, Security, Model/Inference-Performance). This document is
-the *how*; the threat and the measurements live in `SESSION.md` under T3, and
-the proof artifact is `scripts/flood_probe.py` (`bfa419a`).
+Status: **B1-B5 built; D4 deferred.** Roster run 01-09-2026 (Architect,
+Security, Model/Inference-Performance). This document is the *how*; the threat
+and the measurements live in `SESSION.md` under T3, and the proof artifact is
+`scripts/flood_probe.py` (`bfa419a`).
 
 **One decision in this document was overturned by measurement after the roster
 signed off. It is recorded below rather than edited away**, because the reason
@@ -130,7 +130,11 @@ flowchart TD
     B2 -- no --> F(["fail the turn: deterministic<br/>spoken line, never echoing<br/>capped content"])
     S -- "another tool call" --> R
     S --> A["B5 -- estimate vs actual<br/>prompt_eval_count"]
-    A -- "actual &gt; estimate" --> AL(["estimator unsafe -- alert"])
+    A -- "actual &gt; estimate" --> G{"streak gate:<br/>3 in a row, or<br/>1.25x worse than<br/>the last alarm?"}
+    C -- "clamped" --> G
+    A -- "prompt &gt; num_ctx - num_predict" --> G
+    G -- no --> Q["counted, silent"]
+    G -- yes --> AL(["alarm once,<br/>carrying the peak ratio"])
 
     BOOTOK["boot checks passed"] --> H
 
@@ -152,6 +156,8 @@ flowchart TD
     style T5 fill:#fdd,stroke:#c00
     style F fill:#fdd,stroke:#c00
     style AL fill:#fdd,stroke:#c00
+    style G fill:#eef,stroke:#66a
+    style Q fill:#eee,stroke:#999
     style C fill:#dfd,stroke:#080
     style HB fill:#dfd,stroke:#080
     style B fill:#dfd,stroke:#080
@@ -160,18 +166,32 @@ flowchart TD
 The red terminals are the three ways this design refuses rather than degrades
 silently, which is the whole point: today's failure is invisible.
 
-## Independent of the above, and true now
+## Independent of the above -- now done
 
-The context-pressure check in both adapters tests `prompt_tokens > 0.8 *
+Both items below shipped with B5, in `core/prompt_pressure.py`.
+
+The context-pressure check in both adapters tested `prompt_tokens > 0.8 *
 num_ctx` while the real invariant is `prompt_tokens + num_predict <= num_ctx`.
-At shipped values that is a **1638-token band** (9830 vs 8192) in which the
-coupling is violated and nothing warns. It reads `prompt_eval_count` off the
-completed response, so it can never *prevent* anything -- it is post-hoc ground
-truth, not a budget, and both are wanted. Two-line fix, not a prerequisite.
+At shipped values that was a **1638-token band** (9830 vs 8192) in which the
+coupling is violated and nothing warned. It now judges against the usable
+window, `num_ctx - num_predict`, with **no fraction on top** -- and that "two-
+line fix" framing was wrong in a way worth recording, because the first attempt
+carried the old `0.8` onto the usable window and thereby double-counted the
+margin. It breached at 6553 while the boot check certifies ~7500 and passes it,
+so the one prompt shape this design is built around would have alarmed on every
+send. The invariant breaches at `usable` exactly, and that is already early:
+front-truncation does not begin until `num_ctx`, a further `num_predict` away.
+The reservation *is* the headroom.
 
-`_CONTEXT_PRESSURE_RATIO` is duplicated verbatim in `ollama.py` and
-`llamacpp.py` with divergent warning strings; the judgement belongs in one
-shared module with adapters supplying numbers.
+It still reads `prompt_eval_count` off the completed response, so it remains
+post-hoc ground truth rather than a budget. That is the correct division of
+labour -- B3 prevents, B5 detects -- and both are wanted.
+
+`_CONTEXT_PRESSURE_RATIO` was duplicated verbatim in `ollama.py` and
+`llamacpp.py` with divergent warning strings. The judgement now lives in one
+module with the adapters supplying numbers, and the wording lives in
+`log_alarms` so one condition cannot read as two different problems depending
+on which backend is running.
 
 ## As built
 
@@ -182,6 +202,7 @@ shared module with adapters supplying numbers.
 | B2 boot inequality | `core/prompt_budget.py`, called from the lifespan before warm-up |
 | B4 explicit window | `LLMConfig` refuses `num_ctx = None` on the ollama backend |
 | repair path | `language_guard.build_repair_messages` takes the same clamp |
+| B5 alarms | `core/prompt_pressure.py`; adapters own a `PromptPressureMonitor`, the organizer owns a `StreakAlarm` for clamp pressure |
 
 Shipped defaults, priced against `ministral3:8b-instruct`: `max_result_bytes =
 2048`, `max_history_external_bytes = 4096`. System prompt 602 tokens, retained
@@ -198,8 +219,53 @@ with the boot check's measurement in a direction nobody would notice; holding
 the byte ceiling the boot check actually priced makes the inequality above true
 of every prompt a turn assembles, using the one number that was measured.
 
-Still open: the second half of B5 (estimate-versus-actual drift, and alerting
-on ratio and streak rather than occurrence).
+**B5 completed 07-09-2026.** Three alarms, all gated the same way.
+
+*Drift* is the half that was open. The boot check proves an inequality about
+prompts nobody has assembled yet, and until now the verdict was logged and
+dropped, so the proof had no way of ever being contradicted by the prompts
+actually sent. `server.py` now hands the priced prefix to the adapter, each send
+is estimated before dispatch, and the estimate is compared to the returned
+`prompt_eval_count`. The estimate is deliberately not a second tokenizer -- it
+is built from the two quantities the boot check already measured, so a
+disagreement is a statement *about the boot check* rather than about itself.
+
+The divisor is the density the boot check **achieved** (~1.14 on the shipped
+model), not `MAX_CREDIBLE_BYTES_PER_TOKEN`. Estimating at the 1.6 ceiling
+predicts ~40% fewer tokens than the check's own measurement of the same content,
+so legitimately dense bytes -- base64, minified JSON, source, any multibyte
+script -- would price above the estimate with the boot check having been wrong
+about nothing. The ceiling stays the fallback for a backend that reports none.
+
+*Streak, not occurrence*, is the second half, and it applies to all three
+alarms including the pre-existing `external_result_capped`. A single breach is
+recorded and stays silent; three consecutive speak once, carrying the peak
+ratio. The trace event stays per-occurrence, because a trace is a record and an
+operator reconstructing a turn needs every clamp in it -- what changed is that
+it is no longer also the alert.
+
+A streak gate alone would have been the old one-shot latch with a delay bolted
+on: the conditions worth alarming on are STANDING conditions, so they never
+produce the clean observation that re-arms the gate, and the first draft would
+have warned once per process while watching the ratio climb from 1.05x to 5x in
+silence. `ESCALATION_FACTOR` re-fires on material escalation, which is what
+makes it a gate rather than a latch.
+
+Two estimator omissions were found by review and both pushed the same way --
+estimate too low, so `actual > estimate` for reasons that say nothing about
+density. `tool_calls` arguments are serialized onto the wire but contributed no
+bytes, and *every* system message was skipped rather than only the boot-priced
+first one, leaving a harness directive riding with the turn paid for by
+nothing. An alarm made noisy by its own arithmetic is the failure the streak
+gate exists to prevent, and it would have been the harder one to diagnose.
+
+Known and accepted: the monitor is per-adapter-instance and the adapter is
+shared across rooms, so "consecutive" means consecutive *sends*, not consecutive
+sends within one conversation. The right trade only because every condition
+watched is a property of the process -- window, tool block, boot pricing --
+rather than of a session. The router's specialist model is a distinct adapter
+whose prefix this budget does not describe, so drift is not monitored there and
+boot says so out loud; coupling still runs.
 
 ## Before D4 ships
 

@@ -48,11 +48,11 @@ from ...core.adapters import (
     LLMToolCall,
     ToolSpec,
 )
+from ...core.prompt_pressure import PromptPressureMonitor, log_alarms
 
 log = logging.getLogger(__name__)
 
 _DONE = "[DONE]"
-_CONTEXT_PRESSURE_RATIO = 0.8
 
 
 class _PartialCall:
@@ -123,7 +123,13 @@ class LlamaCppLLM:
         self._num_ctx = num_ctx
         self._api_key = api_key
         self._transport = transport
-        self._context_pressure_warned = False
+        # `max_tokens` is this backend's spelling of the reply reservation, so
+        # it is what the coupling check must subtract from the window. Note the
+        # window itself stays an EXPECTATION here: the real one is
+        # llama-server's launch `-c`, which this adapter cannot see.
+        self._pressure = PromptPressureMonitor(
+            num_ctx=num_ctx, num_predict=max_tokens
+        )
         self._client: httpx.AsyncClient | None = None
 
     def _ensure_client(self) -> httpx.AsyncClient:
@@ -163,6 +169,12 @@ class LlamaCppLLM:
         self, messages: list[LLMMessage], tools: list[ToolSpec]
     ) -> AsyncIterator[LLMEvent]:
         name_map = build_name_map(tools)
+        # Priced from the messages BEFORE the send, because that is the only
+        # moment the estimate and the thing it estimates are the same object.
+        estimated = self._pressure.estimate_for(messages)
+        # One send advances the streak by one, whatever the server's usage
+        # reporting cadence turns out to be.
+        counted: set = set()
         payload: dict = {
             "model": self._model,
             "messages": [self._to_wire_msg(m) for m in messages],
@@ -204,7 +216,7 @@ class LlamaCppLLM:
                 chunk = self._parse_sse_line(line)
                 if chunk is None:
                     continue
-                self._log_usage(chunk)
+                self._log_usage(chunk, estimated_tokens=estimated, counted=counted)
                 for choice in chunk.get("choices") or []:
                     finish_reason = choice.get("finish_reason") or finish_reason
                     for event in self._events_from_delta(choice, partials):
@@ -361,7 +373,31 @@ class LlamaCppLLM:
             self._max_tokens,
         )
 
-    def _log_usage(self, chunk: dict) -> None:
+    def adopt_boot_budget(
+        self, fixed_prefix_tokens: int, *, bytes_per_token: float | None = None
+    ) -> None:
+        """Hand the adapter what the boot check priced, so the drift alarm has
+        something to compare a live usage report against."""
+        self._pressure.adopt_boot_budget(
+            fixed_prefix_tokens, bytes_per_token=bytes_per_token
+        )
+
+    def _log_usage(
+        self,
+        chunk: dict,
+        *,
+        estimated_tokens: int | None = None,
+        counted: set | None = None,
+    ) -> None:
+        """`counted` makes "once per send" structural rather than incidental.
+
+        This runs on EVERY SSE chunk. With OpenAI-shaped `include_usage` the
+        intermediates carry a null usage and only the last one reports, so today
+        the streak advances once per send -- but that is a property of the
+        server, not of this code, and a build that reported usage per chunk
+        would inflate a single send into a streak of dozens and fire the alarm
+        mid-stream. The ollama adapter gets this for free by keying on `done`.
+        """
         usage = chunk.get("usage")
         if not usage:
             return
@@ -374,23 +410,17 @@ class LlamaCppLLM:
             reply_tokens,
             self._num_ctx,
         )
-        if self._num_ctx is None or prompt_tokens is None:
-            return
-        if prompt_tokens > self._num_ctx * _CONTEXT_PRESSURE_RATIO:
-            if self._context_pressure_warned:
+        if counted is not None:
+            if counted:
                 return
-            self._context_pressure_warned = True
-            log.warning(
-                "assembled prompt is %s tokens against a CONFIGURED context of "
-                "%s for model %s -- the real window is llama-server's launch "
-                "-c, which this adapter cannot see, so treat this as the "
-                "expectation rather than the server's truth. If it is right, "
-                "the system prompt (and with it the <external> "
-                "untrusted-content rule) is what gets evicted first.",
-                prompt_tokens,
-                self._num_ctx,
-                self._model,
-            )
+            counted.add(True)
+        log_alarms(
+            log,
+            self._pressure.observe(
+                prompt_tokens, estimated_tokens=estimated_tokens
+            ),
+            source=self._model,
+        )
 
     @staticmethod
     def _to_wire_tool(sanitised_name: str, spec: ToolSpec) -> dict:

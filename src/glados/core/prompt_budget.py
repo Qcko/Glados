@@ -72,6 +72,13 @@ _DENSE_UNIT = "x7Q}{~2:_#9aZ|/%3&*8Kv$@1"
 # achieved density is asserted rather than trusted.
 _MAX_CREDIBLE_BYTES_PER_TOKEN = 1.6
 
+# The same number, under the name the runtime drift check imports it by. That
+# check asks whether a live prompt costs more tokens than this density predicts,
+# so it has to be the density this budget ASSERTED -- not the looser one some
+# particular boot happened to measure. Two names, deliberately one constant: an
+# alarm calibrated against anything else would be testing a claim nobody made.
+MAX_CREDIBLE_BYTES_PER_TOKEN = _MAX_CREDIBLE_BYTES_PER_TOKEN
+
 
 @dataclass(frozen=True)
 class BudgetVerdict:
