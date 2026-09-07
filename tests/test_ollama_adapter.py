@@ -16,6 +16,7 @@ from glados.core.prompt_pressure import DEFAULT_STREAK
 from glados.core.adapters import (
     LLMMessage,
     LLMText,
+    LLMUsage,
     LLMThinking,
     LLMToolCall,
     ToolSpec,
@@ -309,121 +310,11 @@ async def test_none_context_options_are_omitted_not_nulled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_warns_when_prompt_approaches_context_limit(caplog) -> None:
-    """Front-truncation is invisible on the wire, so prompt pressure is the only
-    signal that the system prompt is about to be evicted.
-
-    Sustained pressure is what speaks now, not the first crossing --
-    `core/prompt_pressure.StreakAlarm` carries why occurrence was the wrong
-    trigger."""
-    body = _ndjson(
-        {"message": {"content": "ok"}, "done": True, "prompt_eval_count": 9000}
-    )
-    adapter = OllamaLLM(num_ctx=8192, transport=_mock_transport(body))
-    with caplog.at_level("WARNING"):
-        for _ in range(DEFAULT_STREAK):
-            await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
-
-    assert any("context_pressure" in r.message for r in caplog.records)
-
-
-@pytest.mark.asyncio
-async def test_no_context_warning_when_prompt_is_small(caplog) -> None:
-    body = _ndjson(
-        {"message": {"content": "ok"}, "done": True, "prompt_eval_count": 100}
-    )
-    adapter = OllamaLLM(num_ctx=8192, transport=_mock_transport(body))
-    with caplog.at_level("WARNING"):
-        await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
-
-    assert not [r for r in caplog.records if r.levelname == "WARNING"]
-
-
-@pytest.mark.asyncio
-async def test_no_context_warning_when_num_ctx_unset(caplog) -> None:
-    """A real prompt count with num_ctx=None must neither warn nor raise. The
-    guard this pins is one edit from `int > None`, which would TypeError inside
-    the stream loop and kill the turn."""
-    body = _ndjson(
-        {"message": {"content": "ok"}, "done": True, "prompt_eval_count": 7000}
-    )
-    adapter = OllamaLLM(num_ctx=None, transport=_mock_transport(body))
-    with caplog.at_level("WARNING"):
-        await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
-
-    assert not [r for r in caplog.records if r.levelname == "WARNING"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "prompt_tokens, expect_warning", [(8193, True), (8192, False)]
-)
-async def test_context_pressure_ratio_boundary(
-    caplog, prompt_tokens: int, expect_warning: bool
-) -> None:
-    """Pin the boundary: with num_predict unset the usable window is the whole
-    8192, and the invariant breaches at that exactly. No fraction is applied on
-    top -- carrying one there would double-count the reply reservation and alarm
-    on the very configuration the boot check certifies."""
-    body = _ndjson(
-        {
-            "message": {"content": "ok"},
-            "done": True,
-            "prompt_eval_count": prompt_tokens,
-        }
-    )
-    adapter = OllamaLLM(num_ctx=8192, transport=_mock_transport(body))
-    with caplog.at_level("WARNING"):
-        for _ in range(DEFAULT_STREAK):
-            await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
-
-    warned = any("context_pressure" in r.message for r in caplog.records)
-    assert warned is expect_warning
-
-
-@pytest.mark.asyncio
-async def test_context_pressure_warns_once_while_it_persists(caplog) -> None:
-    """Pressure is a standing condition. Warning every turn on a large-tool-list
-    workload is how a warning stops being read, so a sustained breach produces
-    exactly one line however long it lasts."""
-    body = _ndjson(
-        {"message": {"content": "ok"}, "done": True, "prompt_eval_count": 9000}
-    )
-    adapter = OllamaLLM(num_ctx=8192, transport=_mock_transport(body))
-    with caplog.at_level("WARNING"):
-        for _ in range(DEFAULT_STREAK * 3):
-            await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
-
-    hits = [r for r in caplog.records if "context_pressure" in r.message]
-    assert len(hits) == 1
-
-
-@pytest.mark.asyncio
-async def test_one_pressure_crossing_stays_silent(caplog) -> None:
-    """The change this pins: a single breach is recorded and says nothing.
-
-    A workload that crosses the line on one unusually large turn and then
-    settles is not the flooding shape, and it is the case that trained an
-    operator to ignore the warning."""
-    body = _ndjson(
-        {"message": {"content": "ok"}, "done": True, "prompt_eval_count": 9000}
-    )
-    adapter = OllamaLLM(num_ctx=8192, transport=_mock_transport(body))
-    with caplog.at_level("WARNING"):
-        for _ in range(DEFAULT_STREAK - 1):
-            await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
-
-    assert not [r for r in caplog.records if "context_pressure" in r.message]
-
-
-@pytest.mark.asyncio
-async def test_pressure_counts_the_reply_reservation(caplog) -> None:
-    """The coupling bug the design flagged under "Independent of the above".
-
-    9000 tokens is under 0.8 * num_ctx (9830), so the old check said nothing --
-    while 9000 + num_predict 4096 is 13096 against a 12288 window, which has
-    already blown the reservation the reply needs. Judging against the USABLE
-    window (num_ctx less num_predict, so 8192) closes that 1638-token band."""
+async def test_yields_a_usage_event_for_the_organizer(caplog) -> None:
+    """The adapter MEASURES and no longer judges, and the numbers ride the
+    STREAM rather than a field on the adapter -- rooms run concurrently on one
+    shared adapter, so anything stored there is read by whichever turn arrives
+    first. See core/adapters.LLMUsage."""
     body = _ndjson(
         {"message": {"content": "ok"}, "done": True, "prompt_eval_count": 9000}
     )
@@ -431,69 +322,52 @@ async def test_pressure_counts_the_reply_reservation(caplog) -> None:
         num_ctx=12288, num_predict=4096, transport=_mock_transport(body)
     )
     with caplog.at_level("WARNING"):
-        for _ in range(DEFAULT_STREAK):
-            await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+        events = await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
 
-    assert any("context_pressure" in r.message for r in caplog.records)
+    usage = [e for e in events if isinstance(e, LLMUsage)]
+    assert len(usage) == 1
+    assert usage[0].prompt_tokens == 9000
+    assert (usage[0].num_ctx, usage[0].num_predict) == (12288, 4096)
+    assert not [r for r in caplog.records if "context_pressure" in r.message]
 
 
 @pytest.mark.asyncio
-async def test_drift_alarm_needs_the_boot_budget(caplog) -> None:
-    """No boot price, no estimate, no drift alarm -- and specifically no
-    invented one. The boot check declines to run when the backend cannot price
-    a prompt, and this must go quiet with it rather than manufacture the false
-    alarms the streak gate exists to avoid."""
+async def test_num_ctx_unset_still_yields_usage_and_does_not_raise() -> None:
+    """`num_ctx=None` must reach the event as None rather than blowing up
+    inside the stream loop. The `int > None` comparison that would TypeError
+    now lives in `_usable_window`, which silences the coupling check instead --
+    what is pinned HERE is only that the reading is still produced."""
     body = _ndjson(
         {"message": {"content": "ok"}, "done": True, "prompt_eval_count": 9000}
     )
-    adapter = OllamaLLM(num_ctx=100_000, transport=_mock_transport(body))
-    with caplog.at_level("WARNING"):
-        for _ in range(DEFAULT_STREAK):
-            await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
-
-    assert not [r for r in caplog.records if "estimator_drift" in r.message]
+    adapter = OllamaLLM(num_ctx=None, transport=_mock_transport(body))
+    events = await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+    usage = [e for e in events if isinstance(e, LLMUsage)]
+    assert [e.type for e in events if isinstance(e, LLMText)] == ["text"]
+    assert usage[0].prompt_tokens == 9000 and usage[0].num_ctx is None
 
 
 @pytest.mark.asyncio
-async def test_drift_alarm_fires_when_the_boot_price_is_optimistic(caplog) -> None:
-    """B5's runtime half. The boot check proved an inequality using a density
-    it asserted; if live prompts cost more tokens than that density predicts,
-    the proof does not describe what is being sent and every control resting on
-    it is a formality.
+async def test_no_usage_reported_means_no_usage_event() -> None:
+    """A stream that never reports a token count must yield no event at all.
+    Treating its absence as zero, or as an overflow, both invent a fact."""
+    body = _ndjson({"message": {"content": "ok"}, "done": True})
+    adapter = OllamaLLM(num_ctx=12288, transport=_mock_transport(body))
+    events = await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+    assert [e for e in events if isinstance(e, LLMUsage)] == []
 
-    num_ctx is huge so only the drift alarm can fire -- the point is to pin
-    drift on its own, not to re-test coupling."""
+
+@pytest.mark.asyncio
+async def test_estimate_rides_on_the_usage_event_once_boot_budget_is_adopted() -> None:
     body = _ndjson(
         {"message": {"content": "ok"}, "done": True, "prompt_eval_count": 9000}
     )
-    adapter = OllamaLLM(num_ctx=100_000, transport=_mock_transport(body))
-    adapter.adopt_boot_budget(100)
-    with caplog.at_level("WARNING"):
-        for _ in range(DEFAULT_STREAK):
-            await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
-
-    assert any("estimator_drift" in r.message for r in caplog.records)
-
-
-@pytest.mark.asyncio
-async def test_ordinary_prose_does_not_drift(caplog) -> None:
-    """The direction that makes the alarm usable rather than noise.
-
-    English prose measured 4.49 bytes/token against the 1.6 the budget assumes,
-    so a normal turn prices far under the estimate and stays silent. An alarm
-    that fired here would be muted within a week and would take the real signal
-    with it."""
-    body = _ndjson(
-        {"message": {"content": "ok"}, "done": True, "prompt_eval_count": 700}
-    )
-    adapter = OllamaLLM(num_ctx=100_000, transport=_mock_transport(body))
-    adapter.adopt_boot_budget(600)
-    prose = LLMMessage(role="user", content="the quick brown fox. " * 100)
-    with caplog.at_level("WARNING"):
-        for _ in range(DEFAULT_STREAK):
-            await _collect(adapter, [prose], [])
-
-    assert not [r for r in caplog.records if "estimator_drift" in r.message]
+    adapter = OllamaLLM(num_ctx=12288, transport=_mock_transport(body))
+    assert adapter._estimator.estimate_for([]) is None
+    adapter.adopt_boot_budget(600, bytes_per_token=1.14)
+    events = await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
+    usage = [e for e in events if isinstance(e, LLMUsage)][0]
+    assert usage.estimated_tokens >= 600
 
 
 @pytest.mark.asyncio
@@ -547,9 +421,12 @@ async def test_thinking_is_emitted_as_its_own_event_not_as_text() -> None:
     adapter = OllamaLLM(transport=_mock_transport(body))
     events = await _collect(adapter, [LLMMessage(role="user", content="hi")], [])
 
-    assert [type(e) for e in events] == [LLMThinking, LLMText]
-    assert events[0].text == "Let me check the tool result."
-    assert events[1].text == "Onions are on sale."
+    # LLMUsage rides the stream too now; this test is about the SPOKEN
+    # channel, so it filters to the two event kinds it is actually asserting on.
+    spoken = [e for e in events if not isinstance(e, LLMUsage)]
+    assert [type(e) for e in spoken] == [LLMThinking, LLMText]
+    assert spoken[0].text == "Let me check the tool result."
+    assert spoken[1].text == "Onions are on sale."
 
 
 @pytest.mark.asyncio

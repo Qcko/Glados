@@ -11,13 +11,25 @@ import pytest
 
 from glados.core.adapters import LLMMessage
 from glados.core.prompt_budget import MAX_CREDIBLE_BYTES_PER_TOKEN
+from glados.core.adapters import LLMUsage
 from glados.core.prompt_pressure import (
     DEFAULT_STREAK,
     ESCALATION_FACTOR,
     PromptPressureMonitor,
+    SessionPressureMonitors,
     StreakAlarm,
     estimated_prompt_tokens,
 )
+
+
+def _reading(prompt_tokens, *, num_ctx=None, num_predict=None, estimated=None):
+    return LLMUsage(
+        prompt_tokens=prompt_tokens,
+        model="test-model",
+        num_ctx=num_ctx,
+        num_predict=num_predict,
+        estimated_tokens=estimated,
+    )
 
 
 def _fire(alarm: StreakAlarm, ratio: float, times: int):
@@ -121,20 +133,20 @@ def test_estimate_prices_the_tool_schema_block_from_boot_only() -> None:
     ) == 3300
 
 
-def test_drift_needs_an_adopted_boot_budget() -> None:
-    mon = PromptPressureMonitor(num_ctx=None, num_predict=None)
-    assert mon.estimate_for([LLMMessage(role="user", content="hi")]) is None
+def test_drift_needs_an_estimate() -> None:
+    """No boot price means no estimate on the reading, and no drift alarm --
+    specifically not an invented one."""
+    mon = PromptPressureMonitor()
     for _ in range(DEFAULT_STREAK * 2):
-        assert mon.observe(99_999) == []
+        assert mon.observe(_reading(99_999)) == []
 
 
 def test_drift_fires_when_actual_exceeds_the_assumed_density() -> None:
-    mon = PromptPressureMonitor(num_ctx=None, num_predict=None)
-    mon.adopt_boot_budget(100)
+    mon = PromptPressureMonitor()
     kinds = [
         a.kind
         for _ in range(DEFAULT_STREAK)
-        for a in mon.observe(5000, estimated_tokens=200)
+        for a in mon.observe(_reading(5000, estimated=200))
     ]
     assert kinds == ["estimator_drift"]
 
@@ -154,8 +166,12 @@ def test_prose_prices_under_the_estimate() -> None:
 def test_coupling_is_judged_against_the_usable_window() -> None:
     """The band the design flagged: 9000 tokens is under 0.8 * 12288 (9830) so
     the old check was silent, while 9000 + 4096 already exceeds the window."""
-    mon = PromptPressureMonitor(num_ctx=12288, num_predict=4096)
-    kinds = [a.kind for _ in range(DEFAULT_STREAK) for a in mon.observe(9000)]
+    mon = PromptPressureMonitor()
+    kinds = [
+        a.kind
+        for _ in range(DEFAULT_STREAK)
+        for a in mon.observe(_reading(9000, num_ctx=12288, num_predict=4096))
+    ]
     assert kinds == ["context_pressure"]
 
 
@@ -168,11 +184,14 @@ def test_coupling_boundary_is_the_usable_window_with_no_fudge() -> None:
     `usable` exactly, and that is still early -- truncation is a further
     num_predict tokens away."""
     usable = 12288 - 4096
-    under = PromptPressureMonitor(num_ctx=12288, num_predict=4096)
-    over = PromptPressureMonitor(num_ctx=12288, num_predict=4096)
+    under, over = PromptPressureMonitor(), PromptPressureMonitor()
     for _ in range(DEFAULT_STREAK):
-        assert under.observe(usable) == []
-    fired = [a for _ in range(DEFAULT_STREAK) for a in over.observe(usable + 1)]
+        assert under.observe(_reading(usable, num_ctx=12288, num_predict=4096)) == []
+    fired = [
+        a
+        for _ in range(DEFAULT_STREAK)
+        for a in over.observe(_reading(usable + 1, num_ctx=12288, num_predict=4096))
+    ]
     assert [a.kind for a in fired] == ["context_pressure"]
 
 
@@ -180,9 +199,9 @@ def test_the_certified_worst_case_does_not_alarm() -> None:
     """The regression this replaced. `prompt_budget` blesses ~7500 prompt tokens
     at the shipped config; the alarm that fires on the one shape the design is
     built around is an alarm nobody can leave switched on."""
-    mon = PromptPressureMonitor(num_ctx=12288, num_predict=4096)
+    mon = PromptPressureMonitor()
     for _ in range(DEFAULT_STREAK * 2):
-        assert mon.observe(7508) == []
+        assert mon.observe(_reading(7508, num_ctx=12288, num_predict=4096)) == []
 
 
 def test_a_standing_breach_speaks_again_when_it_gets_materially_worse() -> None:
@@ -202,12 +221,11 @@ def test_unknown_window_silences_coupling_but_not_drift() -> None:
     """llama.cpp's real window is llama-server's launch `-c`, which the adapter
     cannot see. Guessing would be worse than silence -- but drift needs no
     window and must keep working."""
-    mon = PromptPressureMonitor(num_ctx=None, num_predict=4096)
-    mon.adopt_boot_budget(10)
+    mon = PromptPressureMonitor()
     kinds = [
         a.kind
         for _ in range(DEFAULT_STREAK)
-        for a in mon.observe(9999, estimated_tokens=20)
+        for a in mon.observe(_reading(9999, num_predict=4096, estimated=20))
     ]
     assert kinds == ["estimator_drift"]
 
@@ -216,21 +234,110 @@ def test_a_reservation_wider_than_the_window_silences_coupling() -> None:
     """Misconfiguration, not an attack. There is no usable window to judge
     against, and a negative one would make every prompt a breach -- the boot
     check is where that configuration should be refused."""
-    mon = PromptPressureMonitor(num_ctx=1024, num_predict=4096)
+    mon = PromptPressureMonitor()
     for _ in range(DEFAULT_STREAK * 2):
-        assert mon.observe(500) == []
+        assert mon.observe(_reading(500, num_ctx=1024, num_predict=4096)) == []
 
 
-def test_no_token_count_is_not_a_breach() -> None:
-    """A response without usage says nothing about pressure. Treating a missing
-    number as zero, or as an overflow, both invent a fact."""
-    mon = PromptPressureMonitor(num_ctx=8192, num_predict=4096)
+def test_no_reading_is_not_a_breach() -> None:
+    """A send that reported no usage says nothing about pressure. Treating its
+    absence as zero, or as an overflow, both invent a fact."""
+    mon = PromptPressureMonitor()
     for _ in range(DEFAULT_STREAK * 2):
         assert mon.observe(None) == []
 
 
+def test_streaks_do_not_cross_sessions() -> None:
+    """The defect this split exists to fix.
+
+    One adapter serves every room, so a monitor living there would assemble
+    "three consecutive breaches" out of three unrelated conversations. Spread
+    the same breaches across sessions and nothing should fire."""
+    mons = SessionPressureMonitors()
+    over = _reading(9000, num_ctx=12288, num_predict=4096)
+    for session in [f"s{i}" for i in range(DEFAULT_STREAK * 2)]:
+        assert mons.observe(session, over) == []
+
+
+def test_one_session_still_alarms_on_its_own_run() -> None:
+    mons = SessionPressureMonitors()
+    over = _reading(9000, num_ctx=12288, num_predict=4096)
+    fired = [a for _ in range(DEFAULT_STREAK) for a in mons.observe("room-a", over)]
+    assert [a.kind for a in fired] == ["context_pressure"]
+
+
+def test_a_clean_send_elsewhere_does_not_rearm_another_session() -> None:
+    """The other half of the old bug, and the easier one to miss: a clean
+    observation in ANY room used to reset a streak another room was building."""
+    mons = SessionPressureMonitors()
+    over = _reading(9000, num_ctx=12288, num_predict=4096)
+    fine = _reading(10, num_ctx=12288, num_predict=4096)
+    for _ in range(DEFAULT_STREAK - 1):
+        mons.observe("room-a", over)
+    mons.observe("room-b", fine)
+    fired = [a for a in mons.observe("room-a", over)]
+    assert [a.kind for a in fired] == ["context_pressure"]
+
+
+def test_session_monitors_are_bounded() -> None:
+    """A long-lived process creates sessions freely and is never told they are
+    finished, so an unbounded dict here would be a slow leak. Eviction costs
+    only a forgotten streak."""
+    mons = SessionPressureMonitors(max_sessions=4)
+    fine = _reading(10, num_ctx=12288, num_predict=4096)
+    for i in range(50):
+        mons.observe(f"s{i}", fine)
+    assert len(mons._monitors) <= 4
+
+
+def test_eviction_keeps_the_busy_session_not_the_oldest() -> None:
+    """Insertion order would evict the room that has been running since boot --
+    the busiest, and so the likeliest to be mid-breach -- the moment a burst of
+    short-lived sessions arrived. Least-recently-USED keeps it."""
+    mons = SessionPressureMonitors(max_sessions=3)
+    fine = _reading(10, num_ctx=12288, num_predict=4096)
+    mons.observe("kitchen", fine)
+    for i in range(10):
+        mons.observe(f"drive-by-{i}", fine)
+        mons.observe("kitchen", fine)
+    assert ("test-model", "kitchen") in mons._monitors
+
+
+def test_a_session_that_escalates_does_not_blend_two_brains() -> None:
+    """`_pick_brain` runs the specialist under the SAME session_id, with a
+    different model and a different window. Keyed on session alone, a clean
+    specialist send would re-arm a breach the primary was building toward --
+    the same defect along the brain axis instead of the room axis."""
+    mons = SessionPressureMonitors()
+    primary = LLMUsage(
+        prompt_tokens=9000, model="primary", num_ctx=12288, num_predict=4096
+    )
+    specialist = LLMUsage(
+        prompt_tokens=10, model="specialist", num_ctx=12288, num_predict=4096
+    )
+    for _ in range(DEFAULT_STREAK - 1):
+        mons.observe("kitchen", primary)
+    mons.observe("kitchen", specialist)
+    fired = mons.observe("kitchen", primary)
+    assert [a.kind for a in fired] == ["context_pressure"]
+
+
+def test_a_reading_nothing_can_judge_creates_no_monitor() -> None:
+    """No window and no estimate means neither check can fire, so an entry for
+    it would be one that never decides anything -- and on such a backend that
+    is every entry."""
+    mons = SessionPressureMonitors()
+    for i in range(20):
+        assert mons.observe(f"s{i}", _reading(9999)) == []
+    assert mons._monitors == {}
+
+
 @pytest.mark.parametrize("streak", [1, 2, 5])
 def test_streak_length_is_configurable(streak: int) -> None:
-    mon = PromptPressureMonitor(num_ctx=8192, num_predict=0, streak=streak)
-    fired = [a for _ in range(streak) for a in mon.observe(9000)]
+    mon = PromptPressureMonitor(streak=streak)
+    fired = [
+        a
+        for _ in range(streak)
+        for a in mon.observe(_reading(9000, num_ctx=8192, num_predict=0))
+    ]
     assert len(fired) == 1

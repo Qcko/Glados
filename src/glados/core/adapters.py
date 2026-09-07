@@ -94,8 +94,37 @@ class LLMToolCall(BaseModel):
     from_text: bool = False
 
 
+class LLMUsage(BaseModel):
+    """What one send actually cost, carried IN the stream.
+
+    An event rather than a field on the adapter, and that is the whole point.
+    One adapter instance serves every room, and `room_queues` gives each room
+    its own worker task without imposing extra serialisation -- so two `chat()`
+    calls interleave at every await, and a single slot on the adapter would be
+    read by whichever turn reached it first, judged against the wrong session's
+    monitor with the wrong window. Riding the stream makes the reading a
+    per-call local by construction: it reaches exactly the caller that produced
+    it, and can be neither lost nor misattributed however the tasks interleave.
+
+    Consumers that do not care simply do not match it -- every reader
+    type-switches rather than assuming a closed set.
+
+    `num_ctx` may be None (llama.cpp's real window is `llama-server`'s launch
+    `-c`, which the adapter cannot see) and `estimated_tokens` is None until the
+    boot budget has been adopted. Each silences its own check rather than
+    inviting a guess.
+    """
+
+    type: Literal["usage"] = "usage"
+    prompt_tokens: int
+    model: str
+    num_ctx: int | None = None
+    num_predict: int | None = None
+    estimated_tokens: int | None = None
+
+
 LLMEvent = Annotated[
-    LLMText | LLMThinking | LLMToolCall, Field(discriminator="type")
+    LLMText | LLMThinking | LLMToolCall | LLMUsage, Field(discriminator="type")
 ]
 
 

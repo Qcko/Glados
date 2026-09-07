@@ -25,6 +25,7 @@ from glados.core.adapters import (
     LLMText,
     LLMThinking,
     LLMToolCall,
+    LLMUsage,
     ToolSpec,
 )
 
@@ -243,3 +244,70 @@ async def test_unknown_call_replays_into_history_without_raising() -> None:
     )
     wire = LlamaCppLLM._to_wire_msg(msg)
     assert wire["tool_calls"][0]["function"]["name"] == "shop__drop_database"
+
+
+# ---- prompt pressure: this adapter had no coverage at all ------------------
+
+
+async def test_usage_rides_the_stream_as_an_event() -> None:
+    """Same contract as the ollama adapter: measure, do not judge, and put the
+    numbers in the stream rather than on the adapter -- one adapter instance
+    serves every room concurrently."""
+    body = _sse(
+        _delta({"content": "hi"}),
+        {"choices": [], "usage": {"prompt_tokens": 9000, "completion_tokens": 12}},
+    )
+    llm = LlamaCppLLM(
+        model="ministral", max_tokens=4096, num_ctx=12288,
+        transport=_mock_transport(body),
+    )
+    usage = [e for e in await _collect(llm) if isinstance(e, LLMUsage)]
+    assert len(usage) == 1
+    assert usage[0].prompt_tokens == 9000
+    # `max_tokens` is this backend's spelling of the reply reservation, and the
+    # coupling check subtracts it from the window -- so it must arrive mapped.
+    assert (usage[0].num_ctx, usage[0].num_predict) == (12288, 4096)
+
+
+async def test_usage_on_several_chunks_is_reconciled_by_the_consumer() -> None:
+    """The property the retired `counted` set used to hold.
+
+    `_log_usage` runs on EVERY SSE chunk. With OpenAI-shaped `include_usage`
+    only the last reports, but that is the server's behaviour, not this code's
+    guarantee -- a build reporting per chunk once would have advanced a streak
+    dozens of times for one send. Now it simply yields several events and the
+    organizer keeps the last, so a send is judged once whatever the cadence."""
+    body = _sse(
+        {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 1}},
+        {"choices": [], "usage": {"prompt_tokens": 20, "completion_tokens": 2}},
+        {"choices": [], "usage": {"prompt_tokens": 30, "completion_tokens": 3}},
+    )
+    llm = LlamaCppLLM(
+        model="ministral", max_tokens=4096, num_ctx=12288,
+        transport=_mock_transport(body),
+    )
+    usage = [e for e in await _collect(llm) if isinstance(e, LLMUsage)]
+    assert [u.prompt_tokens for u in usage] == [10, 20, 30]
+    assert usage[-1].prompt_tokens == 30
+
+
+async def test_estimate_reaches_the_usage_event() -> None:
+    body = _sse(
+        {"choices": [], "usage": {"prompt_tokens": 9000, "completion_tokens": 1}}
+    )
+    llm = LlamaCppLLM(
+        model="ministral", max_tokens=4096, num_ctx=12288,
+        transport=_mock_transport(body),
+    )
+    llm.adopt_boot_budget(600, bytes_per_token=1.14)
+    usage = [e for e in await _collect(llm) if isinstance(e, LLMUsage)][0]
+    assert usage.estimated_tokens >= 600
+
+
+async def test_no_usage_reported_yields_no_event() -> None:
+    body = _sse(_delta({"content": "hi"}, finish="stop"))
+    llm = LlamaCppLLM(
+        model="ministral", max_tokens=4096, num_ctx=12288,
+        transport=_mock_transport(body),
+    )
+    assert [e for e in await _collect(llm) if isinstance(e, LLMUsage)] == []

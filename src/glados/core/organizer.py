@@ -33,6 +33,7 @@ from .adapters import (
     LLMText,
     LLMThinking,
     LLMToolCall,
+    LLMUsage,
     ToolSpec,
 )
 from .config import ClientBinding, RoomPolicy
@@ -54,7 +55,7 @@ from .protocols import (
 )
 from .room_queues import RoomQueueManager
 from .sessions import SessionRegistry
-from .prompt_pressure import StreakAlarm, log_alarms
+from .prompt_pressure import SessionPressureMonitors, StreakAlarm, log_alarms
 from .tool_payload_cap import PayloadCap, cap_tool_payload, clamp_result_bytes
 from .traces import TraceStore
 from .turn_outcome import (
@@ -520,6 +521,11 @@ class Organizer:
         # flooding shape -- and it was indistinguishable from the ordinary case
         # while both spoke at the same volume on every occurrence.
         self._clamp_alarm = StreakAlarm("external_clamp_pressure")
+        # Prompt-pressure judgement lives HERE and not on the adapter, because
+        # an adapter is shared by every room and "three consecutive breaches"
+        # assembled from three unrelated conversations is not a streak. The
+        # organizer is the only thing that knows what a conversation is.
+        self._prompt_pressure = SessionPressureMonitors()
         self.llm = llm
         # Gates the first turn behind the boot LLM warm-up (_await_llm_warm).
         # Defaults to SET ("warm") so an Organizer built without a server
@@ -1573,6 +1579,10 @@ class Organizer:
         pending: list[LLMToolCall] = []
         text_chunks: list[str] = []
         thinking_chunks: list[str] = []
+        # A local, not a field on the adapter: rooms run concurrently on one
+        # shared adapter, so anything stored there is read by whichever turn
+        # arrives first. See `LLMUsage`.
+        usage: LLMUsage | None = None
         # aclosing guarantees the upstream HTTP stream gets aclose()'d on
         # CancelledError -- otherwise the model keeps generating tokens we'll
         # never read (ARCH section 6: cancellation must propagate end-to-end).
@@ -1590,6 +1600,11 @@ class Organizer:
                         thinking_chunks.append(event.text)
                     elif isinstance(event, LLMToolCall):
                         pending.append(event)
+                    elif isinstance(event, LLMUsage):
+                        # Last one wins. A backend that reports usage per chunk
+                        # rather than once at the end yields several, and a send
+                        # must be judged once whatever that cadence is.
+                        usage = event
         finally:
             # In a `finally` because a barge-in cancels the `async for` above,
             # and a plain call after the block would never run -- so the turn
@@ -1606,7 +1621,40 @@ class Organizer:
                 self._trace_thinking(trace, thinking_chunks)
             except Exception:
                 log.exception("failed to record reasoning for %s", session_id)
+            try:
+                self._judge_prompt_pressure(usage, session_id, trace)
+            except Exception:
+                log.exception("failed to judge prompt pressure for %s", session_id)
         return pending, "".join(text_chunks)
+
+    def _judge_prompt_pressure(
+        self, usage: LLMUsage | None, session_id: str, trace
+    ) -> None:
+        """Judge this send's cost against this conversation's own history.
+
+        In the same `finally` as the reasoning trace, and for the same reason: a
+        barge-in cancels the `async for` above, and a cancelled turn is exactly
+        the one whose prompt size is worth knowing. `usage` is None when no
+        backend reported one -- the fakes never do, and neither does a stream
+        cancelled before its final chunk -- and absence is not a breach.
+
+        Its own try/except at the call site mirrors the one around the reasoning
+        trace. `except Exception` cannot catch `CancelledError`, so nothing here
+        can replace a cancellation; the guard is against an alarm costing the
+        room a turn, which is never a trade worth making.
+        """
+        alarms = self._prompt_pressure.observe(session_id, usage)
+        if not alarms:
+            return
+        log_alarms(log, alarms, source=f"{usage.model} session={session_id}")
+        for alarm in alarms:
+            trace.event(
+                alarm.kind,
+                streak=alarm.streak,
+                worst_ratio=round(alarm.ratio, 2),
+                prompt_tokens=usage.prompt_tokens,
+                estimated_tokens=usage.estimated_tokens,
+            )
 
     @staticmethod
     def _trace_thinking(trace, chunks: list[str]) -> None:

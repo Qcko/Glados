@@ -46,9 +46,10 @@ from ...core.adapters import (
     LLMText,
     LLMThinking,
     LLMToolCall,
+    LLMUsage,
     ToolSpec,
 )
-from ...core.prompt_pressure import PromptPressureMonitor, log_alarms
+from ...core.prompt_pressure import PromptEstimator
 
 log = logging.getLogger(__name__)
 
@@ -123,13 +124,13 @@ class LlamaCppLLM:
         self._num_ctx = num_ctx
         self._api_key = api_key
         self._transport = transport
-        # `max_tokens` is this backend's spelling of the reply reservation, so
-        # it is what the coupling check must subtract from the window. Note the
-        # window itself stays an EXPECTATION here: the real one is
-        # llama-server's launch `-c`, which this adapter cannot see.
-        self._pressure = PromptPressureMonitor(
-            num_ctx=num_ctx, num_predict=max_tokens
-        )
+        # Prices a prompt; does not judge it. `max_tokens` is this backend's
+        # spelling of the reply reservation and rides in the `LLMUsage` event as
+        # `num_predict`, so the organizer's per-(model, session) monitor can
+        # subtract it from the window. Note the window itself stays an
+        # EXPECTATION here: the real one is llama-server's launch `-c`, which
+        # this adapter cannot see.
+        self._estimator = PromptEstimator()
         self._client: httpx.AsyncClient | None = None
 
     def _ensure_client(self) -> httpx.AsyncClient:
@@ -171,10 +172,7 @@ class LlamaCppLLM:
         name_map = build_name_map(tools)
         # Priced from the messages BEFORE the send, because that is the only
         # moment the estimate and the thing it estimates are the same object.
-        estimated = self._pressure.estimate_for(messages)
-        # One send advances the streak by one, whatever the server's usage
-        # reporting cadence turns out to be.
-        counted: set = set()
+        estimated = self._estimator.estimate_for(messages)
         payload: dict = {
             "model": self._model,
             "messages": [self._to_wire_msg(m) for m in messages],
@@ -216,7 +214,9 @@ class LlamaCppLLM:
                 chunk = self._parse_sse_line(line)
                 if chunk is None:
                     continue
-                self._log_usage(chunk, estimated_tokens=estimated, counted=counted)
+                usage_event = self._log_usage(chunk, estimated_tokens=estimated)
+                if usage_event is not None:
+                    yield usage_event
                 for choice in chunk.get("choices") or []:
                     finish_reason = choice.get("finish_reason") or finish_reason
                     for event in self._events_from_delta(choice, partials):
@@ -378,7 +378,7 @@ class LlamaCppLLM:
     ) -> None:
         """Hand the adapter what the boot check priced, so the drift alarm has
         something to compare a live usage report against."""
-        self._pressure.adopt_boot_budget(
+        self._estimator.adopt_boot_budget(
             fixed_prefix_tokens, bytes_per_token=bytes_per_token
         )
 
@@ -387,20 +387,20 @@ class LlamaCppLLM:
         chunk: dict,
         *,
         estimated_tokens: int | None = None,
-        counted: set | None = None,
-    ) -> None:
-        """`counted` makes "once per send" structural rather than incidental.
+    ) -> LLMUsage | None:
+        """Log the per-turn numbers and hand back what this send cost.
 
         This runs on EVERY SSE chunk. With OpenAI-shaped `include_usage` the
-        intermediates carry a null usage and only the last one reports, so today
-        the streak advances once per send -- but that is a property of the
-        server, not of this code, and a build that reported usage per chunk
-        would inflate a single send into a streak of dozens and fire the alarm
-        mid-stream. The ollama adapter gets this for free by keying on `done`.
+        intermediates carry a null usage and only the last one reports, but that
+        is the server's behaviour rather than this code's guarantee -- a build
+        that reported usage per chunk would yield several of these. Harmless by
+        construction now: the consumer keeps the LAST one it sees, so a send is
+        judged once whatever the cadence. The previous version needed a
+        `counted` set to hold that property; the shape holds it instead.
         """
         usage = chunk.get("usage")
         if not usage:
-            return
+            return None
         prompt_tokens = usage.get("prompt_tokens")
         reply_tokens = usage.get("completion_tokens")
         log.info(
@@ -410,16 +410,14 @@ class LlamaCppLLM:
             reply_tokens,
             self._num_ctx,
         )
-        if counted is not None:
-            if counted:
-                return
-            counted.add(True)
-        log_alarms(
-            log,
-            self._pressure.observe(
-                prompt_tokens, estimated_tokens=estimated_tokens
-            ),
-            source=self._model,
+        if prompt_tokens is None:
+            return None
+        return LLMUsage(
+            prompt_tokens=prompt_tokens,
+            model=self._model,
+            num_ctx=self._num_ctx,
+            num_predict=self._max_tokens,
+            estimated_tokens=estimated_tokens,
         )
 
     @staticmethod

@@ -28,9 +28,10 @@ from ...core.adapters import (
     LLMText,
     LLMThinking,
     LLMToolCall,
+    LLMUsage,
     ToolSpec,
 )
-from ...core.prompt_pressure import PromptPressureMonitor, log_alarms
+from ...core.prompt_pressure import PromptEstimator
 
 log = logging.getLogger(__name__)
 
@@ -77,16 +78,12 @@ class OllamaLLM:
         self._repeat_penalty = repeat_penalty
         self._think = think
         self._text_tool_format = text_tool_format
-        # Context pressure is a standing condition, not an event: on a workload
-        # whose tool block is genuinely large it would be true on EVERY turn,
-        # and a warning that fires every turn stops being read -- which is how
-        # the missing-num_ctx bug survived this long. The monitor holds that
-        # judgement (a run of breaches speaks, a single one does not) along
-        # with the estimate-versus-actual drift check; the per-turn numbers
-        # stay available at info level regardless.
-        self._pressure = PromptPressureMonitor(
-            num_ctx=num_ctx, num_predict=num_predict
-        )
+        # Prices a prompt before the send; does NOT judge the result. This
+        # adapter is shared by every room, so a streak kept here would be a
+        # streak across unrelated conversations -- the Organizer keeps one
+        # monitor per (model, session) and reads the `LLMUsage` event this
+        # stream yields. Per-turn numbers stay available at info level anyway.
+        self._estimator = PromptEstimator()
         # Ollama's /api/chat `keep_alive`: a number is SECONDS (with -1 the
         # "resident forever" sentinel), a string must be a unit duration
         # ("30m", "1h"). A bare-number string like "-1" is rejected (400), so
@@ -192,7 +189,7 @@ class OllamaLLM:
     ) -> None:
         """Hand the adapter what the boot check priced, so the drift alarm has
         something to compare a live `prompt_eval_count` against."""
-        self._pressure.adopt_boot_budget(
+        self._estimator.adopt_boot_budget(
             fixed_prefix_tokens, bytes_per_token=bytes_per_token
         )
 
@@ -202,7 +199,7 @@ class OllamaLLM:
         name_map = {self._sanitise(t): t for t in tools}
         # Priced from the messages BEFORE the send, because that is the only
         # moment the estimate and the thing it estimates are the same object.
-        estimated = self._pressure.estimate_for(messages)
+        estimated = self._estimator.estimate_for(messages)
         payload = {
             "model": self._model,
             "messages": [self._to_ollama_msg(m) for m in messages],
@@ -242,11 +239,13 @@ class OllamaLLM:
                     isinstance(e, (LLMText, LLMToolCall)) for e in events
                 )
                 if chunk.get("done"):
-                    self._log_usage(
+                    usage = self._log_usage(
                         chunk,
                         produced_speakable=produced_speakable,
                         estimated_tokens=estimated,
                     )
+                    if usage is not None:
+                        events.append(usage)
                 for event in self._filtered(events, held):
                     yield event
             for event in self._drain(name_map, held):
@@ -338,7 +337,13 @@ class OllamaLLM:
         *,
         produced_speakable: bool,
         estimated_tokens: int | None = None,
-    ) -> None:
+    ) -> LLMUsage | None:
+        """Log the per-turn numbers and hand back what this send cost.
+
+        Returned rather than stored, so the reading rides the caller's own
+        stream -- see `LLMUsage`. A slot on the adapter would be shared by every
+        room and read by whichever turn got to it first.
+        """
         # The final chunk carries Ollama's own token accounting. Dropping it (as
         # this adapter did until 2026-08-17) is what made front-truncation
         # invisible: the prompt silently loses its head and nothing reports it.
@@ -346,7 +351,7 @@ class OllamaLLM:
         reply_tokens = chunk.get("eval_count")
         done_reason = chunk.get("done_reason")
         if prompt_tokens is None:
-            return
+            return None
         log.info(
             "ollama chat done model=%s prompt_tokens=%s reply_tokens=%s "
             "num_ctx=%s done_reason=%s",
@@ -382,12 +387,12 @@ class OllamaLLM:
                 self._num_predict,
                 reply_tokens,
             )
-        log_alarms(
-            log,
-            self._pressure.observe(
-                prompt_tokens, estimated_tokens=estimated_tokens
-            ),
-            source=self._model,
+        return LLMUsage(
+            prompt_tokens=prompt_tokens,
+            model=self._model,
+            num_ctx=self._num_ctx,
+            num_predict=self._num_predict,
+            estimated_tokens=estimated_tokens,
         )
 
     @staticmethod

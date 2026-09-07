@@ -30,6 +30,23 @@ it that often stops seeing it, and the signal that matters -- a tool returning
 capped-to-the-limit results pass after pass, which is the flooding shape -- is
 buried in the noise it shares a name with.
 
+**Who measures and who judges.** `PromptEstimator` lives on the adapter and
+prices a prompt; `PromptPressureMonitor` judges, and the organizer owns one per
+(model, session) via `SessionPressureMonitors`. That split is not decoration.
+The first version put both on the adapter, and one adapter serves every room --
+so a streak of "three consecutive breaches" could be assembled from three
+unrelated conversations, and a clean send in any room re-armed an alarm another
+room was building toward. The word "consecutive" claimed more than the code
+delivered. An adapter cannot fix this itself: `chat()` takes messages and tools
+and has no idea what a conversation is.
+
+The numbers reach the organizer as an `LLMUsage` event riding the stream, NOT
+as a field on the adapter. That distinction is load-bearing rather than
+stylistic: rooms run concurrently on one shared adapter, so any per-adapter slot
+is read by whichever turn arrives first, and the second attempt at this fix
+traded a cross-session streak bug for a cross-session attribution bug by
+forgetting it. An event is a per-call local by construction.
+
 Nothing here decides policy or changes a prompt. It reports; the caller logs,
 traces, or ignores. A monitor that could shed would be a second shedding path
 disagreeing with `Organizer._shed_for_hop`, and the ceiling that was measured
@@ -42,7 +59,7 @@ import json
 import logging
 from dataclasses import dataclass
 
-from .adapters import LLMMessage
+from .adapters import LLMMessage, LLMUsage
 from .prompt_budget import MAX_CREDIBLE_BYTES_PER_TOKEN
 
 # Consecutive breaches before an alarm speaks. One breach is a big page; a run
@@ -113,12 +130,11 @@ class StreakAlarm:
     from 1.05x to 5x in silence: the one-shot latch it replaced, with a delay
     bolted on. `ESCALATION_FACTOR` is what makes it a gate rather than a latch.
 
-    Not thread-safe, and deliberately not: one monitor is shared by every room
-    an adapter serves, so "consecutive" means consecutive SENDS, not consecutive
-    sends within one conversation. A breach in one room can be reset by a clean
-    send in another. That is a weaker claim than it looks, and it is the right
-    trade only because the conditions being watched are properties of the
-    process (window, tool block, boot pricing) rather than of a session.
+    Not thread-safe, and does not need to be: `SessionPressureMonitors` hands
+    each (model, session) its own instance, and a session's turns are serialised
+    by its room's queue worker. "Consecutive" therefore means consecutive sends
+    WITHIN one conversation on one brain, which is what the word should have
+    meant all along.
     """
 
     def __init__(self, kind: str, *, streak: int = DEFAULT_STREAK) -> None:
@@ -210,27 +226,16 @@ def estimated_prompt_tokens(
     return fixed_prefix_tokens + int(body_bytes / bytes_per_token)
 
 
-class PromptPressureMonitor:
-    """One adapter's view of whether the boot guarantee still holds.
+class PromptEstimator:
+    """The adapter's half: price a prompt before it is sent.
 
-    Adapters supply numbers -- a token count read from their own response
-    shape -- and this decides what the numbers mean. `num_ctx` may be None
-    (llama.cpp's real window is `llama-server`'s launch `-c`, which the adapter
-    cannot see): the coupling check then goes quiet rather than guessing, while
-    drift, which needs no window at all, keeps working.
+    Holds the boot budget and nothing else. It deliberately does NOT judge --
+    an adapter is shared by every room it serves, so any streak it kept would
+    be a streak across unrelated conversations. Judging lives with the thing
+    that knows what a conversation is.
     """
 
-    def __init__(
-        self,
-        *,
-        num_ctx: int | None,
-        num_predict: int | None,
-        streak: int = DEFAULT_STREAK,
-    ) -> None:
-        self._num_ctx = num_ctx
-        self._num_predict = num_predict
-        self._coupling = StreakAlarm("context_pressure", streak=streak)
-        self._drift = StreakAlarm("estimator_drift", streak=streak)
+    def __init__(self) -> None:
         self._fixed_prefix_tokens: int | None = None
         self._bytes_per_token = MAX_CREDIBLE_BYTES_PER_TOKEN
 
@@ -272,62 +277,139 @@ class PromptPressureMonitor:
             bytes_per_token=self._bytes_per_token,
         )
 
-    def observe(
-        self, prompt_tokens: int | None, *, estimated_tokens: int | None = None
-    ) -> list[Alarm]:
-        if prompt_tokens is None:
+
+class PromptPressureMonitor:
+    """The judging half, owned per CONVERSATION rather than per adapter.
+
+    This is the fix for a defect the first version shipped with and documented
+    instead of correcting. The monitor used to live on the adapter, and one
+    adapter serves every room, so "three consecutive breaches" could be
+    assembled from three unrelated conversations -- and one clean send in any
+    room re-armed an alarm another room was building toward. The word
+    "consecutive" was doing work the code did not do.
+
+    Everything it needs now arrives in the `LLMUsage`, so the organizer
+    can keep one of these per session without knowing anything about a
+    backend's configuration. `num_ctx` may be None (llama.cpp's real window is
+    `llama-server`'s launch `-c`, which the adapter cannot see): the coupling
+    check then goes quiet rather than guessing, while drift, which needs no
+    window at all, keeps working.
+    """
+
+    def __init__(self, *, streak: int = DEFAULT_STREAK) -> None:
+        self._coupling = StreakAlarm("context_pressure", streak=streak)
+        self._drift = StreakAlarm("estimator_drift", streak=streak)
+
+    def observe(self, reading: LLMUsage | None) -> list[Alarm]:
+        if reading is None:
             return []
         raised = [
-            self._observe_coupling(prompt_tokens),
-            self._observe_drift(prompt_tokens, estimated_tokens),
+            self._observe_coupling(reading),
+            self._observe_drift(reading),
         ]
         return [alarm for alarm in raised if alarm is not None]
 
-    def _observe_coupling(self, prompt_tokens: int) -> Alarm | None:
-        usable = self._usable_window()
+    def _observe_coupling(self, reading: LLMUsage) -> Alarm | None:
+        usable = _usable_window(reading)
         if usable is None:
             return None
         return self._coupling.observe(
-            prompt_tokens / usable,
-            f"assembled prompt {prompt_tokens} tokens against a usable window "
-            f"of {usable} (num_ctx {self._num_ctx} less the num_predict "
-            f"{self._num_predict} reply reservation) -- the front of the "
-            f"prompt, which carries the <external> untrusted-content rule, is "
-            f"what gets evicted first",
+            reading.prompt_tokens / usable,
+            f"assembled prompt {reading.prompt_tokens} tokens against a usable "
+            f"window of {usable} (num_ctx {reading.num_ctx} less the "
+            f"num_predict {reading.num_predict} reply reservation) -- the "
+            f"front of the prompt, which carries the <external> "
+            f"untrusted-content rule, is what gets evicted first",
         )
 
-    def _usable_window(self) -> int | None:
-        """`num_ctx` less the reply reservation, which is never a shed lever.
-
-        Dropping `num_predict` to make a prompt fit measured 4/22 on the
-        shipped qwen3:4b, and it fails as an empty reply that logs as success.
-        So the reservation is subtracted from the window rather than treated as
-        slack, and a prompt is judged against what is actually left for it.
-
-        There is deliberately no fraction applied on top, and the first draft of
-        this had one. Carrying the old 0.8 onto the usable window double-counts
-        the margin: it breached at 6553 tokens while the boot check certifies a
-        worst case near 7500 and passes it, so the one prompt shape this whole
-        design is built around would have alarmed on every send. The invariant
-        `prompt_tokens + num_predict <= num_ctx` breaches at `usable` exactly,
-        and that is already an early warning -- front-truncation does not start
-        until `num_ctx`, which is a further `num_predict` tokens away. The
-        headroom is the reservation itself; it does not need a second one.
-        """
-        if self._num_ctx is None:
-            return None
-        usable = self._num_ctx - (self._num_predict or 0)
-        return usable if usable > 0 else None
-
-    def _observe_drift(
-        self, prompt_tokens: int, estimated_tokens: int | None
-    ) -> Alarm | None:
-        if not estimated_tokens or estimated_tokens <= 0:
+    def _observe_drift(self, reading: LLMUsage) -> Alarm | None:
+        estimated = reading.estimated_tokens
+        if not estimated or estimated <= 0:
             return None
         return self._drift.observe(
-            prompt_tokens / estimated_tokens,
-            f"prompt cost {prompt_tokens} tokens where the boot budget's own "
-            f"density predicted at most {estimated_tokens} -- content is "
+            reading.prompt_tokens / estimated,
+            f"prompt cost {reading.prompt_tokens} tokens where the boot "
+            f"budget's own density predicted at most {estimated} -- content is "
             f"denser than the worst case that check priced, so the inequality "
             f"it proved does not cover the prompts being sent",
         )
+
+
+def _usable_window(reading: LLMUsage) -> int | None:
+    """`num_ctx` less the reply reservation, which is never a shed lever.
+
+    Dropping `num_predict` to make a prompt fit measured 4/22 on the shipped
+    qwen3:4b, and it fails as an empty reply that logs as success. So the
+    reservation is subtracted from the window rather than treated as slack, and
+    a prompt is judged against what is actually left for it.
+
+    There is deliberately no fraction applied on top, and the first draft of
+    this had one. Carrying the old 0.8 onto the usable window double-counts the
+    margin: it breached at 6553 tokens while the boot check certifies a worst
+    case near 7500 and passes it, so the one prompt shape this whole design is
+    built around would have alarmed on every send. The invariant
+    `prompt_tokens + num_predict <= num_ctx` breaches at `usable` exactly, and
+    that is already an early warning -- front-truncation does not start until
+    `num_ctx`, which is a further `num_predict` tokens away. The headroom is the
+    reservation itself; it does not need a second one.
+    """
+    if reading.num_ctx is None:
+        return None
+    usable = reading.num_ctx - (reading.num_predict or 0)
+    return usable if usable > 0 else None
+
+
+class SessionPressureMonitors:
+    """One `PromptPressureMonitor` per conversation, with a bound on how many.
+
+    The bound is not paranoia about leaks so much as about a long-lived process:
+    sessions are created freely and never announce that they are finished, so an
+    unbounded dict here would be a slow one. Eviction is least-recently-used and
+    costs only a forgotten streak, which is the cheapest thing here to lose -- a
+    re-breach simply starts counting again.
+    """
+
+    def __init__(self, *, streak: int = DEFAULT_STREAK, max_sessions: int = 64) -> None:
+        self._streak = streak
+        self._max_sessions = max(1, max_sessions)
+        self._monitors: dict[tuple[str, str], PromptPressureMonitor] = {}
+
+    def observe(self, session_id: str, reading: LLMUsage | None) -> list[Alarm]:
+        if reading is None:
+            return []
+        if not _can_judge(reading):
+            # Neither check can fire on this reading, so a monitor for it would
+            # be an entry that never decides anything -- and on a backend that
+            # reports no window and has no boot budget, that is every entry.
+            return []
+        monitor = self._monitor_for((reading.model, session_id))
+        return monitor.observe(reading)
+
+    def _monitor_for(self, key: tuple[str, str]) -> PromptPressureMonitor:
+        """Keyed by MODEL and session, not session alone.
+
+        A session that escalates runs `_pick_brain`'s specialist adapter under
+        the same `session_id` as the primary -- different model, different
+        `num_ctx`, different reply reservation. Keying on the session alone
+        would blend the two into one streak and let a clean specialist send
+        re-arm a breach the primary was building toward, which is the very
+        defect this class exists to fix, along the brain axis instead of the
+        room axis.
+        """
+        monitor = self._monitors.pop(key, None)
+        if monitor is None:
+            monitor = PromptPressureMonitor(streak=self._streak)
+        # Re-inserted on every access, so the dict is ordered least-recently-
+        # used and eviction takes the coldest key. Insertion order alone would
+        # evict the room that has been running since boot -- the busiest one,
+        # and so the one most likely to be mid-breach -- the moment a burst of
+        # short-lived sessions arrived.
+        self._monitors[key] = monitor
+        while len(self._monitors) > self._max_sessions:
+            self._monitors.pop(next(iter(self._monitors)))
+        return monitor
+
+
+def _can_judge(reading: LLMUsage) -> bool:
+    """Whether either check could say anything at all about this reading."""
+    return _usable_window(reading) is not None or bool(reading.estimated_tokens)

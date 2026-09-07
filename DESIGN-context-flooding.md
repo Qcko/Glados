@@ -202,7 +202,7 @@ on which backend is running.
 | B2 boot inequality | `core/prompt_budget.py`, called from the lifespan before warm-up |
 | B4 explicit window | `LLMConfig` refuses `num_ctx = None` on the ollama backend |
 | repair path | `language_guard.build_repair_messages` takes the same clamp |
-| B5 alarms | `core/prompt_pressure.py`; adapters own a `PromptPressureMonitor`, the organizer owns a `StreakAlarm` for clamp pressure |
+| B5 alarms | `core/prompt_pressure.py`; adapters own a `PromptEstimator` and yield `LLMUsage`, the organizer owns `SessionPressureMonitors` (keyed by model+session) and a `StreakAlarm` for clamp pressure |
 
 Shipped defaults, priced against `ministral3:8b-instruct`: `max_result_bytes =
 2048`, `max_history_external_bytes = 4096`. System prompt 602 tokens, retained
@@ -259,13 +259,37 @@ first one, leaving a harness directive riding with the turn paid for by
 nothing. An alarm made noisy by its own arithmetic is the failure the streak
 gate exists to prevent, and it would have been the harder one to diagnose.
 
-Known and accepted: the monitor is per-adapter-instance and the adapter is
-shared across rooms, so "consecutive" means consecutive *sends*, not consecutive
-sends within one conversation. The right trade only because every condition
-watched is a property of the process -- window, tool block, boot pricing --
-rather than of a session. The router's specialist model is a distinct adapter
-whose prefix this budget does not describe, so drift is not monitored there and
-boot says so out loud; coupling still runs.
+**The streak is per conversation, and getting there took two attempts.** The
+first version kept the monitor on the adapter and documented the consequence
+rather than fixing it: one adapter serves every room, so "three consecutive
+breaches" could be assembled from three unrelated conversations, and a clean
+send in any room re-armed an alarm another room was building toward.
+
+The second attempt moved judgement to the organizer -- correct -- but left the
+numbers in a field on the adapter for the organizer to drain. That is wrong for
+the same underlying reason, one level down. `room_queues` gives each room its own
+worker task and deliberately imposes no extra serialisation, so two `chat()`
+calls interleave at every await; a single slot is read by whichever turn reaches
+it first. It would have traded a cross-session *streak* bug for a cross-session
+*attribution* bug -- rarer, harder to see, and strictly new.
+
+What removes the class of bug rather than the instance is putting the numbers
+**in the stream**: `LLMUsage` is an ordinary `LLMEvent` the adapter yields, so
+the reading is a per-call local by construction and reaches exactly the caller
+that produced it, however the tasks interleave. The lesson worth keeping is that
+shared mutable state on a shared adapter cannot express a per-call invariant, no
+matter how carefully it is cleared.
+
+Monitors are keyed by `(model, session)`, not session alone, because
+`_pick_brain` runs the specialist under the same `session_id` with a different
+window -- keying on the session would blend two brains into one streak, the same
+defect along the brain axis. Eviction is least-recently-used and bounded, since
+insertion order would drop the room running since boot (the busiest, so the
+likeliest to be mid-breach) the moment a burst of short-lived sessions arrived.
+
+The router's specialist model is a distinct adapter whose prefix this budget
+does not describe, so drift is not monitored there and boot says so out loud;
+coupling still runs.
 
 ## Before D4 ships
 

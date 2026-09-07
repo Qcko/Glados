@@ -13,6 +13,7 @@ from pathlib import Path
 
 from glados.core.adapters import ToolSpec
 from glados.core.organizer import Organizer
+from glados.core.adapters import LLMUsage
 from glados.core.prompt_pressure import DEFAULT_STREAK
 from glados.core.sessions import SessionRegistry
 from glados.core.tool_payload_cap import clamp_result_bytes
@@ -112,3 +113,40 @@ def test_a_sustained_run_alarms_once(tmp_path: Path) -> None:
     for _ in range(DEFAULT_STREAK * 4):
         _clamp(org, trace, "x" * 5000)
     assert trace.kinds().count("external_clamp_pressure") == 1
+
+
+# ---- prompt pressure is judged PER SESSION, through the organizer -----------
+
+
+def _usage(prompt_tokens: int, model: str = "test-model") -> LLMUsage:
+    return LLMUsage(
+        prompt_tokens=prompt_tokens,
+        model=model,
+        num_ctx=12288,
+        num_predict=4096,
+    )
+
+
+def test_organizer_keeps_streaks_apart_by_session(tmp_path: Path) -> None:
+    """End-to-end on the defect: the same over-budget send in a different room
+    each time must not accumulate into one streak."""
+    org, trace = _org(tmp_path), _Trace()
+    for i in range(DEFAULT_STREAK * 2):
+        org._judge_prompt_pressure(_usage(9000), f"session-{i}", trace)
+    assert "context_pressure" not in trace.kinds()
+
+
+def test_organizer_alarms_on_one_sessions_own_run(tmp_path: Path) -> None:
+    org, trace = _org(tmp_path), _Trace()
+    for _ in range(DEFAULT_STREAK):
+        org._judge_prompt_pressure(_usage(9000), "kitchen", trace)
+    assert trace.kinds().count("context_pressure") == 1
+
+
+def test_organizer_tolerates_a_send_that_reported_nothing(tmp_path: Path) -> None:
+    """The fakes never yield a usage event, and neither does a stream cancelled
+    by a barge-in before its final chunk. Absence is not a breach."""
+    org, trace = _org(tmp_path), _Trace()
+    for _ in range(DEFAULT_STREAK * 2):
+        org._judge_prompt_pressure(None, "kitchen", trace)
+    assert trace.kinds() == []
