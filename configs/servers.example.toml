@@ -124,10 +124,15 @@ untrusted = true
 # match the `tool.name` returned by `tools/list`, not the C# source.
 
 # --- Browser session ---------------------------------------------------
-# Selenium operations need ~30s for SPA page loads; 35s gives headroom.
+# Every browser tool gets 400s, matching the server's own call limit
+# (DUNNES_CALL_HARD_LIMIT_SECONDS, DunnesStoresMCP 365047c, 10-09-2026). The
+# server runs one call at a time and finishes or refuses each within 400s, so a
+# shorter timeout here only abandons a call that is still running -- and the
+# re-send that follows is a duplicate cart write (27-08-2026: 35s here stacked
+# nine calls onto one browser). It was 35s, sized to a single page load.
 
 [server.tool_overlays.start_browser]
-timeout_s = 35.0
+timeout_s = 400.0
 
 [server.tool_overlays.bootstrap_login]
 # Manual login -- user types credentials in a visible Chrome window. Can
@@ -135,21 +140,21 @@ timeout_s = 35.0
 # fire it on its own; (b) the long timeout would otherwise starve the
 # room worker if it fires unattended.
 requires_confirmation = true
-timeout_s = 300.0
+timeout_s = 400.0
 
 [server.tool_overlays.open_login_page]
-timeout_s = 35.0
+timeout_s = 400.0
 
 [server.tool_overlays.check_login_status]
-timeout_s = 35.0
+timeout_s = 400.0
 
 [server.tool_overlays.stop_browser]
-timeout_s = 35.0
+timeout_s = 400.0
 
 # --- Shop & favourites -------------------------------------------------
 
 [server.tool_overlays.search_products]
-timeout_s = 35.0
+timeout_s = 400.0
 
 # Cart writes (add_to_cart, set_cart_quantity, remove_from_cart) and the
 # delivery-slot commit are intentionally NOT gated by requires_confirmation.
@@ -164,13 +169,13 @@ timeout_s = 35.0
 
 [server.tool_overlays.add_to_cart]
 mutating = true
-timeout_s = 35.0
+timeout_s = 400.0
 
 # The one-shot search+add path the model prefers for "add <name>". Needs the
 # same Selenium timeout as a search, and is a cart write (mutating).
 [server.tool_overlays.add_to_cart_by_name]
 mutating = true
-timeout_s = 35.0
+timeout_s = 400.0
 
 # Volume-aware add ("4 litres of milk") -- composes the target across pack
 # sizes and writes them to the cart, so it is mutating like the other adds.
@@ -179,7 +184,7 @@ timeout_s = 35.0
 # the escalation loopback (double cart-add).
 [server.tool_overlays.add_by_volume]
 mutating = true
-timeout_s = 35.0
+timeout_s = 400.0
 
 # Added 20-08-2026. This tool had NO overlay at all, which cost two things:
 #   1. `mutating` defaulted to false, so the escalation guard could not see it.
@@ -213,10 +218,10 @@ timeout_s = 35.0
 #      only reason this is tolerable.
 [server.tool_overlays.add_recipe_ingredients]
 mutating = true
-timeout_s = 180.0
+timeout_s = 400.0
 
 [server.tool_overlays.view_favorites]
-timeout_s = 35.0
+timeout_s = 400.0
 
 # A voice reply is read start to finish -- the listener cannot skim -- so a
 # dozen sale items is a dozen items of speech. The server ranks and filters
@@ -224,7 +229,7 @@ timeout_s = 35.0
 # keys name a shape and a count and never a field of Dunnes' schema.
 # `flex_to` covers the absurd case: withholding one item to offer it back.
 [server.tool_overlays.scan_favorites_for_sales]
-timeout_s = 35.0
+timeout_s = 400.0
 max_items = 5
 flex_to = 7
 items_key = "items"
@@ -232,15 +237,15 @@ items_key = "items"
 # --- Cart --------------------------------------------------------------
 
 [server.tool_overlays.view_cart]
-timeout_s = 35.0
+timeout_s = 400.0
 
 [server.tool_overlays.set_cart_quantity]
 mutating = true
-timeout_s = 35.0
+timeout_s = 400.0
 
 [server.tool_overlays.remove_from_cart]
 mutating = true
-timeout_s = 35.0
+timeout_s = 400.0
 
 # Name-resolving cart mutators (the model's preferred path: "set milk to 2",
 # "take one off", "remove the bread"). Each resolves a free-text name to a
@@ -250,26 +255,26 @@ timeout_s = 35.0
 # not re-fire it.
 [server.tool_overlays.set_cart_quantity_by_name]
 mutating = true
-timeout_s = 35.0
+timeout_s = 400.0
 
 [server.tool_overlays.remove_from_cart_by_name]
 mutating = true
-timeout_s = 35.0
+timeout_s = 400.0
 
 [server.tool_overlays.adjust_cart_quantity_by_name]
 mutating = true
-timeout_s = 35.0
+timeout_s = 400.0
 
 # --- Checkout (stops at slot selection) --------------------------------
 
 [server.tool_overlays.list_delivery_slots]
-timeout_s = 35.0
+timeout_s = 400.0
 
 [server.tool_overlays.set_delivery_slot]
 mutating = true
 # Last automated step before payment; ungated for the same reason as the
 # cart writes -- manual payment is the safety boundary.
-timeout_s = 35.0
+timeout_s = 400.0
 
 # --- Local catalog (no network -- cached JSON) --------------------------
 # The catalog tools (catalog_search, get_catalog_product, list_catalog,
