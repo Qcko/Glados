@@ -191,3 +191,36 @@ def has_repeat_cue(text: str) -> bool:
     """True if the utterance asks for something in addition to what was
     already done ("add another", "more tomatoes", "do that again")."""
     return bool(text) and _REPEAT_CUE_RE.search(text) is not None
+
+
+# The leading verbs that ask only to put something IN. A strict subset of
+# `_ACTION_VERBS`, anchored the same way and for the same reason: the removal
+# guard refuses a write on this reading, so a mid-sentence "add" must not
+# count. Observed 11-09-2026: "add tomatoes to the cart" said twice, and the
+# model's second turn opened with remove_from_cart.
+_ADD_VERBS = ("add", "put", "buy", "order")
+_ADD_INTENT_RE = re.compile(
+    rf"^{_LEAD_IN}(?:{'|'.join(_ADD_VERBS)})\b",
+    re.IGNORECASE,
+)
+
+# Anywhere in the utterance, any of these means the user may want something
+# taken out or changed, and the removal guard stands down. Deliberately broad:
+# a miss here refuses a remove the user asked for, while a false hit only
+# falls back to the behaviour before the guard existed. "just" is absent
+# because it is a lead-in filler ("just add milk").
+_REMOVAL_CUE_RE = re.compile(
+    r"\b(?:remove|delete|take|replace|instead|swap|change|switch|less|fewer"
+    r"|reduce|drop|out|off|only|down|minus|without|rid|zero|none|empty|clear"
+    r"|cancel|undo|set|update|make|no|not|ditch|scrap|forget|0)\b",
+    re.IGNORECASE,
+)
+
+
+def is_add_request(text: str) -> bool:
+    """True if the utterance opens with an add-class verb ("add tomatoes",
+    "please buy milk") and says nothing about taking anything out."""
+    stripped = text.strip() if text else ""
+    if not stripped or _ADD_INTENT_RE.match(stripped) is None:
+        return False
+    return _REMOVAL_CUE_RE.search(stripped) is None

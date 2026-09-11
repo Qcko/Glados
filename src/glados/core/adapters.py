@@ -65,6 +65,9 @@ class ToolSpec(BaseModel):
     # `ToolOverlay` (core/config.py) and in core/write_ledger.py.
     additive: bool = False
     quantity_arg: str | None = None
+    removes: bool = False
+    count_arg: str | None = None
+    delta_arg: str | None = None
 
     @property
     def qualified(self) -> str:

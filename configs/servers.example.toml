@@ -257,13 +257,23 @@ items_key = "items"
 [server.tool_overlays.view_cart]
 timeout_s = 400.0
 
+# Removal-guard flags (DESIGN-write-guards.md, guard 3). `removes` refuses the
+# write when the utterance only asked to add. `count_arg` (an absolute count)
+# and `delta_arg` (a relative change) narrow that to calls where the named
+# argument is <= 0, so an upward adjust still serves "add one more". A
+# `count_arg` set answering an add with no count in it is refused as a guessed
+# quantity too: set(milk, 1) from three takes two out. Observed 11-09-2026:
+# "add tomatoes" said twice opened with remove_from_cart.
 [server.tool_overlays.set_cart_quantity]
 mutating = true
 timeout_s = 400.0
+removes = true
+count_arg = "quantity"
 
 [server.tool_overlays.remove_from_cart]
 mutating = true
 timeout_s = 400.0
+removes = true
 
 # Name-resolving cart mutators (the model's preferred path: "set milk to 2",
 # "take one off", "remove the bread"). Each resolves a free-text name to a
@@ -274,14 +284,19 @@ timeout_s = 400.0
 [server.tool_overlays.set_cart_quantity_by_name]
 mutating = true
 timeout_s = 400.0
+removes = true
+count_arg = "quantity"
 
 [server.tool_overlays.remove_from_cart_by_name]
 mutating = true
 timeout_s = 400.0
+removes = true
 
 [server.tool_overlays.adjust_cart_quantity_by_name]
 mutating = true
 timeout_s = 400.0
+removes = true
+delta_arg = "delta"
 
 # Added 11-09-2026 with the tool (DunnesStoresMCP 8c8d504). Takes a volume out
 # of one product line and lands on the right amount: drops held packs when
@@ -292,6 +307,7 @@ timeout_s = 400.0
 [server.tool_overlays.remove_by_volume]
 mutating = true
 timeout_s = 400.0
+removes = true
 
 # --- Checkout (stops at slot selection) --------------------------------
 

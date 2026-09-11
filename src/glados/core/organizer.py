@@ -12,6 +12,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import re
 import hashlib
 import time
@@ -77,6 +78,7 @@ from .utterance import (
     has_quantity_cue,
     has_repeat_cue,
     is_action_request,
+    is_add_request,
     is_time_request,
 )
 from .write_ledger import (
@@ -361,6 +363,21 @@ _QUANTITY_UNGROUNDED_NOTE = (
     "so the quantity here is a guess. Ask how many they want, or send the "
     "call again without a quantity to add one."
 )
+# The same refusal for an absolute set answering "add X": the tool has no
+# count-free form, so the way out is the add tool rather than a re-send.
+_COUNT_UNGROUNDED_NOTE = (
+    "GLaDOS note, not tool output: not sent -- the user asked to add without "
+    "saying how many, so setting the quantity is a guess. Use the add tool to "
+    "add one, or ask how many they want."
+)
+# The removal refusal. The user asked only to add; a remove, a set to zero or
+# a negative adjust is the model re-planning around an add it thinks already
+# happened. Nothing is met by it, so the goal-check still wants the add.
+_REMOVAL_UNASKED_NOTE = (
+    "GLaDOS note, not tool output: not sent -- the user asked to add, not to "
+    "remove or reduce anything. Do not take anything out of the cart. Make "
+    "the addition they asked for, or tell them it is already there."
+)
 
 # Upper bound on how many sessions' conversation buffers are held in RAM at
 # once. Far above any realistic concurrent-session count; exists only so a long
@@ -464,14 +481,49 @@ def _accepts_repeat(spec: ToolSpec) -> bool:
 
 
 def _quantity_invented(call: LLMToolCall, spec: ToolSpec, utterance: str) -> bool:
-    """A count other than one that the user never said. One is the default
-    the server applies when the count is absent, so it is never a guess."""
+    """A count the user never said. On an add, one is the default the server
+    applies when the count is absent, so it is never a guess. On an absolute
+    set answering an add-only utterance, every value is: "add milk" names no
+    number, and set(milk, 1) from three takes two out."""
+    if spec.count_arg:
+        return is_add_request(utterance) and not has_quantity_cue(utterance)
     if not spec.quantity_arg:
         return False
     quantity = coerce_quantity(call.args.get(spec.quantity_arg))
     if quantity is None or quantity == 1:
         return False
     return not has_quantity_cue(utterance)
+
+
+def _removal_unasked(call: LLMToolCall, spec: ToolSpec, utterance: str) -> bool:
+    """A write that takes something out, answering an utterance that only
+    asked to put something in."""
+    if not spec.removes or not _removes_with(call, spec):
+        return False
+    return is_add_request(utterance)
+
+
+def _removes_with(call: LLMToolCall, spec: ToolSpec) -> bool:
+    """Whether these arguments remove. A conditional tool removes at or below
+    zero; an argument that cannot be read as a number counts as removing,
+    since the guard only ever fires against an add-only utterance."""
+    arg = spec.count_arg or spec.delta_arg
+    if not arg:
+        return True
+    value = _as_number(call.args.get(arg))
+    return value is None or value <= 0
+
+
+def _as_number(value: object) -> float | None:
+    """Untruncated, unlike `coerce_quantity`: a delta of 0.5 must not read as
+    zero and so as a removal."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(number) else number
 
 
 def _took_effect(call: LLMToolCall, result: MCPCallResult) -> bool:
@@ -2432,24 +2484,38 @@ class Organizer:
         utterance: str,
         trace,
     ) -> "_WriteRefusal | None":
-        """The two harness guards on a mutating call, in the order that keeps
-        them honest: an invented quantity is refused BEFORE the ledger can
-        answer "already done" and so launder it into a satisfied claim.
-        Ahead of the confirmation gate, like the in-flight ledger, so a
-        refused call never prompts the room for something not being sent."""
+        """The harness guards on a mutating call, in the order that keeps them
+        honest: a removal the user never asked for is refused first, and an
+        invented quantity is refused BEFORE the ledger can answer "already
+        done" and so launder it into a satisfied claim. Ahead of the
+        confirmation gate, like the in-flight ledger, so a refused call never
+        prompts the room for something not being sent."""
         if spec is None or not self._cues_readable():
             return None
+        if _removal_unasked(tc, spec, utterance):
+            log.warning(
+                "refused %s.%s in session %s: the utterance only asked to add",
+                tc.server,
+                tc.name,
+                session_id,
+            )
+            trace.event(
+                "removal_refused", call_id=tc.call_id, server=tc.server, name=tc.name
+            )
+            return _WriteRefusal(
+                _local_result("not_removed", _REMOVAL_UNASKED_NOTE), satisfied=False
+            )
         if _quantity_invented(tc, spec, utterance):
             trace.event(
                 "quantity_refused",
                 call_id=tc.call_id,
                 server=tc.server,
                 name=tc.name,
-                quantity=tc.args.get(spec.quantity_arg),
+                quantity=tc.args.get(spec.count_arg or spec.quantity_arg),
             )
+            note = _COUNT_UNGROUNDED_NOTE if spec.count_arg else _QUANTITY_UNGROUNDED_NOTE
             return _WriteRefusal(
-                _local_result("quantity_needed", _QUANTITY_UNGROUNDED_NOTE),
-                satisfied=False,
+                _local_result("quantity_needed", note), satisfied=False
             )
         if not spec.additive:
             return None

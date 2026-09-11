@@ -486,6 +486,31 @@ class ToolOverlay(BaseModel):
     # invented it otherwise (11-09-2026: "add tomatoes" twice became four).
     # Set it on the adds only: for set/adjust tools 1 and -1 are real requests.
     quantity_arg: str | None = None
+    # A write that can take something OUT of the cart. Refused when the user's
+    # utterance only asked to add (11-09-2026: "add tomatoes" became remove +
+    # add). Naming the argument makes it conditional -- the call removes only
+    # when it is <= 0 -- so "add one more milk" via adjust(delta=1) still goes
+    # through. `delta_arg` names a relative change; `count_arg` an absolute
+    # count, which after an add-only utterance with no count in it is also an
+    # invented number (a set to 1 from 3 reduces the cart). Neither set means
+    # every call removes.
+    removes: bool = False
+    count_arg: str | None = None
+    delta_arg: str | None = None
+
+    @model_validator(mode="after")
+    def _removal_flags_are_live(self) -> "ToolOverlay":
+        if (self.count_arg or self.delta_arg) and not self.removes:
+            raise ValueError("count_arg/delta_arg is set but removes is false")
+        if self.count_arg and self.delta_arg:
+            raise ValueError("a tool takes either count_arg or delta_arg, not both")
+        if self.count_arg and self.quantity_arg:
+            raise ValueError("count_arg (a set) and quantity_arg (an add) exclude each other")
+        # The organizer guards only mutating calls, so a lone `removes` would
+        # look configured and never fire.
+        if self.removes and not (self.mutating or self.requires_confirmation):
+            raise ValueError("removes is set on a tool that is not mutating")
+        return self
 
 
 class ServerEntry(BaseModel):
@@ -568,6 +593,9 @@ class ServerEntry(BaseModel):
                 "read": overlay.read,
                 "additive": overlay.additive,
                 "quantity_arg": overlay.quantity_arg,
+                "removes": overlay.removes,
+                "count_arg": overlay.count_arg,
+                "delta_arg": overlay.delta_arg,
             }
         )
 
