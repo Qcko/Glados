@@ -61,7 +61,13 @@
 #                     mutating (side-effecting but un-gated -- lets the
 #                     turn-outcome goal-check see an action landed; gated tools
 #                     count as mutating automatically), timeout_s (overrides
-#                     the 8s dispatch default -- needed for slow Selenium loads).
+#                     the 8s dispatch default -- needed for slow Selenium loads),
+#                     read (route an UNTRUSTED tool's result through the
+#                     tool-free reader call so the planner sees a bounded
+#                     digest, never the raw bytes -- DESIGN-reader-call.md.
+#                     Per-tool only, no server floor: a digest mangles the
+#                     verbatim ids a follow-up call needs, so opt in the tools
+#                     that return prose and leave id-bearing ones raw).
 #
 # Crash semantics: a subprocess that dies is auto-restarted with bounded
 # attempts within a rolling window (default 3 / 60s, exponential backoff).

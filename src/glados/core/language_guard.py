@@ -90,6 +90,10 @@ def fallback_line(reply_language: str) -> str:
     return _FALLBACK.get(_lang_key(reply_language), _FALLBACK["en"])
 
 
+def language_name(reply_language: str) -> str:
+    return _LANGUAGE_NAMES.get(_lang_key(reply_language), "English")
+
+
 _log = logging.getLogger(__name__)
 
 # Ceiling on the text handed to the repair pass. Smaller than the tool-result
@@ -106,7 +110,7 @@ def build_repair_messages(
     -- the repair never replays tool history, so untrusted tool content cannot
     re-enter or steer this pass. The system message restates the section 7 rule so a
     drifted reply that embedded injected text cannot redirect the rewrite."""
-    language = _LANGUAGE_NAMES.get(_lang_key(reply_language), "English")
+    language = language_name(reply_language)
     # Defang a literal close tag so the wrapped text cannot end the wrapper
     # early and promote trailing text out of the data region (mirrors the
     # tool-result wrapping in the organizer).

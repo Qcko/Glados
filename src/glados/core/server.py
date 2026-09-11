@@ -59,6 +59,7 @@ from .config import (
 )
 from .handshake_gate import FailureOutcome, HandshakeGate, Verdict
 from .logging_setup import setup_logging
+from .reader import READER_NUM_PREDICT, READER_NUM_PREDICT_THINKING
 from . import memory_gate
 from .ollama_lifecycle import OllamaLifecycle
 from .organizer import Organizer
@@ -304,6 +305,55 @@ def _build_llm(cfg: LLMConfig) -> LLM:
     raise ValueError(f"[llm] backend = {cfg.backend!r} has no builder")
 
 
+def _build_reader_llm(cfg: LLMConfig, primary: LLM) -> LLM:
+    """The reader call's own adapter (DESIGN-reader-call.md): the primary's
+    model and host with its own small generation cap. The planner's
+    `num_predict` lets a reasoning model think the whole reply away and return
+    nothing, which is both the silent failure and the latency-DoS shape.
+
+    `think` is inherited rather than forced off: it is strictly per-model
+    (LLMConfig.think -- on qwen3:4b `False` moves the reasoning into the
+    content channel, which here would land inside the digest), so a model
+    whose config leaves it unset gets the larger cap instead. Only the
+    backends that take these at construction get a distinct instance."""
+    num_predict = (
+        READER_NUM_PREDICT if cfg.think is False else READER_NUM_PREDICT_THINKING
+    )
+    if cfg.backend == "ollama":
+        return OllamaLLM(
+            host=cfg.host,
+            model=cfg.model,
+            temperature=cfg.temperature,
+            timeout=cfg.timeout,
+            keep_alive=cfg.keep_alive,
+            # The reader only ever emits text. `_collect_text` drops tool-call
+            # events anyway, so a hostile page that makes it write a text-form
+            # call marker stays data inside the digest rather than being
+            # parsed into a (discarded) call.
+            text_tool_format=None,
+            num_ctx=cfg.num_ctx,
+            num_predict=num_predict,
+            repeat_penalty=cfg.repeat_penalty,
+            think=cfg.think,
+        )
+    if cfg.backend == "llamacpp":
+        return LlamaCppLLM(
+            host=cfg.llamacpp_host,
+            model=cfg.model,
+            temperature=cfg.temperature,
+            timeout=cfg.timeout,
+            max_tokens=num_predict,
+            repeat_penalty=cfg.repeat_penalty,
+            num_ctx=cfg.num_ctx,
+            api_key=(
+                os.environ.get(cfg.llamacpp_api_key_env)
+                if cfg.llamacpp_api_key_env
+                else None
+            ),
+        )
+    return primary
+
+
 def _build_specialist_llm(
     cfg: RouterConfig, llm_cfg: LLMConfig, primary_llm: LLM
 ) -> LLM | None:
@@ -477,6 +527,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     # here for shutdown:
     stdio_servers: list[StdioServer] = []
     llm = _build_llm(glados_cfg.llm)
+    reader_llm = _build_reader_llm(glados_cfg.llm, llm)
     specialist_llm = _build_specialist_llm(glados_cfg.router, glados_cfg.llm, llm)
     router = _build_router(glados_cfg.router)
     # STT and TTS are shared across connections (real backends load model
@@ -537,6 +588,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         system_prompt=glados_cfg.llm.system_prompt or None,
         reply_language=glados_cfg.llm.reply_language,
         tool_router=tool_router,
+        reader_llm=reader_llm,
     )
 
     async def _assert_prompt_budget(_app: FastAPI, cfg) -> None:
@@ -814,6 +866,12 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             specialist_aclose = getattr(specialist, "aclose", None)
             if specialist_aclose is not None and specialist is not _app.state.llm:
                 await specialist_aclose()
+            # Same for the reader adapter, which aliases the primary only on
+            # the fake backend.
+            reader = _app.state.reader_llm
+            reader_aclose = getattr(reader, "aclose", None)
+            if reader_aclose is not None and reader is not _app.state.llm:
+                await reader_aclose()
             # Tear down stdio MCP subprocesses last so any in-flight tool
             # call gets cancelled by the organizer.close() above before
             # its subprocess vanishes.
@@ -852,6 +910,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     app.state.tts = tts
     app.state.llm = llm
     app.state.specialist_llm = specialist_llm
+    app.state.reader_llm = reader_llm
     app.state.router = router
     # Only manage the daemon when we're actually pointed at one. Fakes don't
     # need it; tests run with backend="fake" and get None here, so the

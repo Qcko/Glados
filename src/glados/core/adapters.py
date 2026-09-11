@@ -56,6 +56,11 @@ class ToolSpec(BaseModel):
     max_items: int | None = None
     flex_to: int | None = None
     items_key: str | None = None
+    # Digest the result through the reader call before the planner sees it
+    # (core/reader.py). Applies only when `untrusted` is also set. Per-tool
+    # opt-in via the servers.toml overlay; see DESIGN-reader-call.md for why
+    # there is deliberately no server-level floor.
+    read: bool = False
 
     @property
     def qualified(self) -> str:

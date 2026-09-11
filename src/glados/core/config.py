@@ -468,6 +468,14 @@ class ToolOverlay(BaseModel):
     max_items: int | None = None
     flex_to: int | None = None
     items_key: str | None = None
+    # Route this tool's result through the reader call (core/reader.py,
+    # DESIGN-reader-call.md): a tool-free, history-free inference digests the
+    # untrusted bytes so the planner never reads them raw. Per-tool opt-in with
+    # NO server floor, by decision: a digest mangles the verbatim ids a
+    # follow-up call needs, so the tools that carry prose opt in and the
+    # id-bearing ones keep the wrapper plus the confirmation gate. Meaningless
+    # without `untrusted`; the Organizer applies it only to untrusted results.
+    read: bool = False
 
 
 class ServerEntry(BaseModel):
@@ -547,6 +555,7 @@ class ServerEntry(BaseModel):
                 "max_items": overlay.max_items,
                 "flex_to": overlay.flex_to,
                 "items_key": overlay.items_key,
+                "read": overlay.read,
             }
         )
 

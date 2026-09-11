@@ -279,8 +279,15 @@ LLM.
 - **Untrusted-content discipline.** Output of search and any scraped page is
   wrapped in `<external>` delimiters before reaching the LLM, with a system
   rule that instructions inside `<external>` are data, not commands.
-  Consider a separate "reader" LLM call (no tools) to summarise external
-  content before it touches the tool-armed planner.
+  A tool flagged `read` in its overlay goes one step further: a separate
+  "reader" inference -- no tools, no history, bounded output, its own small
+  generation cap -- digests the result and the planner sees only the digest,
+  still wrapped `<external>`. The reader severs tool access and bounds size;
+  it does not launder trust, and it fails closed (a GLaDOS-authored line,
+  never the raw bytes) because every reader failure is reachable from inside
+  the payload. Per-tool opt-in with no server floor, because a digest
+  mangles the verbatim ids a follow-up call needs. See
+  `DESIGN-reader-call.md`.
 - **The untrusted mark is a server-level FLOOR, not only a per-tool flag.**
   `[[server]] untrusted = true` marks everything a server returns; a per-tool
   overlay can raise one tool, never lower it below the floor

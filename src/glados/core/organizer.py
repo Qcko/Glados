@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import hashlib
+import time
 import uuid
 from contextlib import aclosing
 from dataclasses import dataclass
@@ -38,6 +39,12 @@ from .adapters import (
 )
 from .config import ClientBinding, RoomPolicy
 from .language_guard import build_repair_messages, detect_drift, fallback_line
+from .reader import (
+    MAX_READER_BYTES,
+    READER_TIMEOUT_S,
+    build_reader_messages,
+    reader_fallback_line,
+)
 from .logging_setup import FILE_ONLY
 from .protocols import (
     AssistantDelta,
@@ -211,6 +218,18 @@ _CLAMPED_NOTE = (
     "cut off. Treat it as incomplete; say so rather than inventing the rest."
 )
 
+# Said outside the wrapper for the same reason as _CLAMPED_NOTE, which it
+# REPLACES on the read path: the planner is reading a digest, and "that result
+# was cut off" about bytes it never saw would mislead it.
+_READ_NOTE = (
+    "GLaDOS note, not tool output: the above is a summary of the tool's "
+    "result, not the result itself."
+)
+_READ_CLAMPED_NOTE = (
+    _READ_NOTE + " The result was longer than allowed and was cut before "
+    "summarising; treat it as incomplete."
+)
+
 # Default ceiling on one serialized tool result, in UTF-8 bytes. Sized against
 # the shipped 12288-token window: generous for any legitimate result (a Dunnes
 # basket, an agenda) while leaving a flooding payload nowhere near the ~4k
@@ -264,6 +283,24 @@ def _holds_a_directive(messages: list[LLMMessage]) -> bool:
     """A system message below the prompt is the harness speaking to the model
     for this turn, never conversation -- so it is not ours to shed."""
     return any(m.role == "system" for m in messages)
+
+
+def _wrap_external(raw: str) -> str:
+    """Defang any literal `</external>` inside the payload so an
+    attacker-controlled page can't close the wrapper early and promote the
+    trailing text to "trusted" status. The escape form is non-matching plain
+    text; the LLM sees data, not a tag boundary."""
+    safe = raw.replace("</external>", "<\\/external>")
+    return f"<external>{safe}</external>"
+
+
+def _last_user_text(messages: list[LLMMessage]) -> str:
+    """The turn's own utterance -- the last user message in the assembly.
+    Trusted input the planner already has; never history, never tool args."""
+    for message in reversed(messages):
+        if message.role == "user":
+            return message.content or ""
+    return ""
 
 
 def _external_bytes(messages: list[LLMMessage]) -> int:
@@ -513,8 +550,23 @@ class Organizer:
         veto_pause_s: float = _VETO_PAUSE_S,
         max_result_bytes: int = _MAX_RESULT_BYTES,
         max_history_external_bytes: int = _MAX_HISTORY_EXTERNAL_BYTES,
+        reader_llm: LLM | None = None,
+        reader_timeout_s: float = READER_TIMEOUT_S,
+        max_reader_bytes: int = MAX_READER_BYTES,
     ) -> None:
         self._max_result_bytes = max_result_bytes
+        # The reader call (DESIGN-reader-call.md). Its own adapter instance so
+        # it can carry a small num_predict with thinking off -- the planner's
+        # budget lets a reasoning model think the whole reply away. Defaults
+        # to the primary brain; MUST be local (ARCH section 9) and is never the
+        # specialist, which is asserted in _read_result rather than trusted.
+        self._reader_llm = reader_llm if reader_llm is not None else llm
+        if self._reader_llm is not llm and self._reader_llm is specialist_llm:
+            raise ValueError(
+                "reader_llm must never be the specialist brain (ARCH section 9)"
+            )
+        self._reader_timeout_s = reader_timeout_s
+        self._max_reader_bytes = max_reader_bytes
         self._max_history_external_bytes = max_history_external_bytes
         # One clamp is a big page and says nothing. A RUN of clamps is a tool
         # returning capped-to-the-limit results pass after pass, which is the
@@ -2194,16 +2246,18 @@ class Organizer:
             # `spec` already fetched above for the requires_confirmation
             # check -- reuse rather than another registry lookup.
             if spec is not None and spec.untrusted and not answered_from_ledger:
-                # Defang any literal `</external>` inside the payload so an
-                # attacker-controlled page can't close the wrapper early and
-                # promote the trailing text to "trusted" status. The escape
-                # form is non-matching plain text; the LLM sees data, not a
-                # tag boundary.
-                safe = raw.replace("</external>", "<\\/external>")
-                wrapped = f"<external>{safe}</external>"
-                # Set at the wrap site, so the signal is ours rather than the
-                # payload's. Every later mutating call this turn is confirmed.
+                # Set BEFORE the reader runs, so the signal is ours rather than
+                # the payload's and no reader outcome can skip it. Every later
+                # mutating call this turn is confirmed.
                 outcome.untrusted_seen = True
+                if spec.read and result.ok:
+                    wrapped = await self._read_result(
+                        tc, raw, clamped.clamped, messages, trace
+                    )
+                else:
+                    wrapped = _wrap_external(raw)
+                    if clamped.clamped:
+                        wrapped = f"{wrapped}\n{_CLAMPED_NOTE}"
             else:
                 # A ledger answer takes this branch even for an untrusted tool.
                 # It never went to the wire, so it ingested no external bytes
@@ -2213,8 +2267,8 @@ class Organizer:
                 # would also hand the model our own refusal inside the region
                 # the system prompt tells it to ignore.
                 wrapped = raw
-            if clamped.clamped:
-                wrapped = f"{wrapped}\n{_CLAMPED_NOTE}"
+                if clamped.clamped:
+                    wrapped = f"{wrapped}\n{_CLAMPED_NOTE}"
             if mutating and result.indeterminate:
                 # Appended after the wrapper closes, so this line is GLaDOS
                 # speaking to the model rather than payload the model has been
@@ -2227,6 +2281,82 @@ class Organizer:
                     content=wrapped,
                 )
             )
+
+    async def _read_result(
+        self,
+        tc: LLMToolCall,
+        raw: str,
+        input_cut: bool,
+        messages: list[LLMMessage],
+        trace,
+    ) -> str:
+        """Digest an untrusted result through the tool-free reader call and
+        return the planner's tool-message content (DESIGN-reader-call.md).
+
+        Fails CLOSED: empty output, drift, deadline or error all yield a
+        GLaDOS-authored line outside any wrapper, never the raw bytes -- every
+        one of those is reachable from inside the payload, so a fallback to
+        the raw path would be a defence the payload can switch off."""
+        reader_messages = build_reader_messages(
+            _last_user_text(messages),
+            f"{tc.server}.{tc.name}",
+            raw,
+            self._reply_language,
+            self._max_result_bytes,
+        )
+        started = time.monotonic()
+        summary, failure = await self._call_reader(tc, reader_messages)
+        if failure is None:
+            failure = self._judge_reader_output(summary)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        input_bytes = len(raw.encode("utf-8"))
+        if failure is not None:
+            log.warning(
+                "reader withheld %s.%s result (%s, %d ms)",
+                tc.server, tc.name, failure, elapsed_ms,
+            )
+            trace.event(
+                "reader_withheld",
+                call_id=tc.call_id,
+                reason=failure,
+                input_bytes=input_bytes,
+                elapsed_ms=elapsed_ms,
+            )
+            return reader_fallback_line(self._reply_language)
+        digest = clamp_result_bytes(summary, self._max_reader_bytes)
+        trace.event(
+            "reader_summarised",
+            call_id=tc.call_id,
+            input_bytes=input_bytes,
+            input_cut=input_cut,
+            output_bytes=digest.kept_bytes,
+            output_cut=digest.clamped,
+            summary=digest.text,
+            elapsed_ms=elapsed_ms,
+        )
+        note = _READ_CLAMPED_NOTE if input_cut else _READ_NOTE
+        return f"{_wrap_external(digest.text)}\n{note}"
+
+    async def _call_reader(
+        self, tc: LLMToolCall, reader_messages: list[LLMMessage]
+    ) -> tuple[str, str | None]:
+        """Run the reader under its deadline. Returns (summary, failure); a
+        turn cancel propagates untouched (CancelledError is not an Exception)."""
+        try:
+            async with asyncio.timeout(self._reader_timeout_s):
+                return await self._collect_text(self._reader_llm, reader_messages), None
+        except TimeoutError:
+            return "", f"timeout after {self._reader_timeout_s}s"
+        except Exception as exc:
+            log.exception("reader call failed for %s.%s", tc.server, tc.name)
+            return "", f"error: {type(exc).__name__}"
+
+    def _judge_reader_output(self, summary: str) -> str | None:
+        if not summary:
+            return "empty"
+        if detect_drift(summary, self._reply_language):
+            return "language drift"
+        return None
 
     async def _dispatch_or_answer(
         self,
