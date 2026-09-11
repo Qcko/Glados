@@ -271,6 +271,16 @@ timeout_s = 400.0
 mutating = true
 timeout_s = 400.0
 
+# Added 11-09-2026 with the tool (DunnesStoresMCP 8c8d504). Takes a volume out
+# of one product line and lands on the right amount: drops held packs when
+# that is exact, otherwise swaps packs from a search (removes, then adds).
+# Mutating for the same reason as add_by_volume -- a successful swap must not
+# be re-fired on the escalation loopback. One call can hold a cart read, a
+# search and two writes, so it needs the full 400s like every other cart tool.
+[server.tool_overlays.remove_by_volume]
+mutating = true
+timeout_s = 400.0
+
 # --- Checkout (stops at slot selection) --------------------------------
 
 [server.tool_overlays.list_delivery_slots]
