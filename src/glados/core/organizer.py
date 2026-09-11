@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 import logging
 import math
@@ -2335,17 +2336,26 @@ class Organizer:
             elif refusal is not None:
                 result = refusal.result
             elif needs_confirm:
+                # The room approves a copy, and that copy is what is sent. The
+                # call object stays reachable (history, the model's stream)
+                # for the whole await, so dispatching `tc.args` would make
+                # "what was approved is what is sent" true only by convention.
+                approved = copy.deepcopy(tc.args)
                 granted = await self._await_confirmation(
                     session_id=session_id,
                     room_id=room_id,
                     tool_qualified=spec.qualified,
-                    args=tc.args,
+                    args=approved,
                     trace=trace,
                 )
                 if not granted:
                     denied = True
                     result = MCPCallResult(ok=False, error="user denied")
                 else:
+                    # From here on the approved copy IS the call: the in-flight
+                    # and write ledgers must record what went to the wire, or a
+                    # re-issue of those args slips past the re-issue refusal.
+                    tc = tc.model_copy(update={"args": approved})
                     result = await self._dispatch_or_answer(
                         tc, envelope, session_id, room_id, trace, outcome
                     )
@@ -3070,6 +3080,17 @@ class Organizer:
         wins; subsequent replies are no-ops."""
         binding = self.binding_for_client(client_id)
         if binding is None:
+            return
+        if binding.role != "ui":
+            # Only a screen can show what is being approved; a mic or speaker
+            # token in the same room must not be able to grant a cart write.
+            # Mirrors `_room_can_confirm`, which asks only when a `ui` client
+            # is present.
+            log.debug(
+                "drop tool_confirm_response: client %s has role %s, not ui",
+                client_id,
+                binding.role,
+            )
             return
         expected_room = self._confirm_room.get(response.request_id)
         if expected_room is None:

@@ -141,3 +141,56 @@ footer {
 .mic.running .dot { background: var(--error); animation: pulse 1.2s ease-in-out infinite; }
 .mic.err { border-color: var(--error); color: var(--error); }
 @keyframes pulse { 50% { opacity: .35; } }
+
+/* Confirmation dialog (DESIGN-confirm-modal.md). The arguments scroll in
+   their own region and the buttons sit in a footer outside it, so no value
+   can push Allow or Deny off-screen. The argument block is styled apart from
+   the dialog's own text because it is the model's words, not GLaDOS's UI. */
+dialog.confirm {
+  width: min(36rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem);
+  padding: 0; border: 1px solid var(--tool); border-radius: 8px;
+  background: var(--panel); color: #e6e9ef;
+}
+dialog.confirm[open] { display: flex; flex-direction: column; }
+dialog.confirm::backdrop { background: rgba(0,0,0,.6); }
+dialog.confirm:focus { outline: none; }
+.confirm-heading {
+  margin: 0; padding: .9rem 1rem .25rem; font-size: 1rem;
+  overflow-wrap: anywhere; unicode-bidi: isolate;
+}
+.confirm-lede { margin: 0; padding: 0 1rem .6rem; font-size: .8rem; color: var(--muted); }
+.confirm-args-label {
+  padding: .2rem 1rem; font-size: .65rem; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--tool);
+}
+.confirm-args {
+  margin: 0 1rem; padding: .5rem; min-height: 2rem; max-height: 40vh; overflow: auto;
+  flex: 0 1 auto; background: rgba(212,164,55,.08);
+  border: 1px dashed rgba(212,164,55,.45); border-radius: 4px;
+  font-family: ui-monospace, monospace; font-size: .8rem;
+}
+.confirm-arg { display: grid; grid-template-columns: max-content 1fr; gap: .75rem; padding: .15rem 0; }
+.confirm-key, .confirm-value { unicode-bidi: isolate; overflow-wrap: anywhere; }
+.confirm-key { color: var(--muted); }
+.confirm-value { color: var(--tool); }
+.confirm-more {
+  margin-left: .4rem; background: none; border: 1px solid var(--line); border-radius: 3px;
+  color: var(--user); font: inherit; font-size: .7rem; cursor: pointer;
+}
+.confirm-countdown { margin: .75rem 1rem 0; height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.confirm-bar { height: 100%; background: var(--tool); transform-origin: left; }
+@keyframes confirm-countdown { to { transform: scaleX(0); } }
+.confirm-status { margin: .4rem 1rem 0; min-height: 1rem; font-size: .75rem; color: var(--warn); }
+.confirm-footer {
+  display: flex; gap: .5rem; align-items: center; flex-shrink: 0;
+  margin-top: .6rem; padding: .75rem 1rem; border-top: 1px solid var(--line);
+}
+.confirm-footer .spacer { flex: 1; }
+.confirm-footer button {
+  padding: .45rem 1rem; border: none; border-radius: 6px;
+  font-size: .85rem; font-weight: 600; cursor: pointer;
+}
+.confirm-footer button:disabled { opacity: .35; cursor: not-allowed; }
+.confirm-footer .confirm-stop { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+.confirm-footer .confirm-deny { background: var(--error); color: #fff; }
+.confirm-footer .confirm-allow { background: var(--assistant); color: #000; }

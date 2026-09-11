@@ -7,6 +7,7 @@ import { loadSettings, saveSettings, type Settings } from "./settings";
 import { StateMachine, type ConnState } from "./state";
 import { Transport } from "./transport";
 import { Transcript } from "./transcript";
+import { ConfirmDialog } from "./confirm";
 
 const QUICK_PROMPTS = [
   "What time is it?",
@@ -80,6 +81,19 @@ const transport = new Transport(state);
 const mic = new Mic((data) => transport.sendBinary(data));
 const tts = new TtsPlayer();
 
+const confirmDialog = new ConfirmDialog({
+  answer: (request, granted) =>
+    transport.send({ type: "tool_confirm_response", request_id: request.request_id, granted }),
+  stopTurn: (sessionId) => {
+    transport.send({ type: "interrupt", session_id: sessionId });
+    tts.stop();
+  },
+  note: (text) => transcript.systemNote(text),
+  restoreFocus: () => {
+    if (!inputEl.disabled) inputEl.focus();
+  },
+});
+
 mic.subscribe(renderMic);
 
 silenceBtn.addEventListener("click", () => {
@@ -139,34 +153,16 @@ transport.onServerMessage((msg) => {
     case "done":
       if (activeSessionId === msg.session_id) setActiveSession(null);
       break;
-    case "tool_confirm_request":
-      handleConfirmRequest(msg);
-      break;
     case "error":
       setActiveSession(null);
       break;
   }
-  transcript.ingest(msg);
+  try {
+    transcript.ingest(msg);
+  } finally {
+    confirmDialog.observe(msg);
+  }
 });
-
-function handleConfirmRequest(req: {
-  request_id: string;
-  tool: string;
-  args_summary: Record<string, unknown>;
-  ttl_s: number;
-}): void {
-  // Minimal blocking-modal-via-confirm — replace with a styled modal
-  // when a real gated tool ships (today's only one is toy_stdio.roll_dice).
-  const argsText = JSON.stringify(req.args_summary, null, 2);
-  const ok = window.confirm(
-    `GLaDOS wants to run ${req.tool}\n\nargs:\n${argsText}\n\nAllow?`,
-  );
-  transport.send({
-    type: "tool_confirm_response",
-    request_id: req.request_id,
-    granted: ok,
-  });
-}
 
 stopBtn.addEventListener("click", () => {
   if (activeSessionId === null) return;
@@ -183,6 +179,7 @@ transport.onFirstReply((ms) => {
 state.subscribe(renderState);
 
 function renderState(s: ConnState): void {
+  confirmDialog.setOnline(s.kind === "ready");
   const setInputsDisabled = (locked: boolean) => {
     clientIdInput.disabled = locked;
     roomIdInput.disabled = locked;
