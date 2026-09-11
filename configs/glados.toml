@@ -141,7 +141,14 @@ keep_alive = "-1"
 # num_ctx you must change the schema default in core/config.py to None. The
 # false comment silently voided one arm of the 19-08-2026 A/B before anyone
 # noticed the log still read num_ctx=8192.
-num_ctx = 12288
+#
+# 16384 since 11-09-2026: the boot budget gate refused 12288. Measured on
+# ministral3:8b-instruct with the DunnesStoresMCP 365047c DLL: fixed prefix
+# 6194 (system prompt 602 + 35 tool specs, of which the 27 dunnes tools cost
+# ~5080) + retained external 3606 + num_predict 4096 = 13896. The right fix is
+# shorter Dunnes tool descriptions (~190 tokens each); this buys the margin
+# until then.
+num_ctx = 16384
 # Cap on generated tokens per pass. Unbounded generation let the observed
 # repetition loop (2026-06-18) run until it filled the context; this bounds that
 # failure to a single turn. Keep well above the longest real spoken reply.
