@@ -173,15 +173,25 @@ timeout_s = 400.0
 # real cart change from a read/search (without it, a successful add looks
 # like a no-op and the turn is wrongly classed `failed`).
 
+# Write-ledger flags (core/write_ledger.py, DESIGN-write-guards.md).
+# `additive` puts a successful add in the cross-turn ledger, so the same add
+# a moment later is answered "already done" rather than re-sent; `quantity_arg`
+# refuses a count the user never said. Both on the adds only -- set/adjust
+# tools take 1 and -1 as real requests. Observed 11-09-2026: "add tomatoes"
+# twice became remove + add four.
 [server.tool_overlays.add_to_cart]
 mutating = true
 timeout_s = 400.0
+additive = true
+quantity_arg = "quantity"
 
 # The one-shot search+add path the model prefers for "add <name>". Needs the
 # same Selenium timeout as a search, and is a cart write (mutating).
 [server.tool_overlays.add_to_cart_by_name]
 mutating = true
 timeout_s = 400.0
+additive = true
+quantity_arg = "quantity"
 
 # Volume-aware add ("4 litres of milk") -- composes the target across pack
 # sizes and writes them to the cart, so it is mutating like the other adds.
@@ -191,6 +201,7 @@ timeout_s = 400.0
 [server.tool_overlays.add_by_volume]
 mutating = true
 timeout_s = 400.0
+additive = true
 
 # Added 20-08-2026. This tool had NO overlay at all, which cost two things:
 #   1. `mutating` defaulted to false, so the escalation guard could not see it.
@@ -225,6 +236,7 @@ timeout_s = 400.0
 [server.tool_overlays.add_recipe_ingredients]
 mutating = true
 timeout_s = 400.0
+additive = true
 
 [server.tool_overlays.view_favorites]
 timeout_s = 400.0

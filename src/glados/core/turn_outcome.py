@@ -69,6 +69,13 @@ class ToolRecord:
     # report success for a write that may never have happened -- but every
     # guard asking "is it safe to run this again" must treat it as a maybe.
     indeterminate: bool = False
+    # Answered from the cross-turn write ledger: the call was not sent because
+    # an earlier turn already landed it. Nothing changed THIS turn, so
+    # `mutating` stays False and every replay gate stays truthful -- but the
+    # goal the user asked for is met, so the goal-check and the claim check
+    # count it as landed. On the record rather than the turn so one satisfied
+    # call cannot excuse an invented claim about a different subject.
+    satisfied: bool = False
 
 
 @dataclass
@@ -127,6 +134,7 @@ class TurnRecord:
         mutating: bool = False,
         indeterminate: bool = False,
         args: dict | None = None,
+        satisfied: bool = False,
     ) -> None:
         self.tools.append(
             ToolRecord(
@@ -135,6 +143,7 @@ class TurnRecord:
                 mutating=mutating,
                 indeterminate=indeterminate,
                 subjects=_subjects(args),
+                satisfied=satisfied,
             )
         )
 
@@ -299,7 +308,7 @@ def claimed_a_change_it_did_not_make(turn: TurnRecord) -> bool:
     # but only a claim about ITS OWN subject. Bailing on the whole turn
     # instead would let one outstanding call excuse every invented claim
     # beside it, which is the failure `_claim_clauses` exists to prevent.
-    landed = [t for t in turn.tools if t.mutating and (t.ok or t.indeterminate)]
+    landed = [t for t in turn.tools if _landed(t)]
     if not landed:
         # Claimed a change with nothing side-effecting behind it at all.
         return True
@@ -424,7 +433,16 @@ def _action_drifted(turn: TurnRecord) -> bool:
 
 
 def _has_successful_mutation(tools: list[ToolRecord]) -> bool:
-    return any(t.ok and t.mutating for t in tools)
+    return any(t.ok and (t.mutating or t.satisfied) for t in tools)
+
+
+def _landed(tool: ToolRecord) -> bool:
+    """A call that may stand behind a claim of change: one that mutated, one
+    that timed out and may have, or one the ledger answered because an
+    earlier turn already made the change."""
+    return (tool.mutating and (tool.ok or tool.indeterminate)) or (
+        tool.ok and tool.satisfied
+    )
 
 
 def _has_unrecovered_error(tools: list[ToolRecord]) -> bool:

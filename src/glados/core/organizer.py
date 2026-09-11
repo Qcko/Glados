@@ -73,7 +73,20 @@ from .turn_outcome import (
     said_nothing,
 )
 from ..servers.room_intercom import MAX_MESSAGE_CHARS, SPEAK_INTO
-from .utterance import is_action_request, is_time_request
+from .utterance import (
+    has_quantity_cue,
+    has_repeat_cue,
+    is_action_request,
+    is_time_request,
+)
+from .write_ledger import (
+    REPEAT_ARG,
+    WriteEntry,
+    WriteKey,
+    WriteLedger,
+    canonical_key,
+    coerce_quantity,
+)
 
 log = logging.getLogger(__name__)
 
@@ -324,6 +337,31 @@ _ALREADY_ATTEMPTED = (
     "and its outcome is unknown"
 )
 
+# Answers from the cross-turn write ledger (core/write_ledger.py). Same
+# footing as `_ALREADY_ATTEMPTED`: harness-authored, never sent, and delivered
+# outside any <external> wrapper. `ok=True` like the intercom refusal, so the
+# turn is not `failed` and does not escalate to the specialist, which would
+# only re-issue the same call into the same refusal.
+_ALREADY_DONE_NOTE = (
+    "GLaDOS note, not tool output: not sent -- an earlier turn already made "
+    "this exact addition moments ago. Tell the user it is already in the cart; "
+    "if they want more, they can say so."
+)
+_OUTCOME_UNKNOWN_NOTE = (
+    "GLaDOS note, not tool output: not sent -- an earlier turn sent this exact "
+    "addition and never got an answer, so it may already be in the cart. Say "
+    "so, and suggest checking the cart rather than adding again."
+)
+# The quantity-provenance refusal. The user's words carried no count, so the
+# model's number is invented; nothing is met by it, and the right reply is a
+# question. Delivered as a tool message rather than an error so the turn is
+# `needs-user` when the model asks, not `failed`.
+_QUANTITY_UNGROUNDED_NOTE = (
+    "GLaDOS note, not tool output: not sent -- the user did not say how many, "
+    "so the quantity here is a guess. Ask how many they want, or send the "
+    "call again without a quantity to add one."
+)
+
 # Upper bound on how many sessions' conversation buffers are held in RAM at
 # once. Far above any realistic concurrent-session count; exists only so a long
 # uptime accumulating dead sessions can't grow the history dict without limit.
@@ -383,13 +421,57 @@ _MAX_VETO_HOLD_S = 30.0
 _ANNOUNCE_MAX_DEPTH = 3
 
 
-def _in_flight_key(call: LLMToolCall) -> tuple[str, str]:
-    """Identity of a tool call for the per-turn in-flight ledger. Arguments are
-    canonicalised so key order cannot disguise a re-issue as a new call."""
-    return (
-        f"{call.server}.{call.name}",
-        json.dumps(call.args, sort_keys=True, default=str),
-    )
+def _in_flight_key(call: LLMToolCall) -> WriteKey:
+    """Identity of a tool call for the per-turn in-flight ledger. Shares the
+    write ledger's canonicaliser so key order and letter case cannot disguise
+    a re-issue as a new call."""
+    return canonical_key(call)
+
+
+@dataclass(frozen=True)
+class _WriteRefusal:
+    """A guard's answer in place of a dispatch. `satisfied` is True only when
+    the ledger is certain the change already stands; a guess it refused, or a
+    write whose outcome is unknown, meets nothing."""
+
+    result: MCPCallResult
+    satisfied: bool
+
+
+def _local_result(status: str, note: str, **facts: object) -> MCPCallResult:
+    """A harness-authored result: `ok=True` so the turn does not fail or
+    escalate, a `status` the model can read, and only facts GLaDOS knows."""
+    return MCPCallResult(ok=True, content={"status": status, **facts, "note": note})
+
+
+def _write_key(call: LLMToolCall, spec: ToolSpec) -> WriteKey:
+    """The ledger's identity for an additive write: the call minus its count
+    (the invented-quantity rewrite must still match) and minus the server's
+    `repeat` override (the model must not mint a new key by adding it)."""
+    drop = [REPEAT_ARG]
+    if spec.quantity_arg:
+        drop.append(spec.quantity_arg)
+    return canonical_key(call, drop)
+
+
+def _accepts_repeat(spec: ToolSpec) -> bool:
+    """Only an additive write's boolean `repeat` is the server override this
+    guard owns; a read whose `repeat` is a schedule string is left alone."""
+    if not spec.additive:
+        return False
+    properties = spec.parameters.get("properties") or {}
+    return (properties.get(REPEAT_ARG) or {}).get("type") == "boolean"
+
+
+def _quantity_invented(call: LLMToolCall, spec: ToolSpec, utterance: str) -> bool:
+    """A count other than one that the user never said. One is the default
+    the server applies when the count is absent, so it is never a guess."""
+    if not spec.quantity_arg:
+        return False
+    quantity = coerce_quantity(call.args.get(spec.quantity_arg))
+    if quantity is None or quantity == 1:
+        return False
+    return not has_quantity_cue(utterance)
 
 
 def _took_effect(call: LLMToolCall, result: MCPCallResult) -> bool:
@@ -553,8 +635,16 @@ class Organizer:
         reader_llm: LLM | None = None,
         reader_timeout_s: float = READER_TIMEOUT_S,
         max_reader_bytes: int = MAX_READER_BYTES,
+        write_ledger: WriteLedger | None = None,
     ) -> None:
         self._max_result_bytes = max_result_bytes
+        # Cross-turn memory of additive writes that landed, per session and
+        # bounded like `_history`. Injectable so the window is testable.
+        self._write_ledger = (
+            write_ledger
+            if write_ledger is not None
+            else WriteLedger(max_sessions=_MAX_TRACKED_SESSIONS)
+        )
         # The reader call (DESIGN-reader-call.md). Its own adapter instance so
         # it can carry a small num_predict with thinking off -- the planner's
         # budget lets a reasoning model think the whole reply away. Defaults
@@ -1453,6 +1543,7 @@ class Organizer:
             evicted = next(iter(self._history))
             del self._history[evicted]
             self._untrusted_sessions.discard(evicted)
+            self._write_ledger.forget(evicted)
         self._history[session_id] = self._cap_history(new_history)
         # Committed alongside the history it describes: the flag is a property
         # of the retained bytes, so it lives and dies with them.
@@ -2007,6 +2098,7 @@ class Organizer:
             self._history.pop(sid, None)
             self._untrusted_sessions.discard(sid)
             self._last_turn.pop(sid, None)
+            self._write_ledger.forget(sid)
             trace.event("history_cleared", reason="user start-over")
             reply = "Done -- I've cleared our conversation. Starting fresh."
         else:
@@ -2112,7 +2204,13 @@ class Organizer:
         trace,
         outcome: TurnRecord,
     ) -> None:
+        utterance = _last_user_text(messages)
         for tc in calls:
+            spec = self.mcp.spec_for(tc.server, tc.name)
+            # Rewrites the args, so it runs before the broadcast and the trace
+            # event: the desk client's confirm dialog and `traces/` must show
+            # the call that goes to the wire, not the one the model wrote.
+            self._align_repeat_flag(tc, spec, utterance, trace)
             await self._broadcast(
                 room_id,
                 ToolCall(
@@ -2130,7 +2228,6 @@ class Organizer:
                 name=tc.name,
                 args=tc.args,
             )
-            spec = self.mcp.spec_for(tc.server, tc.name)
             # A tool mutates external state if it's explicitly flagged
             # `mutating` OR it's confirmation-gated (gated tools always mutate).
             # Confirmation alone is NOT sufficient -- Dunnes cart writes are
@@ -2157,6 +2254,11 @@ class Organizer:
                 or (outcome.untrusted_seen and spec.mutating)
             )
             answered_from_ledger = _in_flight_key(tc) in outcome.in_flight
+            refusal = None
+            if not answered_from_ledger and mutating:
+                refusal = self._refuse_write(tc, spec, session_id, utterance, trace)
+            # Either ledger answered locally: never sent, nothing ingested.
+            answered_locally = answered_from_ledger or refusal is not None
             if answered_from_ledger:
                 # Answered from the ledger, never re-sent. The first attempt is
                 # still running somewhere; issuing it again is the duplicate
@@ -2178,6 +2280,8 @@ class Organizer:
                     server=tc.server,
                     name=tc.name,
                 )
+            elif refusal is not None:
+                result = refusal.result
             elif needs_confirm:
                 granted = await self._await_confirmation(
                     session_id=session_id,
@@ -2199,6 +2303,8 @@ class Organizer:
                 )
             if mutating and result.indeterminate and not denied:
                 outcome.in_flight.add(_in_flight_key(tc))
+            if mutating and not answered_locally and not denied:
+                self._ledger_outcome(tc, spec, session_id, result)
             await self._broadcast(
                 room_id,
                 ToolResult(
@@ -2224,9 +2330,12 @@ class Organizer:
                 outcome.record_tool(
                     f"{tc.server}.{tc.name}",
                     result.ok,
-                    mutating=mutating and _took_effect(tc, result),
+                    mutating=mutating
+                    and not answered_locally
+                    and _took_effect(tc, result),
                     indeterminate=result.indeterminate,
                     args=_subject_args(tc),
+                    satisfied=refusal is not None and refusal.satisfied,
                 )
             # Cap AFTER the broadcast and the trace event above, so the desk
             # client and `traces/` keep the whole result and only the SPOKEN
@@ -2245,7 +2354,7 @@ class Organizer:
             raw = clamped.text
             # `spec` already fetched above for the requires_confirmation
             # check -- reuse rather than another registry lookup.
-            if spec is not None and spec.untrusted and not answered_from_ledger:
+            if spec is not None and spec.untrusted and not answered_locally:
                 # Set BEFORE the reader runs, so the signal is ours rather than
                 # the payload's and no reader outcome can skip it. Every later
                 # mutating call this turn is confirmed.
@@ -2281,6 +2390,140 @@ class Organizer:
                     content=wrapped,
                 )
             )
+
+    def _align_repeat_flag(
+        self, tc: LLMToolCall, spec: ToolSpec | None, utterance: str, trace
+    ) -> None:
+        """The server's `repeat` override is set from the user's words alone.
+
+        A model that wants past the write ledger or the server's own
+        identical-write refusal only has to add `repeat: true`, so the flag is
+        overwritten -- not merely set -- on every call whose schema carries it:
+        True when the utterance asked for a repeat ("another", "more"), False
+        otherwise. Fails open with the ledger on a non-English reply language,
+        where the cue table cannot read the utterance."""
+        if spec is None or not _accepts_repeat(spec) or not self._cues_readable():
+            return
+        wanted = has_repeat_cue(utterance)
+        from_model = tc.args.get(REPEAT_ARG)
+        if from_model == wanted:
+            return
+        # Traced only when the model said something and was overruled; an
+        # omitted flag defaulting to False is the common case, not an event.
+        if from_model is not None:
+            trace.event(
+                "repeat_aligned",
+                call_id=tc.call_id,
+                server=tc.server,
+                name=tc.name,
+                from_model=from_model,
+                to=wanted,
+            )
+        # In place on purpose: the same LLMToolCall object sits in the
+        # assistant message already appended to the turn, so history and the
+        # next pass see the call as it went to the wire.
+        tc.args[REPEAT_ARG] = wanted
+
+    def _refuse_write(
+        self,
+        tc: LLMToolCall,
+        spec: ToolSpec | None,
+        session_id: str,
+        utterance: str,
+        trace,
+    ) -> "_WriteRefusal | None":
+        """The two harness guards on a mutating call, in the order that keeps
+        them honest: an invented quantity is refused BEFORE the ledger can
+        answer "already done" and so launder it into a satisfied claim.
+        Ahead of the confirmation gate, like the in-flight ledger, so a
+        refused call never prompts the room for something not being sent."""
+        if spec is None or not self._cues_readable():
+            return None
+        if _quantity_invented(tc, spec, utterance):
+            trace.event(
+                "quantity_refused",
+                call_id=tc.call_id,
+                server=tc.server,
+                name=tc.name,
+                quantity=tc.args.get(spec.quantity_arg),
+            )
+            return _WriteRefusal(
+                _local_result("quantity_needed", _QUANTITY_UNGROUNDED_NOTE),
+                satisfied=False,
+            )
+        if not spec.additive:
+            return None
+        entry = self._write_ledger.recent(session_id, _write_key(tc, spec))
+        if entry is None:
+            return None
+        if has_repeat_cue(utterance):
+            trace.event(
+                "repeat_allowed", call_id=tc.call_id, server=tc.server, name=tc.name
+            )
+            return None
+        return self._refusal_for(tc, session_id, entry, trace)
+
+    def _refusal_for(
+        self, tc: LLMToolCall, session_id: str, entry: WriteEntry, trace
+    ) -> "_WriteRefusal":
+        status = "already_done" if entry.certain else "outcome_unknown"
+        note = _ALREADY_DONE_NOTE if entry.certain else _OUTCOME_UNKNOWN_NOTE
+        seconds_ago = self._write_ledger.seconds_since(entry)
+        log.warning(
+            "refused repeat of %s.%s in session %s: %s %ss ago",
+            tc.server,
+            tc.name,
+            session_id,
+            status,
+            seconds_ago,
+        )
+        trace.event(
+            "repeat_refused",
+            call_id=tc.call_id,
+            server=tc.server,
+            name=tc.name,
+            status=status,
+            seconds_ago=seconds_ago,
+        )
+        return _WriteRefusal(
+            _local_result(
+                status, note, seconds_ago=seconds_ago, quantity=entry.quantity
+            ),
+            satisfied=entry.certain,
+        )
+
+    def _ledger_outcome(
+        self,
+        tc: LLMToolCall,
+        spec: ToolSpec | None,
+        session_id: str,
+        result: MCPCallResult,
+    ) -> None:
+        """Remember an additive write that landed (or may have); forget the
+        session's adds when any other write lands, since the cart it described
+        may no longer hold them."""
+        if spec is None or not (result.ok or result.indeterminate):
+            return
+        if result.ok and not _took_effect(tc, result):
+            return
+        if not spec.additive:
+            self._write_ledger.clear(session_id, tc.server)
+            return
+        quantity = None
+        if spec.quantity_arg:
+            quantity = coerce_quantity(tc.args.get(spec.quantity_arg))
+        self._write_ledger.note(
+            session_id,
+            tc,
+            _write_key(tc, spec),
+            quantity if quantity is not None else 1,
+            certain=result.ok,
+        )
+
+    def _cues_readable(self) -> bool:
+        """The cue tables are English. Anywhere else both guards stand down
+        rather than refuse every count the tables cannot read."""
+        return self._reply_language == "en"
 
     async def _read_result(
         self,

@@ -61,6 +61,10 @@ class ToolSpec(BaseModel):
     # opt-in via the servers.toml overlay; see DESIGN-reader-call.md for why
     # there is deliberately no server-level floor.
     read: bool = False
+    # Write-ledger flags, set via the servers.toml overlay; the reasoning is on
+    # `ToolOverlay` (core/config.py) and in core/write_ledger.py.
+    additive: bool = False
+    quantity_arg: str | None = None
 
     @property
     def qualified(self) -> str:

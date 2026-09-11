@@ -146,3 +146,48 @@ def is_time_request(text: str) -> bool:
     intercept (force time.now), so it errs tight: it must not fire on
     timer-setting or "what time does X open" planning questions."""
     return bool(text) and _TIME_REQUEST_RE.search(text.strip()) is not None
+
+
+# Words that say HOW MANY. Read by the quantity-provenance guard: a cart add
+# whose `quantity` is not 1 is only allowed when the user's own words carry a
+# count. English only, and the guard stands down on any other reply language
+# rather than refuse every Czech "dva" -- the tables are a fail-open heuristic,
+# not a parser. Word-bounded on purpose: "one" is in "onion" and "phone", "ten"
+# in "tender", "more" in "moreish". A digit glued to a unit ("1L", "7up") does
+# not match and is not meant to: it names a product, not a count.
+_COUNT_WORDS = (
+    "zero", "none", "one", "two", "three", "four", "five", "six", "seven",
+    "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen",
+    "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
+    "thirty", "forty", "fifty", "hundred", "dozen",
+)
+_VAGUE_COUNT_WORDS = (
+    "couple", "pair", "few", "several", "some", "more", "another", "extra",
+    "double", "twice", "all", "every", "each", "both",
+)
+_QUANTITY_CUE_RE = re.compile(
+    r"\b(?:\d+|" + "|".join(_COUNT_WORDS + _VAGUE_COUNT_WORDS) + r")\b",
+    re.IGNORECASE,
+)
+
+# Words that say "on top of what is already there". Read by the write ledger:
+# a repeat of an add inside the window goes through only when the user asked
+# for a repeat, and the server's `repeat` override is set from this alone --
+# never from the model, which would otherwise set it to get past the ledger.
+_REPEAT_CUE_RE = re.compile(
+    r"\b(?:another|again|more|extra|second|additional|further)\b",
+    re.IGNORECASE,
+)
+
+
+def has_quantity_cue(text: str) -> bool:
+    """True if the utterance names a count, however vaguely ("a few", "some",
+    "more" all count: the user asked for an amount, and the model's number is
+    its reading of that). False means the model invented the number."""
+    return bool(text) and _QUANTITY_CUE_RE.search(text) is not None
+
+
+def has_repeat_cue(text: str) -> bool:
+    """True if the utterance asks for something in addition to what was
+    already done ("add another", "more tomatoes", "do that again")."""
+    return bool(text) and _REPEAT_CUE_RE.search(text) is not None

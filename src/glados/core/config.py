@@ -476,6 +476,16 @@ class ToolOverlay(BaseModel):
     # id-bearing ones keep the wrapper plus the confirmation gate. Meaningless
     # without `untrusted`; the Organizer applies it only to untrusted results.
     read: bool = False
+    # An additive write (cart add). Remembered in the cross-turn write ledger
+    # so the same request a moment later is answered "already done" instead
+    # of re-sent; a successful NON-additive mutating call (remove, set, adjust)
+    # clears the ledger for that session. See core/write_ledger.py.
+    additive: bool = False
+    # Name of the tool's count argument. When set, a value other than 1 is
+    # refused unless the user's own words carried a count -- the model
+    # invented it otherwise (11-09-2026: "add tomatoes" twice became four).
+    # Set it on the adds only: for set/adjust tools 1 and -1 are real requests.
+    quantity_arg: str | None = None
 
 
 class ServerEntry(BaseModel):
@@ -556,6 +566,8 @@ class ServerEntry(BaseModel):
                 "flex_to": overlay.flex_to,
                 "items_key": overlay.items_key,
                 "read": overlay.read,
+                "additive": overlay.additive,
+                "quantity_arg": overlay.quantity_arg,
             }
         )
 
