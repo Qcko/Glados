@@ -75,7 +75,9 @@ from .turn_outcome import (
     said_nothing,
 )
 from ..servers.room_intercom import MAX_MESSAGE_CHARS, SPEAK_INTO
+from .confirm_phrase import render_confirm_question, tts_safe
 from .utterance import (
+    classify_confirm_answer,
     has_quantity_cue,
     has_repeat_cue,
     is_action_request,
@@ -126,6 +128,46 @@ class _TtsGate:
     session_id: str
     closed_until: float = 0.0
     earliest_release: float = 0.0
+
+
+@dataclass
+class _VoiceAnswer:
+    """A spoken answer that resolved a confirmation. Carried through the
+    Future so the room worker, which owns the trace, can record it -- the
+    ingress task that heard it has no trace handle and may run after the
+    turn's trace is closed."""
+
+    granted: bool
+    client_id: str
+    text: str
+
+
+@dataclass
+class _PendingConfirm:
+    """One live confirmation, indexed by request_id (the dialog answers by
+    it) and by room (a spoken answer arrives with only a room). A room runs
+    one turn and a turn awaits one confirm at a time, so the room index is
+    never contended. `voice_armed` is set only once a question actually
+    streamed audio; `answers_after` is the loop time the room's mic reopens
+    after that question, and a transcript captured earlier is not an answer
+    to it."""
+
+    request_id: str
+    room_id: str
+    session_id: str
+    fut: asyncio.Future[bool | _VoiceAnswer]
+    voice_armed: bool = False
+    answers_after: float = 0.0
+
+
+# How many turns may queue behind a room whose worker is held on a
+# confirmation. Every non-answer ("what?", "say again") becomes a full LLM
+# turn once the confirm resolves; one is a fair follow-up, a burst is not.
+_CONFIRM_HOLD_QUEUE_DEPTH = 1
+# Roles whose voice transcripts may answer a spoken confirmation. `ui` runs a
+# mic pipeline of its own; `speaker` gets a pipeline too but has no business
+# talking.
+_ROLES_THAT_ANSWER_ALOUD = ("mic", "ui")
 
 
 @dataclass
@@ -564,8 +606,7 @@ def _spoken_message(raw: str) -> str:
     prosody fix, not a sanitiser -- it bounds neither length nor character set,
     and this text is model-authored from an utterance that may itself have been
     shaped by untrusted bytes."""
-    printable = "".join(ch for ch in raw if ch.isprintable() or ch.isspace())
-    return " ".join(printable.split())[:MAX_MESSAGE_CHARS].strip()
+    return tts_safe(raw, MAX_MESSAGE_CHARS)
 
 
 def _is_barge_in(text: str) -> bool:
@@ -813,8 +854,8 @@ class Organizer:
         # The room map enforces "only clients in the originating room
         # can answer" -- responses from other rooms are dropped silently.
         self._confirm_timeout_s = confirm_timeout_s
-        self._pending_confirms: dict[str, asyncio.Future[bool]] = {}
-        self._confirm_room: dict[str, str] = {}
+        self._pending_confirms: dict[str, _PendingConfirm] = {}
+        self._confirm_by_room: dict[str, _PendingConfirm] = {}
         # Assembled system prompt: the base persona prompt plus any
         # hash-approved, guard-wrapped server memory (ARCH section 14). The base is
         # the built-in SYSTEM_PROMPT unless the operator supplies a
@@ -866,7 +907,12 @@ class Organizer:
         )
 
     async def handle_user_text(
-        self, client_id: str, text: str, *, source: UserTextSource = "text"
+        self,
+        client_id: str,
+        text: str,
+        *,
+        source: UserTextSource = "text",
+        captured_at: float | None = None,
     ) -> None:
         """Enqueue a turn for the speaker's room. Returns once the turn
         is in the room's FIFO; the turn itself runs on the room's
@@ -874,14 +920,69 @@ class Organizer:
         parallel (each room has its own worker).
 
         `source` is forwarded to the broadcast `UserTranscript` so the
-        UI can render voice-derived text differently from typed text."""
+        UI can render voice-derived text differently from typed text.
+
+        A spoken yes or no while the room's turn is held on a confirmation
+        is that confirmation's answer, not a turn (DESIGN-voice-confirm.md).
+        Voice only: `source` is set by the server's audio ingress, never by
+        the client, so a typed frame from any role cannot grant -- the desk
+        has the dialog for that, with its arming rules."""
         binding = self.binding_for_client(client_id)
         if binding is None:
+            return
+        if source == "voice" and self._try_answer_confirm(
+            binding, client_id, text, captured_at
+        ):
             return
         self._queues.enqueue(
             binding.room_id,
             lambda: self._run_user_text(client_id, text, source=source),
+            max_depth=_CONFIRM_HOLD_QUEUE_DEPTH
+            if binding.room_id in self._confirm_by_room
+            else None,
         )
+
+    def _try_answer_confirm(
+        self,
+        binding: ClientBinding,
+        client_id: str,
+        text: str,
+        captured_at: float | None,
+    ) -> bool:
+        """Resolve the room's pending confirmation from a spoken answer.
+        False means "not an answer here" and the caller queues a turn;
+        that covers no confirm, a confirm nobody was asked aloud, one
+        already resolved (the tick between a timeout and its finally), a
+        non-answer, and an answer captured before the question finished."""
+        pending = self._confirm_by_room.get(binding.room_id)
+        if pending is None or not pending.voice_armed or pending.fut.done():
+            return False
+        if binding.role not in _ROLES_THAT_ANSWER_ALOUD:
+            # An audio pipeline is built for every role, so a speaker
+            # credential streaming audio would otherwise be a voice.
+            return False
+        verdict = classify_confirm_answer(text)
+        if verdict is None:
+            return False
+        if captured_at is not None and captured_at < self._answers_after(pending):
+            log.info(
+                "confirm %s: %r from %s began before the question ended; not an answer",
+                pending.request_id, text, client_id,
+            )
+            return False
+        pending.fut.set_result(
+            _VoiceAnswer(granted=verdict == "yes", client_id=client_id, text=text)
+        )
+        return True
+
+    def _answers_after(self, pending: _PendingConfirm) -> float:
+        """The moment an answer may begin: the live gate horizon while the
+        question's own gate still stands (an early `playback_done` would move
+        it), else the horizon snapshotted when the question was asked."""
+        gate = self._tts_gate.get(pending.room_id)
+        if gate is not None and gate.session_id == pending.session_id:
+            return min(gate.closed_until, pending.answers_after)
+        return pending.answers_after
 
     async def flush(self) -> None:
         """Wait until every room's queue is drained. Test hook."""
@@ -1030,6 +1131,7 @@ class Organizer:
                 and not outcome.may_have_mutated()
                 and not said_nothing(outcome)
                 and not outcome.budget_exceeded
+                and not outcome.confirm_refused
             ):
                 # Capability recovery (ARCH section 13) runs BEFORE difficulty
                 # escalation: a scoped failure most likely hid the tool the turn
@@ -1224,8 +1326,16 @@ class Organizer:
                 "tts gate: dropped audio from %s in %s (text=%r)",
                 client_id, binding.room_id, text,
             )
+            pending = self._confirm_by_room.get(binding.room_id)
+            if pending is not None:
+                log.info(
+                    "confirm %s: that drop happened while the room was being asked",
+                    pending.request_id,
+                )
             return
-        await self.handle_user_text(client_id, text, source="voice")
+        await self.handle_user_text(
+            client_id, text, source="voice", captured_at=captured_at
+        )
 
     # The soonest fraction of the estimated playback at which a PlaybackDone is
     # believed. A signal before this is implausibly early (a buggy or forged
@@ -1255,11 +1365,7 @@ class Organizer:
         return when < gate.closed_until
 
     def _room_has_speaker(self, room_id: str) -> bool:
-        for cid in self.clients_in_room(room_id):
-            binding = self.binding_for_client(cid)
-            if binding is not None and binding.role == "speaker":
-                return True
-        return False
+        return self._room_has_role(room_id, "speaker")
 
     async def handle_playback_done(self, client_id: str, session_id: str) -> None:
         """A speaker client reports its audio for `session_id` finished playing
@@ -1499,13 +1605,18 @@ class Organizer:
         answers "was the brain not good enough"; that turn ran out of WINDOW,
         which a smarter model at the same `num_ctx` does not fix. Re-driving it
         would dispatch the flooding tool a second time and speak the same fixed
-        line again, for a failure that is deterministic in bytes."""
+        line again, for a failure that is deterministic in bytes.
+
+        A turn the user refused at the confirmation gate never escalates
+        either, whatever else went wrong in it: the specialist would re-issue
+        the refused call and ask the same question again."""
         return (
             target == "primary"
             and self._escalate_on_failed
             and self._specialist_llm is not None
             and not outcome.may_have_mutated()
             and not outcome.budget_exceeded
+            and not outcome.confirm_refused
             and classify(outcome) == "failed"
         )
 
@@ -2185,9 +2296,12 @@ class Organizer:
 
     async def _speak(
         self, session_id: str, room_id: str, text: str, trace
-    ) -> None:
+    ) -> int:
+        """Stream `text` to the room. Returns the PCM samples streamed, so a
+        caller that needs to know whether anyone could have heard it (the
+        spoken confirmation) can tell silence from speech."""
         if self.tts is None or not text.strip():
-            return
+            return 0
         # The LLM emits markdown for the chat surface (bold via **, bullets
         # via "- "). Piper reads those characters literally -- "asterisk
         # asterisk Item asterisk asterisk" -- so strip them for the audio
@@ -2195,7 +2309,7 @@ class Organizer:
         # assistant_delta upstream.
         text = _strip_markdown_for_tts(text)
         if not text.strip():
-            return
+            return 0
         # Gate the room SENDING before any chunk goes out, so the mic is muted
         # the instant TTS audio could reach it. The finally arms the rest of the
         # gate (DRAINING for the estimated playback, or a short cooldown) from
@@ -2246,6 +2360,7 @@ class Organizer:
             self._arm_gate_after_send(
                 room_id, session_id, send_start, total_samples, sample_rate, cancelled
             )
+        return total_samples
 
     async def _run_tool_calls(
         self,
@@ -2344,12 +2459,13 @@ class Organizer:
                 granted = await self._await_confirmation(
                     session_id=session_id,
                     room_id=room_id,
-                    tool_qualified=spec.qualified,
+                    spec=spec,
                     args=approved,
                     trace=trace,
                 )
                 if not granted:
                     denied = True
+                    outcome.confirm_refused = True
                     result = MCPCallResult(ok=False, error="user denied")
                 else:
                     # From here on the approved copy IS the call: the in-flight
@@ -2981,50 +3097,46 @@ class Organizer:
         *,
         session_id: str,
         room_id: str,
-        tool_qualified: str,
+        spec: "ToolSpec",
         args: dict,
         trace,
     ) -> bool:
         """Ask the originating room to confirm a side-effecting tool call.
-        Returns True on `granted`, False on `denied` or timeout. The
-        broadcast is per-room; replies from outside the room are dropped
-        by `handle_tool_confirm_response`."""
+        Returns True on `granted`, False on `denied` or timeout. Two arms
+        race on one Future: the `ToolConfirmRequest` broadcast (answered by
+        a `ui` client's dialog via `handle_tool_confirm_response`) and, when
+        the room can hear and be heard, a spoken question answered by voice
+        (`_try_answer_confirm`). The first valid answer wins."""
         request_id = uuid.uuid4().hex
         # Short-circuit: a room with nobody who can ANSWER would take the
-        # broadcast and then the full ttl of silence. Two ways to be that
-        # room, and for a long time only the first was checked:
-        #
-        #   - No clients at all -- typically a UI client that dropped
-        #     mid-turn.
-        #   - Clients, but none that can send `tool_confirm_response`. A
-        #     speaker-only room (mic + speaker, no screen) is exactly this:
-        #     the request goes out to a microphone and a loudspeaker,
-        #     neither of which has any way to answer, and the room's FIFO
-        #     worker is held for `confirm_timeout_s` before denying anyway.
-        #
-        # Both deny, so this changes no authorisation -- a gated call from a
-        # room that cannot confirm was always going to be refused. What it
-        # changes is that the room is refused in milliseconds instead of
-        # being mute for half a minute first.
+        # broadcast and then the full ttl of silence. Both deny, so this
+        # changes no authorisation -- a gated call from a room that cannot
+        # confirm was always going to be refused. What it changes is that
+        # the room is refused in milliseconds instead of being mute for
+        # half a minute first.
         if not self._room_can_confirm(room_id):
             trace.event(
                 "tool_confirm_no_clients",
                 request_id=request_id,
-                tool=tool_qualified,
+                tool=spec.qualified,
             )
             return False
-        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        # Register + broadcast + await all under a single try/finally so a
-        # cancellation between any two of them still cleans up the maps.
-        # Cancellation between the dict insert and the try start would
-        # leak the entries until the Organizer dies.
+        pending = _PendingConfirm(
+            request_id=request_id,
+            room_id=room_id,
+            session_id=session_id,
+            fut=asyncio.get_running_loop().create_future(),
+        )
+        # Register + broadcast + ask + await all under a single try/finally
+        # so a cancellation between any two of them still cleans up both
+        # indexes.
         try:
-            self._pending_confirms[request_id] = fut
-            self._confirm_room[request_id] = room_id
+            self._pending_confirms[request_id] = pending
+            self._confirm_by_room[room_id] = pending
             trace.event(
                 "tool_confirm_request",
                 request_id=request_id,
-                tool=tool_qualified,
+                tool=spec.qualified,
                 ttl_s=self._confirm_timeout_s,
             )
             await self._broadcast(
@@ -3032,41 +3144,145 @@ class Organizer:
                 ToolConfirmRequest(
                     session_id=session_id,
                     request_id=request_id,
-                    tool=tool_qualified,
+                    tool=spec.qualified,
                     args_summary=args,
                     ttl_s=self._confirm_timeout_s,
                 ),
             )
+            deadline = await self._ask_aloud(pending, spec, args, trace)
             try:
-                granted = await asyncio.wait_for(
-                    fut, timeout=self._confirm_timeout_s
+                answer = await asyncio.wait_for(
+                    pending.fut,
+                    timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
                 )
             except asyncio.TimeoutError:
-                granted = False
                 trace.event("tool_confirm_timeout", request_id=request_id)
-            else:
+                return False
+            if isinstance(answer, _VoiceAnswer):
                 trace.event(
-                    "tool_confirm_response",
+                    "tool_confirm_voice",
                     request_id=request_id,
-                    granted=granted,
+                    verdict="yes" if answer.granted else "no",
+                    client_id=answer.client_id,
+                    text=answer.text,
                 )
+                granted = answer.granted
+            else:
+                granted = answer
+            trace.event(
+                "tool_confirm_response", request_id=request_id, granted=granted
+            )
             return granted
         finally:
             self._pending_confirms.pop(request_id, None)
-            self._confirm_room.pop(request_id, None)
+            if self._confirm_by_room.get(room_id) is pending:
+                self._confirm_by_room.pop(room_id, None)
+
+    async def _ask_aloud(
+        self, pending: _PendingConfirm, spec: "ToolSpec", args: dict, trace
+    ) -> float:
+        """Speak the question when the room can hear and answer, and return
+        the loop-time deadline for an answer. The clock starts when the
+        room's mic reopens after the question (`_speak` returns when the
+        last chunk is SENT, and a mid-turn question has no early release),
+        as `_hold_veto_window` measures the intercom gap -- otherwise a long
+        question eats most of the ttl. A question nobody could have heard
+        (no TTS, synth error, no listener: zero samples) leaves the voice arm
+        off and the plain ttl from now, as does one that would need clipping
+        -- the dialog blocks Allow until a clipped value is expanded, and a
+        spoken twin has no expand."""
+        loop = asyncio.get_running_loop()
+        plain_deadline = loop.time() + self._confirm_timeout_s
+        room_id = pending.room_id
+        if not (self._room_can_hear(room_id) and self._room_can_answer_by_voice(room_id)):
+            return plain_deadline
+        question = render_confirm_question(spec.qualified, args)
+        if question is None:
+            trace.event(
+                "tool_confirm_voice_skipped",
+                request_id=pending.request_id,
+                reason="clipped",
+            )
+            return plain_deadline
+        trace.event(
+            "tool_confirm_spoken", request_id=pending.request_id, question=question
+        )
+        samples = await self._speak_unless_answered(pending, question, trace)
+        if pending.fut.done():
+            return plain_deadline
+        if samples <= 0:
+            trace.event(
+                "tool_confirm_voice_skipped",
+                request_id=pending.request_id,
+                reason="no_audio",
+            )
+            return plain_deadline
+        gate = self._tts_gate.get(room_id)
+        reopens_at = (
+            gate.closed_until
+            if gate is not None and gate.session_id == pending.session_id
+            else loop.time()
+        )
+        pending.answers_after = reopens_at
+        pending.voice_armed = True
+        return reopens_at + self._confirm_timeout_s
+
+    async def _speak_unless_answered(
+        self, pending: _PendingConfirm, question: str, trace
+    ) -> int:
+        """Race the question against the Future: a dialog answer that lands
+        mid-question stops the question rather than letting it play out
+        over an already-decided call. The worker's own cancellation reaches
+        the speak task through the finally."""
+        speak_task = asyncio.create_task(
+            self._speak(pending.session_id, pending.room_id, question, trace)
+        )
+        try:
+            await asyncio.wait(
+                {speak_task, pending.fut}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if speak_task.done():
+                return speak_task.result()
+            return 0
+        finally:
+            if not speak_task.done():
+                # Awaited, not just cancelled: the speak's finally arms the
+                # room's gate, and a cancelled worker must not leave that on
+                # a later tick where a successor turn may already own it.
+                speak_task.cancel()
+                await asyncio.shield(
+                    asyncio.gather(speak_task, return_exceptions=True)
+                )
 
     def _room_can_confirm(self, room_id: str) -> bool:
-        """Whether anyone in `room_id` could answer a confirmation request.
+        """Whether anyone in `room_id` could answer a confirmation request:
+        a `ui` client with the dialog, or a room that can hear a spoken
+        question and answer it by voice (which needs TTS to ask with). Role
+        rather than a declared capability because role is what the protocol
+        has today; a client that advertises its own capabilities (ARCH
+        section 13, v7) is where these lookups should move."""
+        if self._room_has_role(room_id, "ui"):
+            return True
+        return (
+            self.tts is not None
+            and self._room_can_hear(room_id)
+            and self._room_can_answer_by_voice(room_id)
+        )
 
-        `tool_confirm_response` is sent by the browser client only -- the room
-        clients (`client_room/mic.py`, `speaker.py`) send `hello` and
-        `playback_done` and nothing else -- so the answer is "a `ui` client is
-        connected here". Role rather than a declared capability because role is
-        what the protocol has today; a client that advertises its own
-        capabilities (ARCH section 13, v7) is where this lookup should move."""
+    def _room_can_hear(self, room_id: str) -> bool:
+        return self._room_has_role(room_id, "speaker") or self._room_has_role(
+            room_id, "ui"
+        )
+
+    def _room_can_answer_by_voice(self, room_id: str) -> bool:
+        return self._room_has_role(room_id, "mic") or self._room_has_role(
+            room_id, "ui"
+        )
+
+    def _room_has_role(self, room_id: str, role: str) -> bool:
         for cid in self.clients_in_room(room_id):
             binding = self.binding_for_client(cid)
-            if binding is not None and binding.role == "ui":
+            if binding is not None and binding.role == role:
                 return True
         return False
 
@@ -3083,17 +3299,17 @@ class Organizer:
             return
         if binding.role != "ui":
             # Only a screen can show what is being approved; a mic or speaker
-            # token in the same room must not be able to grant a cart write.
-            # Mirrors `_room_can_confirm`, which asks only when a `ui` client
-            # is present.
+            # token in the same room must not be able to grant a cart write
+            # by frame. (Its transcripts may answer a question it was ASKED
+            # aloud -- `_try_answer_confirm` -- which is a different path.)
             log.debug(
                 "drop tool_confirm_response: client %s has role %s, not ui",
                 client_id,
                 binding.role,
             )
             return
-        expected_room = self._confirm_room.get(response.request_id)
-        if expected_room is None:
+        pending = self._pending_confirms.get(response.request_id)
+        if pending is None:
             # Stale or unknown request_id (already resolved / timed out).
             log.debug(
                 "drop tool_confirm_response: unknown request_id=%s from %s",
@@ -3101,15 +3317,14 @@ class Organizer:
                 client_id,
             )
             return
-        if binding.room_id != expected_room:
+        if binding.room_id != pending.room_id:
             log.debug(
                 "drop tool_confirm_response: client %s in room %s, expected %s",
                 client_id,
                 binding.room_id,
-                expected_room,
+                pending.room_id,
             )
             return
-        fut = self._pending_confirms.get(response.request_id)
-        if fut is None or fut.done():
+        if pending.fut.done():
             return
-        fut.set_result(response.granted)
+        pending.fut.set_result(response.granted)

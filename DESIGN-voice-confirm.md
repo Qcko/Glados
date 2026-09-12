@@ -1,0 +1,360 @@
+# DESIGN -- a spoken arm for the tool-confirmation gate
+
+## The problem
+
+A gated tool call (`Organizer._await_confirmation`) can today be answered only
+by a `ui` client: the desk client's in-page dialog (`DESIGN-confirm-modal.md`,
+landed 11-09-2026 as `9393185`). A room with a microphone and a loudspeaker but
+no screen is refused in milliseconds (`_room_can_confirm` -> `tool_confirm_no_clients`).
+
+That is the wrong arm to be the only one. The normal way to use GLaDOS is by
+voice, with no console in reach, and `ARCHITECTURE.md` says so already:
+
+- section 3: *"Permission gates are per-user. A confirm from one speaker does
+  not authorise another. Confirms are spoken back to the room that initiated."*
+- section 14 reserves screen-only approval for the **memory gate**, where a
+  spoken "yes" would be a one-tap `--yes` on an injectable blob, and contrasts
+  it with the per-turn `tool_confirm_request`, which it calls *"in-room and
+  voice-grantable by design"*.
+
+### Why cart writes are gated (get this right before relaxing anything)
+
+Dunnes cart writes carry **no** `requires_confirmation`. `servers.example.toml`
+declines it on purpose, for exactly the voice-UX reason this slice addresses.
+What gates them in practice is the organizer's provenance arm:
+
+    needs_confirm = spec.requires_confirmation
+                    or (tc.from_text and spec.mutating)
+                    or (outcome.untrusted_seen and spec.mutating)
+
+A turn that has ingested `<external>` bytes (every Dunnes search result) and
+then wants to mutate is asked, because a seller-authored `[TOOL_CALLS]` echoed
+into a write is the injection ARCH section 7 exists to stop. So the gate is an
+**injection boundary first**, and only incidentally the place where a person
+also catches the model being wrong (an invented quantity, a removal under an
+add request, a double add -- all seen live in the week of 07-09-2026; the write
+guards in `DESIGN-write-guards.md` are the deterministic answer to those).
+
+The `binding.role == "ui"` check in `handle_tool_confirm_response` stays. It
+stops a mic or speaker *device* from forging a `ToolConfirmResponse` frame.
+
+**Revisit clause (recorded 12-09-2026, at the user's request):** if the gate
+proves too bothersome in ordinary voice use and breaks the shopping workflow,
+the design of gating cart writes at all is to be revisited -- not just the
+arm. Whoever revisits it must name the invariant being traded: relaxing the
+`untrusted_seen and mutating` arm relaxes the section 7 injection boundary,
+and the write guards bound *model* error, not injected calls. Candidate
+relaxations, in order of how much they give up: a per-tool allow-list of
+"small" writes (a single-pack add) that skip the gate; a
+speak-and-proceed-unless-vetoed arm (the intercom pattern, section 3) for
+additive writes only; dropping the untrusted-session arm for tools whose write
+guards already bound the damage. None is built here. The trigger is observed
+friction, not speculation.
+
+### Roster findings folded in
+
+The design roster (architect, security, concurrency) reviewed a first draft on
+12-09-2026. What changed, and why:
+
+- The draft claimed the spoken arm was "the server resolving its own request
+  from its own ASR, no client frame involved". **False**: ASR runs on the
+  client side of the audio path, and `UserText` frames are dispatched from any
+  binding with no role check, so a mic token could type `"yes"` and grant --
+  the hole the `ui`-only check closed. The intercept now accepts **voice
+  source only** (set by the server's audio ingress, not by the client) and
+  ignores typed text from every role, including `ui`: the desk has the dialog,
+  whose arming and anti-race rules a typed "ok" would bypass.
+- The draft bound the answer to the originating mic's `client_id`. Section 3
+  dedups across several mics in one room and keeps the loudest per utterance,
+  so the same person's "yes" can legitimately arrive from another mic; and
+  the stated threat (a second person at the same mic) is not addressed by it.
+  The answer is bound to the **room**, as the dialog is. A forged *audio* "yes"
+  from a mic token is someone in the room saying it -- that is what a mic
+  token is a credential for. Per-user consent stays deferred; note that this
+  is a **reach regression** against the desk (where the answerer must be at
+  the screen), not parity.
+- Whisper emits "Okay." / "Sure." / "Yes." on near-silence. The yes-lexicon
+  is narrowed to an explicit `yes`; the no-side stays broad (safe direction).
+- The 30 s TTL was to start when `_speak` returned, which is when the last
+  chunk is *sent* -- the mic then stays gated for the whole estimated
+  playback, and a mid-turn question has no early release (the room speaker
+  starts its drain watch on `done` only). The clock now starts from the gate
+  horizon, as `_hold_veto_window` already does, and the question is capped
+  hard.
+- The dialog blocks Allow until every clipped value is expanded. A spoken
+  twin that clips and still accepts "yes" hides the write. A question that
+  would need clipping is **not asked by voice** (dialog only).
+- A dialog answer landing during the question left the question playing and
+  the room gated: the question races the Future.
+- The intercept runs on the WS handler task, which has no trace handle and
+  may run after the turn's trace is closed. It resolves the Future with a
+  record; the worker task emits every trace event.
+- A mic+speaker room with `tts is None` or a synth failure would hold the
+  room's worker for the TTL hearing nothing: the voice arm needs working TTS
+  and a question that actually streamed samples.
+- `confirm_phrase` templates were dropped from v1 (user decision 12-09-2026):
+  every real gate today fires on `untrusted_seen`, where all args must be
+  spoken (a template naming the product but not the copied `product_id` is
+  the attack), so a template would apply to nothing real.
+
+## The plan
+
+### Shape
+
+One pending-confirm record on the Organizer (replacing two maps), one
+intercept at utterance ingress, one deterministic renderer, one flag on
+`TurnRecord`. No new protocol frames. No LLM in the grant decision (memory
+`harness-over-prompts`).
+
+```
++---------------------+     ToolConfirmRequest (unchanged)     +------------+
+|  _await_confirmation| -------------------------------------> | ui client  |
+|  (room FIFO worker  |                                        |  dialog    |
+|   is HELD here)     | --- _speak(question) ---> speaker/ui   +------------+
+|                     |                                              |
+|  fut: Future        | <---- handle_tool_confirm_response ----------+
+|                     |
+|                     | <---- _try_answer_confirm  <--- handle_user_text(source="voice")
++---------------------+        (yes / no lexicon)         <--- handle_audio_text
+```
+
+Both arms race on the same `Future`; the first valid answer wins, exactly as
+two desk tabs do today. The intercept is registered for **every** confirm
+(the dialog and a heard "yes" are interchangeable), so a desk room can be
+answered by voice after reading the dialog.
+
+### Who can hear and who can answer
+
+Roles as they exist today (`mic`, `speaker`, `ui`; the desk client is `ui`
+and both plays TTS and runs a mic pipeline):
+
+- `_room_can_hear(room)`: a `speaker` or a `ui` binding.
+- `_room_can_answer_by_voice(room)`: a `mic` or a `ui` binding.
+- `_room_can_confirm(room)`: a `ui` binding, OR (can hear AND can answer by
+  voice AND `self.tts is not None`).
+
+One place, so the v7 capability-declaration migration (ARCH section 13) is
+one edit. The `tool_confirm_no_clients` short-circuit keeps its meaning.
+
+### The spoken question
+
+`_await_confirmation` takes the `ToolSpec` (its one caller has it) and, after
+the broadcast:
+
+1. `render_confirm_question(spec.qualified, args)` -> `str | None`.
+   `None` means the question would need clipping; then no voice arm, trace
+   `tool_confirm_voice_skipped reason=clipped`.
+2. The question is spoken as a task raced against the Future
+   (`asyncio.wait(FIRST_COMPLETED)`). If the dialog answers first, the speak
+   task is cancelled (its `finally` arms the short cooldown). The worker's own
+   cancellation cancels the speak task too.
+3. `_speak` returns the number of samples streamed. Zero (no TTS, synth error,
+   no listener) means nobody heard a question: the voice arm is not armed and
+   the TTL is the plain `confirm_timeout_s` from now, as today.
+4. Otherwise `answers_after` = the room gate's `closed_until` when the gate is
+   this session's (else now) -- the moment the mic reopens -- and the TTL runs
+   `confirm_timeout_s` from **that**. The dialog's `ttl_s` stays the plain
+   value from the broadcast, so the dialog can say "timed out" a few seconds
+   before the voice arm gives up; noted under *Deferred*.
+
+The question: `"GLaDOS needs a yes: <server> <tool words>, <arg> <value>, ...
+-- shall I go ahead?"`. Fixed args (numbers, booleans, null) first, in call
+order; free text last, each as `<key>, quote, <text>, unquote`, so a product
+name cannot mimic a following `quantity one`. Nested values are JSON. Text
+goes through the same printable-only / whitespace-collapse rule as the
+intercom (`_spoken_message`, now shared). Limits: 8 args, 60 characters per
+rendered value, key or tool name, 240 characters of question body; over any
+of them -> `None`, nothing is ever clipped. The suffix ends on a word outside
+the lexicon: the desk's mic is not gated server-side (`_arm_gate_after_send`
+pops the gate in a room with no `speaker`), so a VAD split near the end of a
+"yes or no?" tail could transcribe as "no?" and self-deny.
+
+### The answer
+
+`handle_audio_text` already checks barge-in, then the TTS mic gate, then calls
+`handle_user_text(source="voice")`. The intercept sits at the top of
+`handle_user_text`:
+
+```
+if source == "voice" and self._try_answer_confirm(binding, text, captured_at):
+    return                      # consumed; not a turn, not a transcript
+```
+
+`_try_answer_confirm`:
+
+- No pending confirm for the room, or its voice arm not armed, or the Future
+  already done -> `False` (falls through to a normal turn; the "already done"
+  case is the tick between the timeout and the `finally`).
+- `classify_confirm_answer(text)` (in `core/utterance.py`, anchored
+  whole-utterance, politeness lead-in, Whisper's trailing period tolerated):
+  `yes` -> `"yes"`, `yes please` / `please yes` / `yes go ahead` -> `"yes"`;
+  `no` / `nope` / `nah` / `don't` / `do not` / `no thanks` / `negative` ->
+  `"no"`; anything else -> `None`. **Not** in the yes side: ok, okay, sure,
+  correct, do it, go ahead alone, confirm -- the Whisper-on-silence set.
+- `None` -> `False`, falls through: the utterance is queued as a normal turn
+  behind the held one **with `max_depth=1`** while a confirm is pending, so
+  a burst of "what?", "hello?" cannot pile up an LLM turn each; the first is
+  kept, later ones are refused by the queue (logged). The confirm keeps
+  waiting. A non-answer is not a deny -- the server never treats an
+  unrelated frame as one, and a silent refusal after "what did you say?" is
+  the worse failure.
+- `captured_at < answers_after` -> the answer began before the mic reopened
+  (STT latency lets a transcript of something said earlier land now) ->
+  `False`, logged. The horizon is read live while the question's own gate
+  still stands, so an early `playback_done` (if mid-turn audio ever gets one)
+  moves it rather than stranding a valid answer.
+- Only a `mic` or `ui` binding may answer: an audio pipeline is built for
+  every role, so a `speaker` credential streaming audio would otherwise be a
+  voice.
+- `yeah` is deliberately outside the yes side; expect friction, widen only
+  with evidence.
+- Otherwise `fut.set_result(_VoiceAnswer(granted, client_id, text))` and
+  `True`.
+
+Barge-in (`stop`, `cancel`, ...) is checked first in `handle_audio_text` and
+cancels the whole turn, which cancels `_await_confirmation` through its
+`finally`. That is a deny, consistent with the dialog's *Stop turn* button.
+
+A drop by the TTS mic gate while a confirm is pending is logged at INFO with
+the request id, so a live-test "I said yes and nothing happened" is
+diagnosable (the gate runs on the handler task; no trace handle there).
+
+### State
+
+`_PendingConfirm(request_id, room_id, fut, session_id, voice_armed=False,
+answers_after=0.0)`, stored in `_pending_confirms: dict[request_id, record]`
+with `_confirm_by_room: dict[room_id, record]` as the second index (a room
+runs one turn and a turn awaits one confirm at a time). Both registered and
+both popped in the one `try/finally`.
+
+`fut: asyncio.Future[bool | _VoiceAnswer]`. The dialog path sets a `bool`; the
+worker, after `wait_for`, traces `tool_confirm_voice` when the result is a
+`_VoiceAnswer` and reduces it to `granted`.
+
+### Escalation on a refused confirm (landed in this slice)
+
+Observed 11-09-2026 and listed as deferred in `DESIGN-confirm-modal.md`: a
+denied or timed-out confirm leaves the turn with no recorded write, so the
+goal check classifies it `failed` (drift, or confabulation on a zero-tool
+turn) and the specialist re-drives the request and asks again. With a spoken
+arm that doubles the spoken cost and closes the mic twice.
+
+`TurnRecord.confirm_refused: bool`, set by the organizer on a deny or
+timeout. `classify` returns `"needs-user"` for such a turn -- the user
+stopped it deliberately -- checked after the loop/error checks and only when
+the reply does not claim the change happened (`claimed_a_change_it_did_not_make`
+still wins, so a model that says "added!" after a deny is still caught). And
+independently of what `classify` says (an earlier unrecovered error keeps the
+record `failed`), both re-drive predicates -- `_should_escalate` and the
+scoped-capability full-set re-drive -- refuse a `confirm_refused` turn. No
+escalation, no confabulation retry, no reply replacement.
+
+### Trace events
+
+- `tool_confirm_spoken` (`request_id`, `question`) before speaking.
+- `tool_confirm_voice_skipped` (`request_id`, `reason`: `clipped` |
+  `no_audio`) when the voice arm is not armed for a room that could confirm
+  (not emitted when the dialog answered during the question).
+- `tool_confirm_voice` (`request_id`, `verdict`, `client_id`, `text`) emitted
+  by the worker when a spoken answer resolved the request, before the
+  existing `tool_confirm_response`.
+- Existing `tool_confirm_request` / `tool_confirm_response` /
+  `tool_confirm_timeout` / `tool_confirm_no_clients` unchanged.
+
+Trace events land in `traces/` only, which already carries `tool_call.args`
+and every transcript, so the two new events add nothing that was not there
+(section 9); the admin observe channel forwards protocol frames, never trace
+events. A consumed
+"yes" is never broadcast as a `UserTranscript` and never enters history.
+
+### What does not change
+
+The `ui` role check in `handle_tool_confirm_response`; the args snapshot and
+`model_copy` after a grant; the dialog and `confirm_state.ts` rules -- note
+the dialog's session-frame drop list excludes `tts_chunk` on purpose, and the
+spoken question depends on that staying so; the write guards.
+
+## Lifecycle of one request
+
+```mermaid
+stateDiagram-v2
+    [*] --> Broadcast : gated call, room can confirm
+    Broadcast --> Asking : room can hear and answer, TTS up, question fits
+    Broadcast --> Waiting : otherwise (dialog only)
+    Asking --> Waiting : samples streamed, mic reopens at gate horizon, TTL starts
+    Asking --> Waiting : zero samples (no listener or tts_error), voice arm off
+    Asking --> Resolved : dialog answers first, question cancelled
+    Waiting --> Resolved : dialog Allow or Deny / spoken yes or no (voice, captured after reopen) / TTL elapses
+    Waiting --> Cancelled : barge-in stop, Stop turn, interrupt
+    Waiting --> Waiting : other utterance queued as a turn (depth 1)
+    Resolved --> [*] : granted dispatches the approved snapshot, refused sets confirm_refused
+    Cancelled --> [*] : maps cleared in finally
+```
+
+## Failure modes considered
+
+- **The user answers over the question.** Dropped by the TTS mic gate (mic
+  and speaker rooms) or rejected by `captured_at < answers_after`; logged
+  with the request id. The user repeats after the question ends.
+- **Two gated calls in one turn.** Sequential; each asks. Same as the dialog.
+- **Whisper mishears.** "know" is not in the lexicon -> non-answer -> queued
+  turn (bounded), confirm still waits. "yes." is tolerated. Whisper's silence
+  hallucinations ("Okay.", "Thank you.", "Sure.") are outside the yes side.
+  A hallucinated bare "Yes." remains possible and is the residual risk of any
+  spoken arm; the per-user work and a speech-energy check on the VAD segment
+  are the mitigations, both deferred.
+- **The speaker drops mid-question.** Samples were streamed; the gate arms
+  from them; the TTL runs; nobody hears. Times out as today.
+- **A second person in the room says "yes".** Granted. Documented per-user
+  gap and reach regression against the desk.
+- **GLaDOS's own question in a transcript.** Gated at capture time; and
+  "... yes or no" is not an anchored yes.
+- **Turn cancelled during the question.** The speak task is cancelled with
+  the worker; `_arm_gate_after_send` sees `cancelled` and arms the short
+  cooldown; the `finally` clears both indexes.
+- **Late `playback_done` from the previous turn** under a reused session id
+  could shorten the question's `draining` gate. Pre-existing for replies;
+  noted, not fixed here.
+
+## Deferred
+
+- The dialog's `ttl_s` could include the question's estimated playback so the
+  two deadlines agree (the estimate is known only after synthesis).
+- A `tool_confirm_resolved` broadcast so the dialog closes on the exact
+  signal when the voice arm wins.
+- Speaker identification for true per-user consent (ARCH section 3); a
+  speech-energy floor on the VAD segment before a verdict counts.
+- A short re-ask ("yes or no?") on the first non-answer.
+- Per-tool spoken templates (`confirm_phrase`), if a `requires_confirmation`
+  tool ever needs a nicer sentence than the generic render.
+- Everything listed under *Deferred* in `DESIGN-confirm-modal.md`.
+
+## Verification
+
+Unit (pytest):
+
+1. `classify_confirm_answer`: yes / no / non-answer table incl. lead-ins,
+   trailing period, "yes please", "no thanks", "yes or no" (None), "I know"
+   (None), "yesterday" (None), "okay" (None), "sure" (None), "yes yes" (yes).
+2. `render_confirm_question`: fixed args before text, quote/unquote wrapping,
+   nested JSON, control characters dropped, 61-char value -> None, 9 args ->
+   None, long body -> None; the rendered question never classifies as an
+   answer.
+3. `_room_can_confirm`: ui; mic+speaker with TTS; mic+speaker without TTS
+   (False); mic only (False); speaker only (False); nothing (False).
+4. Organizer with a fake TTS, mic+speaker room: spoken "yes" grants and traces
+   `tool_confirm_voice`; "no" denies; typed "yes" (`source="text"`) is a
+   normal turn; "yes" from another room is a normal turn there; a non-answer
+   is queued and the confirm still times out; a second non-answer is refused
+   by the queue; `captured_at` before `answers_after` is a normal turn; the
+   dialog answering during the question cancels the speak task; the TTL is
+   measured from the gate horizon; cancellation clears both indexes; a TTS
+   that yields nothing leaves the voice arm off and the plain TTL.
+5. `classify`: `confirm_refused` -> `needs-user`; with a false claim of
+   change -> still `confabulated`; `_should_escalate` False on a refused
+   turn.
+
+Live (with the user; mic+speaker room, and the desk): "Use the toy_stdio
+roll_dice tool to roll 3d6" -> hear the question -> "yes" -> rolls; "no";
+something unrelated; silence; answer by voice with the desk tab open and
+check the dialog closes; deny and confirm there is no second prompt.

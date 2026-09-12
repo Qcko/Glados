@@ -224,3 +224,34 @@ def is_add_request(text: str) -> bool:
     if not stripped or _ADD_INTENT_RE.match(stripped) is None:
         return False
     return _REMOVAL_CUE_RE.search(stripped) is None
+
+
+# A spoken answer to a confirmation question (DESIGN-voice-confirm.md). Both
+# sides are whole-utterance and anchored like barge-in, so a sentence that
+# merely contains "yes" is not consent. The yes side is deliberately narrow:
+# Whisper renders near-silence as "Okay.", "Sure.", "Thank you." and a
+# real-money write must not be granted by breath. The no side is broad,
+# because a spurious deny costs a repeat and a spurious grant costs money.
+_ANSWER_TAIL = r"[\s,.!?]*$"
+_YES_ANSWER_RE = re.compile(
+    rf"^{_LEAD_IN}yes(?:[\s,]+yes)*"
+    rf"(?:[\s,]+(?:please|go\s+ahead|do\s+it|glados))*{_ANSWER_TAIL}",
+    re.IGNORECASE,
+)
+_NO_ANSWER_RE = re.compile(
+    rf"^{_LEAD_IN}(?:no|nope|nah|negative|don'?t|do\s+not)"
+    rf"(?:[\s,]+(?:no|thanks|thank\s+you|please|don'?t|do\s+not|glados))*{_ANSWER_TAIL}",
+    re.IGNORECASE,
+)
+
+
+def classify_confirm_answer(text: str) -> str | None:
+    """`"yes"`, `"no"`, or None when the utterance is not an answer at all."""
+    stripped = text.strip() if text else ""
+    if not stripped:
+        return None
+    if _NO_ANSWER_RE.match(stripped) is not None:
+        return "no"
+    if _YES_ANSWER_RE.match(stripped) is not None:
+        return "yes"
+    return None

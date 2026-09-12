@@ -106,6 +106,13 @@ class TurnRecord:
     # A retry changed to replay the failed attempt's messages would need this
     # flag carried across with them.
     untrusted_seen: bool = False
+    # The user denied a confirmation, or let one time out. A deliberate stop,
+    # not a brain failure: the turn has no landed write by the user's choice,
+    # so neither the drift check nor the escalation router may read it as
+    # "the model did not manage" and re-drive the request (which would ask
+    # the same question again -- observed 11-09-2026, and twice as costly once
+    # the question is spoken).
+    confirm_refused: bool = False
 
     # Mutating calls this turn sent but never got an answer to, keyed by
     # `(server.name, canonical args)`. Re-dispatching one of these would be the
@@ -176,6 +183,12 @@ def classify(turn: TurnRecord) -> TurnOutcomeKind:
         return "failed"
     if _has_unrecovered_error(turn.tools):
         return "failed"
+    if turn.confirm_refused and not claimed_a_change_it_did_not_make(turn):
+        # The user stopped it. Checked ahead of the zero-tool and drift checks
+        # because both would otherwise read a refused write as the model's
+        # failure; a reply that still claims the change went through is not
+        # excused and falls to the claim check below.
+        return "needs-user"
     if said_nothing(turn):
         return "failed"
     if _confabulated(turn) or claimed_a_change_it_did_not_make(turn):
