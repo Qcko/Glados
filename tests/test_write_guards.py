@@ -1029,3 +1029,53 @@ async def test_varying_the_query_cannot_walk_the_turn_to_its_pass_cap(tmp_path: 
     events = [e.get("event") for e in trace_events(tmp_path)]
     assert events.count("quantity_mismatch_refused") == 2
     assert len(tool.calls) == 2
+
+
+# ---- a reply that denies the removal it just made ---------------------------
+
+
+def _view_spec() -> ToolSpec:
+    return ToolSpec(
+        server="dunnes", name="view_cart", description="view",
+        parameters={"type": "object", "properties": {}},
+    )
+
+
+async def test_a_false_empty_cart_reply_after_a_real_removal_is_corrected(tmp_path: Path) -> None:
+    """Bake-off T6 (12-09-2026, two runs): view_cart showed one milk, the remove
+    succeeded, and GLaDOS said "Cart was empty." The false line must be neither
+    spoken as the answer nor committed to history."""
+    from glados.core.organizer import _DENIED_REMOVAL_REPLY
+
+    view = _RecordingTool(_view_spec(), MCPCallResult(ok=True, content={"itemCount": 1}))
+    remove = _RecordingTool(_remove_spec(), MCPCallResult(ok=True, content={"text": "Removed."}))
+    mcp = MCPRegistry()
+    mcp.register(view)
+    mcp.register(remove)
+    llm = _TurnScriptedLLM(
+        [[_call("view_cart", {}, "v1"), _call("remove_from_cart", {"productId": "1"}, "r1")], []],
+        reply="Cart was empty.",
+    )
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "Show me what's in my cart and then remove the milk.")
+        await _say(h, llm, "thanks")
+        deltas = [m["text"] for _, m in h.sink if m.get("type") == "assistant_delta"]
+        outcomes = [m["outcome"] for _, m in h.sink if m.get("type") == "turn_outcome"]
+
+    assert len(remove.calls) == 1
+    assert any(_DENIED_REMOVAL_REPLY in d for d in deltas)
+    assert outcomes[0] == "done"
+    history = [m.content for m in llm.passes[-1] if m.role == "assistant" and m.content]
+    assert _DENIED_REMOVAL_REPLY in history and "Cart was empty." not in history
+    assert "denied_removal_corrected" in [e.get("event") for e in trace_events(tmp_path)]
+
+
+async def test_saying_the_cart_is_now_empty_after_the_last_removal_is_left_alone(tmp_path: Path) -> None:
+    remove = _RecordingTool(_remove_spec(), MCPCallResult(ok=True, content={"text": "Removed."}))
+    mcp = MCPRegistry()
+    mcp.register(remove)
+    llm = _TurnScriptedLLM([[_call("remove_from_cart", {"productId": "1"}, "r1")]], reply="Cart is now empty.")
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "take the milk off")
+
+    assert "denied_removal_corrected" not in [e.get("event") for e in trace_events(tmp_path)]

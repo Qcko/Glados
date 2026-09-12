@@ -308,3 +308,35 @@ above, and `add milk` is the one utterance in the observed session that never
 collapsed -- so the positive control could not fire, and the run reported no
 effect from anything. A grid whose positive control does not fire measures the
 harness, not the hypothesis.
+
+## A reply that denies a removal which landed -- added 12-09-2026
+
+Bake-off T6, in two runs the same day: "Show me what's in my cart and then
+remove the milk." -> `view_cart` (one milk) -> `remove_from_cart` succeeded ->
+reply "Cart was empty." The claim check cannot see it: it looks for an asserted
+change the record does not support, and this reply asserts no change -- it
+denies one.
+
+`turn_outcome.denied_a_removal_that_landed` judges it from the dispatch record
+alone: a call with `ToolRecord.removes` (a remove, or a set/adjust whose readable
+count is <= 0) landed `ok`, and a sentence says the cart was empty before ("was
+empty", "already empty", "nothing to remove") or the removed item "wasn't in the
+cart". The organizer replaces the reply, spoken and in history, with a harness
+line (`_DENIED_REMOVAL_REPLY`); the outcome keeps its classification, because
+the change is real and a re-drive or a "no record of that" line would be false
+too.
+
+Fails open, each from a code-duck finding against the first version, which
+replaced true replies:
+- a sentence that also reports a change ("the bread wasn't in your cart, so I
+  removed only the milk", "was empty after I removed it");
+- "not in the cart" about an item other than the one removed; with a
+  productId-only removal the item has no name, so only a bare "it wasn't in your
+  cart" counts;
+- present tense ("is now empty", "isn't in your cart now"), true after the last
+  removal;
+- a removal that only MAY have landed (timed out), or whose count cannot be read.
+
+The replacement names no product: the only source for one would be the server's
+answer. It also drops the listing the user asked for in T6 -- acceptable there,
+since the model's listing was the false part.

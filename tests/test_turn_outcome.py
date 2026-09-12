@@ -6,6 +6,7 @@ from glados.core.turn_outcome import (
     TurnRecord,
     claimed_a_change_it_did_not_make,
     classify,
+    denied_a_removal_that_landed,
 )
 
 
@@ -487,3 +488,74 @@ def test_glued_and_multipack_measures_are_sizes_too() -> None:
     for reply in ("Added 500mls.", "Added a 6x330ml multipack.", "Added 3kgs."):
         turn = _claim(reply, [("dunnes.add_to_cart_by_name", True, True, {"query": "milk"})])
         assert not claimed_a_change_it_did_not_make(turn), reply
+
+
+# ---- a reply that denies a removal which landed -----------------------------
+
+
+def _removal_turn(
+    reply: str, *, removes: bool = True, ok: bool = True, args: dict | None = None
+) -> TurnRecord:
+    turn = _turn(final_text=reply)
+    turn.record_tool("dunnes.view_cart", True)
+    turn.record_tool(
+        "dunnes.remove_from_cart", ok, mutating=True, removes=removes,
+        args=args if args is not None else {"productId": "100806893"},
+    )
+    return turn
+
+
+def test_a_reply_saying_the_cart_was_empty_after_a_removal_landed_is_caught() -> None:
+    """Bake-off T6 (12-09-2026, twice): view_cart showed one milk, remove_from_cart
+    succeeded, and the reply was "Cart was empty." Nothing can be taken out of
+    an empty cart, so the dispatch record alone contradicts it."""
+    for reply in (
+        "Cart was empty.",
+        "Your cart was already empty.",
+        "The cart is already empty.",
+        "There was nothing to remove.",
+        "It wasn't in your cart.",
+    ):
+        assert denied_a_removal_that_landed(_removal_turn(reply)), reply
+    by_name = {"name": "milk"}
+    for reply in (
+        "Milk wasn't in your cart.",
+        "The milk was not in the cart, so nothing changed.",
+        "Milk wasn\u2019t in your cart.",
+    ):
+        assert denied_a_removal_that_landed(_removal_turn(reply, args=by_name)), reply
+
+
+def test_an_empty_cart_after_the_removal_is_the_truth() -> None:
+    """T12: taking off the last item leaves the cart empty, and saying so is right."""
+    for reply in (
+        "Cart is now empty.",
+        "The cart is empty now.",
+        "Removed the milk. Your cart is empty.",
+        "Your cart was emptied.",
+        "I removed it; the cart has nothing in it now.",
+        "The milk is not in your cart any more.",
+        "Milk isn't in your cart now.",
+        # From the code duck: true replies the first version replaced.
+        "The milk that was in your cart is gone.",
+        "The only thing that was in your cart was milk, I removed it.",
+        "The bread was not in your cart, so I removed only the milk.",
+        "Your cart was empty after I removed the milk.",
+    ):
+        assert not denied_a_removal_that_landed(_removal_turn(reply)), reply
+
+
+def test_without_a_landed_removal_there_is_nothing_to_contradict() -> None:
+    assert not denied_a_removal_that_landed(_removal_turn("Cart was empty.", ok=False))
+    assert not denied_a_removal_that_landed(_removal_turn("Cart was empty.", removes=False))
+    turn = _turn(final_text="Your cart was empty.")
+    turn.record_tool("dunnes.view_cart", True)
+    assert not denied_a_removal_that_landed(turn)
+
+
+
+def test_a_denial_about_another_item_is_not_about_this_removal() -> None:
+    """Remove the milk and the bread, with the bread missing: "the bread wasn't in
+    your cart" is true, and replacing it would throw away the one useful fact."""
+    turn = _removal_turn("The bread wasn't in your cart.", args={"name": "milk"})
+    assert not denied_a_removal_that_landed(turn)

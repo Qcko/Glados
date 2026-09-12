@@ -73,6 +73,7 @@ from .turn_outcome import (
     asserts_a_change,
     claimed_a_change_it_did_not_make,
     classify,
+    denied_a_removal_that_landed,
     said_nothing,
 )
 from ..servers.room_intercom import MAX_MESSAGE_CHARS, SPEAK_INTO
@@ -230,6 +231,13 @@ _UNBACKED_CLAIM_REPLIES = (
     "I said that went through, but I can't confirm it did -- check before repeating it.",
     "What I just said doesn't match what actually ran. Ask me whether it worked rather than saying it again.",
     "That may not have happened the way I described it. Check it before you repeat the request.",
+)
+
+# Spoken instead of a reply that denies a removal which landed (bake-off T6,
+# 12-09-2026: "Cart was empty." right after remove_from_cart succeeded). States
+# the one fact the dispatch record supports, and points at the cart for the rest.
+_DENIED_REMOVAL_REPLY = (
+    "Done -- I took that out of your cart. Ask me what's in it if you want the list."
 )
 
 # Spoken when a turn produced no reply at all (classified `failed` via
@@ -668,6 +676,18 @@ def _removes_with(call: LLMToolCall, spec: ToolSpec) -> bool:
         return True
     value = _as_number(call.args.get(arg))
     return value is None or value <= 0
+
+
+def _removes_for_certain(call: LLMToolCall, spec: ToolSpec) -> bool:
+    """Whether these arguments certainly take something out. The strict twin of
+    `_removes_with`: that one counts an unreadable count as removing, which is
+    the safe side for REFUSING a write, and the wrong side for telling a reply
+    that a removal landed."""
+    arg = spec.count_arg or spec.delta_arg
+    if not arg:
+        return True
+    value = _as_number(call.args.get(arg))
+    return value is not None and value <= 0
 
 
 def _as_number(value: object) -> float | None:
@@ -1326,6 +1346,13 @@ class Organizer:
                 # right and stays put (it is what drives escalation); it is the
                 # LIE that must not be spoken and must not enter history.
                 final_text = await self._handle_unbacked_claim(
+                    session.session_id, session.room_id, new_history, trace
+                )
+            elif denied_a_removal_that_landed(outcome):
+                # A removal landed and the reply says there was nothing to
+                # remove. Not `confabulated` -- the change is real, so neither a
+                # re-drive nor a "no record of that" line would be true either.
+                final_text = await self._handle_denied_removal(
                     session.session_id, session.room_id, new_history, trace
                 )
             elif said_nothing(outcome) and text.strip():
@@ -2220,6 +2247,24 @@ class Organizer:
         )
         return reply
 
+    async def _handle_denied_removal(
+        self, session_id: str, room_id: str, history: list[LLMMessage], trace
+    ) -> str:
+        """Replace a reply that denies a removal the dispatch record shows
+        landed ("Cart was empty." after remove_from_cart succeeded). Same two
+        egress paths as `_handle_unbacked_claim`, and the line says only what
+        GLaDOS knows: something was taken out. No product name -- the only
+        source for one here would be the server's answer."""
+        reply = _DENIED_REMOVAL_REPLY
+        if history and history[-1].role == "assistant":
+            history[-1] = LLMMessage(role="assistant", content=reply)
+        trace.event("denied_removal_corrected", replacement=reply)
+        await self._broadcast(
+            room_id,
+            AssistantDelta(session_id=session_id, text=" (Correction) " + reply),
+        )
+        return reply
+
     async def _handle_silent_turn(
         self,
         session_id: str,
@@ -2638,15 +2683,20 @@ class Organizer:
             # so spuriously escalate to the v2.6 specialist router). Skip recording
             # it entirely; the model still sees `user denied` in the transcript.
             if not denied:
+                landed_write = (
+                    mutating and not answered_locally and _took_effect(tc, result)
+                )
                 outcome.record_tool(
                     f"{tc.server}.{tc.name}",
                     result.ok,
-                    mutating=mutating
-                    and not answered_locally
-                    and _took_effect(tc, result),
+                    mutating=landed_write,
                     indeterminate=result.indeterminate,
                     args=_subject_args(tc),
                     satisfied=refusal is not None and refusal.satisfied,
+                    removes=landed_write
+                    and spec is not None
+                    and spec.removes
+                    and _removes_for_certain(tc, spec),
                 )
             # Cap AFTER the broadcast and the trace event above, so the desk
             # client and `traces/` keep the whole result and only the SPOKEN

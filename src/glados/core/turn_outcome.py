@@ -76,6 +76,10 @@ class ToolRecord:
     # count it as landed. On the record rather than the turn so one satisfied
     # call cannot excuse an invented claim about a different subject.
     satisfied: bool = False
+    # The call takes something OUT (a remove, a set to zero, a negative adjust)
+    # as sent. Lets a reply that denies the removal be checked against the
+    # dispatch record without reading the server's answer.
+    removes: bool = False
 
 
 @dataclass
@@ -158,6 +162,7 @@ class TurnRecord:
         indeterminate: bool = False,
         args: dict | None = None,
         satisfied: bool = False,
+        removes: bool = False,
     ) -> None:
         self.tools.append(
             ToolRecord(
@@ -167,6 +172,7 @@ class TurnRecord:
                 indeterminate=indeterminate,
                 subjects=_subjects(args),
                 satisfied=satisfied,
+                removes=removes,
             )
         )
 
@@ -374,6 +380,61 @@ def claimed_a_change_it_did_not_make(turn: TurnRecord) -> bool:
         # still gives us nothing to check against.
         return False
     return any(_claim_unsupported(c, subject_words) for c in claims)
+
+
+# A reply saying there was nothing to take out: the state BEFORE this turn's
+# removal. "is now empty" / "empty now" is the state after, which is true once
+# the last item is gone, so it is not here. Two shapes, judged differently:
+# an empty cart contradicts ANY landed removal; an item "not in the cart"
+# contradicts only a removal of THAT item (see `_denies_this_removal`).
+_EMPTY_BEFORE_RE = re.compile(
+    r"\bwas\s+(?:already\s+)?empty\b"
+    r"|\balready\s+empty\b"
+    r"|\bnothing\s+to\s+(?:remove|take)\b",
+    re.IGNORECASE,
+)
+_NOT_IN_CART_RE = re.compile(
+    r"\b(?:wasn't|was\s+not)\s+(?:in|on)\s+(?:your|the)\s+(?:cart|basket|trolley)\b",
+    re.IGNORECASE,
+)
+# Words of a denial sentence that are not a product name.
+_DENIAL_WORDS = frozenset(
+    {"was", "wasn", "not", "already", "empty", "nothing", "remove", "take",
+     "basket", "trolley", "there", "any", "anything"}
+)
+
+
+def denied_a_removal_that_landed(turn: TurnRecord) -> bool:
+    """A removal landed this turn, yet the reply says the cart was empty or the
+    removed item was not in it. Bake-off T6 (12-09-2026, in two runs): view_cart
+    showed one milk, remove_from_cart succeeded, and the reply was "Cart was
+    empty."
+
+    Not a claim-check case: that check looks for an asserted change the record
+    does not support, and this reply asserts no change at all -- it denies one.
+    The record is enough to contradict it: nothing can be taken out of a cart
+    that held nothing. Fails open wherever it cannot judge: a removal that only
+    MAY have landed (timed out), a sentence that also reports a change ("the
+    bread wasn't in your cart, so I removed only the milk"), and a denial about
+    some other item than the one removed."""
+    removals = [t for t in turn.tools if t.removes and t.mutating and t.ok]
+    if not removals:
+        return False
+    removed_words = {w for t in removals for s in t.subjects for w in _words(s)}
+    return any(
+        _denies_this_removal(sentence, removed_words)
+        for sentence in _sentences(turn.final_text.replace("\u2019", "'"))
+        if not _asserts_a_change(sentence)
+    )
+
+
+def _denies_this_removal(sentence: str, removed_words: set[str]) -> bool:
+    if _EMPTY_BEFORE_RE.search(sentence):
+        return True
+    if not _NOT_IN_CART_RE.search(sentence):
+        return False
+    named = _without_measures(_words(sentence) - _DENIAL_WORDS)
+    return not named or bool(named & removed_words)
 
 
 def _claim_clauses(sentence: str) -> list[str]:
