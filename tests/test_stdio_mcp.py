@@ -688,11 +688,21 @@ def test_toy_stdio_overlay_applies_requires_confirmation(stdio_app: TestClient) 
     assert add.requires_confirmation is False
 
 
-async def test_toy_stdio_dispatch_round_trip(stdio_app: TestClient) -> None:
-    """Dispatch a real call through the registry into the subprocess."""
+def test_toy_stdio_dispatch_round_trip(stdio_app: TestClient) -> None:
+    """Dispatch a real call through the registry into the subprocess.
+
+    Runs on the app's own loop via the TestClient portal. The child's pipes
+    belong to that loop; awaiting the dispatch from pytest's loop instead wrote
+    to them from another thread, which now and then left the write's overlapped
+    op stranded in the portal loop's IOCP cache, and `IocpProactor.close()`
+    then waited for it forever at fixture teardown (12-09-2026, caught with a
+    close() probe: the pending op was this write, created in `_write_payload`).
+    """
     registry = stdio_app.app.state.mcp
     env = CallEnvelope(session_id="s1", room_id="desk", speaker_id="u1")
-    result = await registry.dispatch("toy_stdio", "add", {"a": 2, "b": 3}, env)
+    result = stdio_app.portal.call(
+        registry.dispatch, "toy_stdio", "add", {"a": 2, "b": 3}, env
+    )
     assert result.ok
     assert result.content == {"sum": 5}
 
