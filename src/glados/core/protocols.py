@@ -181,6 +181,20 @@ class ToolConfirmRequest(BaseModel):
     ttl_s: float
 
 
+class ToolConfirmResolved(BaseModel):
+    """Sent to the originating room the moment a confirmation is decided,
+    whichever arm decided it: a dialog reply (`ui`), a spoken answer
+    (`voice`), or the server's deadline (`timeout`). A client showing the
+    request closes it on this exact signal instead of inferring from the
+    next session frame -- which, behind a slow tool, arrives long after."""
+
+    type: Literal["tool_confirm_resolved"] = "tool_confirm_resolved"
+    session_id: str
+    request_id: str
+    granted: bool
+    via: Literal["ui", "voice", "timeout"]
+
+
 class MemoryBlockNotice(BaseModel):
     """Operator-facing notice that a *trusted* MCP server shipped lessons that
     did not clear the LocalGuard hash-approval gate, so **nothing was injected**
@@ -272,6 +286,7 @@ ServerMessage = Annotated[
     | TurnOutcome
     | RouteNotice
     | ToolConfirmRequest
+    | ToolConfirmResolved
     | MemoryBlockNotice
     | ErrorMessage,
     Field(discriminator="type"),

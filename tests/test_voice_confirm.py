@@ -351,7 +351,7 @@ async def test_non_answers_queue_bounded_and_the_confirm_still_waits(
         assert _transcripts(sink) == ["do it", "what did you say"]
 
 
-async def test_an_answer_captured_before_the_question_ended_is_not_one(
+async def test_an_answer_captured_before_the_question_started_is_not_one(
     tmp_path: Path,
 ) -> None:
     async with _make_org(
@@ -359,14 +359,30 @@ async def test_an_answer_captured_before_the_question_ended_is_not_one(
     ) as (org, sink, tool):
         await org.handle_user_text("k-mic", "do it")
         await _wait_until_asked(org, "kitchen")
-        early = org._confirm_by_room["kitchen"].answers_after - 0.05
-        # Arrives after the mic reopened but BEGAN while the question was
-        # still playing; the TTS gate judges capture time too, so bypass it
-        # the way a room with no speaker-driven gate would.
+        early = org._confirm_by_room["kitchen"].asked_at - 0.05
+        # Arrives now but BEGAN before the question did (STT latency); the
+        # room's TTS gate judges capture time too, so hand it straight to
+        # the intercept the way an ungated desk room would.
         await org.handle_user_text("k-mic", "yes", source="voice", captured_at=early)
         await org.flush()
         assert tool.calls == []
         assert "tool_confirm_timeout" in _kinds(tmp_path)
+
+
+async def test_an_answer_that_began_during_the_question_counts(tmp_path: Path) -> None:
+    # The desk has no server-side gate (browser AEC) and people answer as
+    # soon as they have heard the item.
+    async with _make_org(tmp_path, [DESK_UI, DESK_MIC], tts=_FakeTts(seconds=1.0)) as (
+        org, sink, tool
+    ):
+        await org.handle_user_text("d-mic", "do it")
+        await _wait_for(sink, "tool_confirm_request")
+        pending = org._confirm_by_room["desk"]
+        mid_question = pending.asked_at + 0.3
+        assert mid_question < pending.answers_after
+        await org.handle_audio_text("d-mic", "yes", mid_question)
+        await org.flush()
+        assert tool.calls == [{"x": 1}]
 
 
 async def test_the_ttl_runs_from_the_mic_reopening(tmp_path: Path) -> None:
@@ -386,30 +402,44 @@ async def test_the_ttl_runs_from_the_mic_reopening(tmp_path: Path) -> None:
         assert tool.calls == [{"x": 1}]
 
 
-async def test_dialog_answer_during_the_question_cuts_it_short(tmp_path: Path) -> None:
-    class _SlowTts(_FakeTts):
-        async def synthesize(self, text: str):
-            self.spoken.append(text)
-            await asyncio.sleep(0.5)
-            yield TtsChunkOut(pcm=b"\x00\x00" * 100, sample_rate=SAMPLE_RATE)
-
-    tts = _SlowTts()
-    async with _make_org(tmp_path, [DESK_UI, DESK_MIC], tts=tts) as (org, sink, tool):
+async def test_the_dialog_counts_down_from_the_servers_own_deadline(tmp_path: Path) -> None:
+    # The request goes out after the question, carrying the plain ttl plus
+    # whatever of the question is still playing -- so the dialog's countdown
+    # and the server's deadline end together, and a screen answer during
+    # playback is reported as such.
+    async with _make_org(
+        tmp_path, [DESK_UI, DESK_MIC], tts=_FakeTts(seconds=1.0), confirm_timeout_s=5.0
+    ) as (org, sink, tool):
         await org.handle_user_text("d-mic", "do it")
         req = await _wait_for(sink, "tool_confirm_request")
-        await asyncio.sleep(0.1)
-        assert tts.spoken, "the question was not being spoken"
+        assert 5.5 < req["ttl_s"] <= 6.0
+        kinds = _kinds(tmp_path)
+        assert kinds.index("tool_confirm_spoken") < kinds.index("tool_confirm_request")
         await org.handle_tool_confirm_response(
             "desk-ui", ToolConfirmResponse(request_id=req["request_id"], granted=True)
         )
         await org.flush()
         assert tool.calls == [{"x": 1}]
-        kinds = _kinds(tmp_path)
-        assert "tool_confirm_voice" not in kinds
-        assert "tool_confirm_voice_skipped" not in kinds
-        assert kinds.count("tool_confirm_response") == 1
-        # Question chunks never streamed; only the reply's did.
-        assert kinds.index("tool_confirm_response") < kinds.index("tts_chunk")
+        resolved = await _wait_for(sink, "tool_confirm_resolved")
+        assert resolved["request_id"] == req["request_id"]
+        assert resolved["granted"] is True and resolved["via"] == "ui"
+
+
+async def test_a_spoken_answer_and_a_timeout_are_announced(tmp_path: Path) -> None:
+    async with _make_org(tmp_path, [MIC, SPEAKER], tts=_FakeTts()) as (org, sink, tool):
+        await org.handle_user_text("k-mic", "do it")
+        await _wait_until_asked(org, "kitchen")
+        await org.handle_audio_text("k-mic", "no", asyncio.get_running_loop().time())
+        await org.flush()
+        resolved = await _wait_for(sink, "tool_confirm_resolved")
+        assert resolved["granted"] is False and resolved["via"] == "voice"
+    async with _make_org(
+        tmp_path / "t2", [MIC, SPEAKER], tts=_FakeTts(), confirm_timeout_s=0.2
+    ) as (org, sink, tool):
+        await org.handle_user_text("k-mic", "do it")
+        await org.flush()
+        resolved = await _wait_for(sink, "tool_confirm_resolved")
+        assert resolved["granted"] is False and resolved["via"] == "timeout"
 
 
 async def test_barge_in_during_the_question_leaves_the_gate_in_cooldown(
@@ -424,9 +454,10 @@ async def test_barge_in_during_the_question_leaves_the_gate_in_cooldown(
     tts = _SlowTts()
     async with _make_org(tmp_path, [MIC, SPEAKER], tts=tts) as (org, sink, tool):
         await org.handle_user_text("k-mic", "do it")
-        await _wait_for(sink, "tool_confirm_request")
-        await asyncio.sleep(0.1)
-        assert tts.spoken
+        started = asyncio.get_running_loop().time() + 2.0
+        while not tts.spoken and asyncio.get_running_loop().time() < started:
+            await asyncio.sleep(0.01)
+        assert tts.spoken, "the question was not being spoken"
         await org.handle_audio_text("k-mic", "stop", asyncio.get_running_loop().time())
         await org.flush()
         assert tool.calls == []

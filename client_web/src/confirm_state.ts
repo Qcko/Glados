@@ -2,7 +2,7 @@
 // One live request at a time, a deadline stored as a timestamp, and an arming
 // time that must pass while the dialog is actually seen and online.
 
-import type { ServerMessage, ToolConfirmRequest } from "./protocol";
+import type { ServerMessage, ToolConfirmRequest, ToolConfirmResolved } from "./protocol";
 
 export const ARMING_MS = 800;
 export const DEADLINE_MARGIN_MS = 1000;
@@ -113,6 +113,16 @@ export class ConfirmState {
 
   msUntilDeadline(): number | null {
     return this.live ? Math.max(0, this.live.deadline - this.clock()) : null;
+  }
+
+  // The server's own word that this request is decided, whichever arm
+  // decided it. Any other request's resolution is somebody else's news.
+  resolvedBy(msg: ServerMessage): msg is ToolConfirmResolved {
+    return (
+      msg.type === "tool_confirm_resolved" &&
+      this.live !== null &&
+      msg.request_id === this.live.request.request_id
+    );
   }
 
   dropsOn(msg: ServerMessage): boolean {

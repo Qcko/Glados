@@ -117,6 +117,14 @@ export interface ToolConfirmRequest {
   ttl_s: number;
 }
 
+export interface ToolConfirmResolved {
+  type: "tool_confirm_resolved";
+  session_id: string;
+  request_id: string;
+  granted: boolean;
+  via: "ui" | "voice" | "timeout";
+}
+
 export type ServerMessage =
   | Welcome
   | UserTranscript
@@ -129,4 +137,5 @@ export type ServerMessage =
   | TurnOutcome
   | RouteNotice
   | ToolConfirmRequest
+  | ToolConfirmResolved
   | ServerError;

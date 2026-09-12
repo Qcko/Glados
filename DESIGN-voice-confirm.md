@@ -85,7 +85,8 @@ The design roster (architect, security, concurrency) reviewed a first draft on
   twin that clips and still accepts "yes" hides the write. A question that
   would need clipping is **not asked by voice** (dialog only).
 - A dialog answer landing during the question left the question playing and
-  the room gated: the question races the Future.
+  the room gated. Superseded later the same day: the request now goes out
+  after the question, so nothing can answer during it.
 - The intercept runs on the WS handler task, which has no trace handle and
   may run after the turn's trace is closed. It resolves the Future with a
   record; the worker task emits every trace event.
@@ -103,7 +104,7 @@ The design roster (architect, security, concurrency) reviewed a first draft on
 
 One pending-confirm record on the Organizer (replacing two maps), one
 intercept at utterance ingress, one deterministic renderer, one flag on
-`TurnRecord`. No new protocol frames. No LLM in the grant decision (memory
+`TurnRecord`, one new protocol frame (`tool_confirm_resolved`). No LLM in the grant decision (memory
 `harness-over-prompts`).
 
 ```
@@ -138,24 +139,37 @@ one edit. The `tool_confirm_no_clients` short-circuit keeps its meaning.
 
 ### The spoken question
 
-`_await_confirmation` takes the `ToolSpec` (its one caller has it) and, after
-the broadcast:
+`_await_confirmation` takes the `ToolSpec` (its one caller has it) and asks
+aloud **before** the `ToolConfirmRequest` goes out, so the broadcast can carry
+the deadline the server will actually enforce:
 
 1. `render_confirm_question(spec.qualified, args)` -> `str | None`.
    `None` means the question would need clipping; then no voice arm, trace
    `tool_confirm_voice_skipped reason=clipped`.
-2. The question is spoken as a task raced against the Future
-   (`asyncio.wait(FIRST_COMPLETED)`). If the dialog answers first, the speak
-   task is cancelled (its `finally` arms the short cooldown). The worker's own
-   cancellation cancels the speak task too.
-3. `_speak` returns the number of samples streamed. Zero (no TTS, synth error,
-   no listener) means nobody heard a question: the voice arm is not armed and
-   the TTL is the plain `confirm_timeout_s` from now, as today.
-4. Otherwise `answers_after` = the room gate's `closed_until` when the gate is
-   this session's (else now) -- the moment the mic reopens -- and the TTL runs
-   `confirm_timeout_s` from **that**. The dialog's `ttl_s` stays the plain
-   value from the broadcast, so the dialog can say "timed out" a few seconds
-   before the voice arm gives up; noted under *Deferred*.
+2. `asked_at` = now; `_speak` streams the question and returns the loop time
+   its audio is estimated to stop playing (`send_start + samples / rate +
+   drain margin`), or `0.0` when nothing streamed (no TTS, synth error): then
+   nobody heard a question, the voice arm is not armed, and the deadline is
+   the plain `confirm_timeout_s` from now.
+3. Otherwise `answers_after` = that playback end, or the room gate's
+   `closed_until` if it is this session's and later (it adds the cooldown
+   tail). The estimate cannot come from the gate alone: the desk plays audio
+   as `ui`, and `_arm_gate_after_send` tracks only a `speaker`, so a desk
+   room has no gate entry at all (observed live 12-09-2026: the dialog got
+   the plain ttl and counted down through the question).
+4. The deadline runs `confirm_timeout_s` from `answers_after`, and the
+   broadcast's `ttl_s` is `deadline - now` -- the dialog and the server
+   finish together. The dialog therefore appears about one synthesis late,
+   as the audio starts. Nothing can answer before the broadcast, so there is
+   no race between the question and an answer.
+5. When the Future resolves -- either arm, or the deadline -- the room gets a
+   `ToolConfirmResolved(request_id, granted, via: ui | voice | timeout)`.
+   Before it existed the dialog closed on the next session frame, which
+   behind a Selenium tool arrived 15 s later, with the guess "dropped -- the
+   turn moved on" written over a confirm the user had spoken (observed
+   12-09-2026). The client closes on the exact signal and writes the
+   resolution into the transcript: "<tool> allowed by voice", "... denied on
+   screen", "... timed out -- not sent".
 
 The question: `"GLaDOS needs a yes: <server> <tool words>, <arg> <value>, ...
 -- shall I go ahead?"`. Fixed args (numbers, booleans, null) first, in call
@@ -198,11 +212,14 @@ if source == "voice" and self._try_answer_confirm(binding, text, captured_at):
   waiting. A non-answer is not a deny -- the server never treats an
   unrelated frame as one, and a silent refusal after "what did you say?" is
   the worse failure.
-- `captured_at < answers_after` -> the answer began before the mic reopened
-  (STT latency lets a transcript of something said earlier land now) ->
-  `False`, logged. The horizon is read live while the question's own gate
-  still stands, so an early `playback_done` (if mid-turn audio ever gets one)
-  moves it rather than stranding a valid answer.
+- `captured_at < asked_at` -> the answer began before the question did
+  (STT latency lets a transcript of something said two seconds earlier land
+  now) -> `False`, logged. An answer that began **during** the question
+  counts: people answer as soon as they have heard the item, and on the desk
+  (browser AEC, no server gate) that is the normal case. In a mic+speaker
+  room the pre-existing TTS feedback gate still drops anything captured
+  during playback -- that gate cannot tell the user from GLaDOS's echo, and
+  its fix is echo cancellation on the room clients, not this slice.
 - Only a `mic` or `ui` binding may answer: an audio pipeline is built for
   every role, so a `speaker` credential streaming audio would otherwise be a
   voice.
@@ -278,24 +295,25 @@ spoken question depends on that staying so; the write guards.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Broadcast : gated call, room can confirm
-    Broadcast --> Asking : room can hear and answer, TTS up, question fits
-    Broadcast --> Waiting : otherwise (dialog only)
-    Asking --> Waiting : samples streamed, mic reopens at gate horizon, TTL starts
-    Asking --> Waiting : zero samples (no listener or tts_error), voice arm off
-    Asking --> Resolved : dialog answers first, question cancelled
-    Waiting --> Resolved : dialog Allow or Deny / spoken yes or no (voice, captured after reopen) / TTL elapses
+    [*] --> Broadcast : gated call, room can confirm, no voice arm
+    [*] --> Asking : gated call, room can hear and answer, TTS up, question fits
+    Broadcast --> Waiting : request sent
+    Asking --> Broadcast : audio streamed, deadline = playback end + ttl, request carries it
+    Asking --> Broadcast : nothing streamed (tts_error), voice arm off, plain ttl
+    Waiting --> Resolved : dialog Allow or Deny / spoken yes or no (voice, began after the question started) / TTL elapses
     Waiting --> Cancelled : barge-in stop, Stop turn, interrupt
     Waiting --> Waiting : other utterance queued as a turn (depth 1)
-    Resolved --> [*] : granted dispatches the approved snapshot, refused sets confirm_refused
+    Resolved --> [*] : tool_confirm_resolved broadcast, granted dispatches the snapshot, refused sets confirm_refused
     Cancelled --> [*] : maps cleared in finally
 ```
 
 ## Failure modes considered
 
-- **The user answers over the question.** Dropped by the TTS mic gate (mic
-  and speaker rooms) or rejected by `captured_at < answers_after`; logged
-  with the request id. The user repeats after the question ends.
+- **The user answers over the question.** On the desk it counts (no server
+  gate). In a mic+speaker room it is dropped by the TTS feedback gate and
+  logged with the request id; the user repeats after the question ends.
+  Only an answer that began before the question started is refused as not
+  an answer to it.
 - **Two gated calls in one turn.** Sequential; each asks. Same as the dialog.
 - **Whisper mishears.** "know" is not in the lexicon -> non-answer -> queued
   turn (bounded), confirm still waits. "yes." is tolerated. Whisper's silence
@@ -318,10 +336,6 @@ stateDiagram-v2
 
 ## Deferred
 
-- The dialog's `ttl_s` could include the question's estimated playback so the
-  two deadlines agree (the estimate is known only after synthesis).
-- A `tool_confirm_resolved` broadcast so the dialog closes on the exact
-  signal when the voice arm wins.
 - Speaker identification for true per-user consent (ARCH section 3); a
   speech-energy floor on the VAD segment before a verdict counts.
 - A short re-ask ("yes or no?") on the first non-answer.

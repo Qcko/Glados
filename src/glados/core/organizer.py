@@ -55,6 +55,7 @@ from .protocols import (
     RouteNotice,
     ToolCall,
     ToolConfirmRequest,
+    ToolConfirmResolved,
     ToolConfirmResponse,
     ToolResult,
     TtsChunk,
@@ -148,15 +149,20 @@ class _PendingConfirm:
     it) and by room (a spoken answer arrives with only a room). A room runs
     one turn and a turn awaits one confirm at a time, so the room index is
     never contended. `voice_armed` is set only once a question actually
-    streamed audio; `answers_after` is the loop time the room's mic reopens
-    after that question, and a transcript captured earlier is not an answer
-    to it."""
+    streamed audio. `asked_at` is the loop time the question started: a
+    transcript captured before it cannot be an answer to it (STT latency
+    lets a "yes" said two seconds earlier land now), while one that began
+    during the question usually is -- people answer as soon as they have
+    heard the item. `answers_after` is when the room's mic reopens after the
+    question -- the deadline `_ask_aloud` returns is measured from it, and
+    tests read it to know when an answer could first be heard."""
 
     request_id: str
     room_id: str
     session_id: str
     fut: asyncio.Future[bool | _VoiceAnswer]
     voice_armed: bool = False
+    asked_at: float = 0.0
     answers_after: float = 0.0
 
 
@@ -964,9 +970,9 @@ class Organizer:
         verdict = classify_confirm_answer(text)
         if verdict is None:
             return False
-        if captured_at is not None and captured_at < self._answers_after(pending):
+        if captured_at is not None and captured_at < pending.asked_at:
             log.info(
-                "confirm %s: %r from %s began before the question ended; not an answer",
+                "confirm %s: %r from %s began before the question did; not an answer",
                 pending.request_id, text, client_id,
             )
             return False
@@ -974,15 +980,6 @@ class Organizer:
             _VoiceAnswer(granted=verdict == "yes", client_id=client_id, text=text)
         )
         return True
-
-    def _answers_after(self, pending: _PendingConfirm) -> float:
-        """The moment an answer may begin: the live gate horizon while the
-        question's own gate still stands (an early `playback_done` would move
-        it), else the horizon snapshotted when the question was asked."""
-        gate = self._tts_gate.get(pending.room_id)
-        if gate is not None and gate.session_id == pending.session_id:
-            return min(gate.closed_until, pending.answers_after)
-        return pending.answers_after
 
     async def flush(self) -> None:
         """Wait until every room's queue is drained. Test hook."""
@@ -2296,12 +2293,15 @@ class Organizer:
 
     async def _speak(
         self, session_id: str, room_id: str, text: str, trace
-    ) -> int:
-        """Stream `text` to the room. Returns the PCM samples streamed, so a
-        caller that needs to know whether anyone could have heard it (the
-        spoken confirmation) can tell silence from speech."""
+    ) -> float:
+        """Stream `text` to the room. Returns the loop time the audio is
+        estimated to stop playing (0.0 when nothing was streamed), so a caller
+        that needs to know when it could have been heard -- the spoken
+        confirmation -- has it even in a room whose gate is not armed (the
+        desk plays audio as `ui`, and `_arm_gate_after_send` only tracks a
+        `speaker`)."""
         if self.tts is None or not text.strip():
-            return 0
+            return 0.0
         # The LLM emits markdown for the chat surface (bold via **, bullets
         # via "- "). Piper reads those characters literally -- "asterisk
         # asterisk Item asterisk asterisk" -- so strip them for the audio
@@ -2309,7 +2309,7 @@ class Organizer:
         # assistant_delta upstream.
         text = _strip_markdown_for_tts(text)
         if not text.strip():
-            return 0
+            return 0.0
         # Gate the room SENDING before any chunk goes out, so the mic is muted
         # the instant TTS audio could reach it. The finally arms the rest of the
         # gate (DRAINING for the estimated playback, or a short cooldown) from
@@ -2360,7 +2360,14 @@ class Organizer:
             self._arm_gate_after_send(
                 room_id, session_id, send_start, total_samples, sample_rate, cancelled
             )
-        return total_samples
+        if total_samples <= 0 or sample_rate <= 0:
+            return 0.0
+        # The client plays chunks as they arrive, so a synthesis slower than
+        # realtime ends no earlier than the last send; and the same runaway
+        # cap as the gate, so a bad sample count cannot buy minutes.
+        now = asyncio.get_running_loop().time()
+        playback_end = max(send_start + total_samples / sample_rate, now)
+        return min(playback_end + self._gate_drain_margin_s, now + self._gate_max_s)
 
     async def _run_tool_calls(
         self,
@@ -3133,11 +3140,21 @@ class Organizer:
         try:
             self._pending_confirms[request_id] = pending
             self._confirm_by_room[room_id] = pending
+            # The question is spoken BEFORE the request goes out, so the ttl
+            # the dialog counts down from is the one the server enforces: the
+            # plain ttl plus whatever of the question is still playing. The
+            # broadcast arrives about one synthesis late, as the audio starts.
+            deadline = await self._ask_aloud(pending, spec, args, trace)
+            ttl_s = deadline - asyncio.get_running_loop().time()
+            if ttl_s <= 0.0:
+                # Nothing to show a client but an already-expired dialog.
+                trace.event("tool_confirm_timeout", request_id=request_id)
+                return False
             trace.event(
                 "tool_confirm_request",
                 request_id=request_id,
                 tool=spec.qualified,
-                ttl_s=self._confirm_timeout_s,
+                ttl_s=round(ttl_s, 3),
             )
             await self._broadcast(
                 room_id,
@@ -3146,10 +3163,9 @@ class Organizer:
                     request_id=request_id,
                     tool=spec.qualified,
                     args_summary=args,
-                    ttl_s=self._confirm_timeout_s,
+                    ttl_s=ttl_s,
                 ),
             )
-            deadline = await self._ask_aloud(pending, spec, args, trace)
             try:
                 answer = await asyncio.wait_for(
                     pending.fut,
@@ -3157,6 +3173,7 @@ class Organizer:
                 )
             except asyncio.TimeoutError:
                 trace.event("tool_confirm_timeout", request_id=request_id)
+                await self._announce_resolved(pending, granted=False, via="timeout")
                 return False
             if isinstance(answer, _VoiceAnswer):
                 trace.event(
@@ -3172,11 +3189,33 @@ class Organizer:
             trace.event(
                 "tool_confirm_response", request_id=request_id, granted=granted
             )
+            await self._announce_resolved(
+                pending,
+                granted=granted,
+                via="voice" if isinstance(answer, _VoiceAnswer) else "ui",
+            )
             return granted
         finally:
             self._pending_confirms.pop(request_id, None)
             if self._confirm_by_room.get(room_id) is pending:
                 self._confirm_by_room.pop(room_id, None)
+
+    async def _announce_resolved(
+        self,
+        pending: _PendingConfirm,
+        *,
+        granted: bool,
+        via: Literal["ui", "voice", "timeout"],
+    ) -> None:
+        await self._broadcast(
+            pending.room_id,
+            ToolConfirmResolved(
+                session_id=pending.session_id,
+                request_id=pending.request_id,
+                granted=granted,
+                via=via,
+            ),
+        )
 
     async def _ask_aloud(
         self, pending: _PendingConfirm, spec: "ToolSpec", args: dict, trace
@@ -3187,7 +3226,7 @@ class Organizer:
         last chunk is SENT, and a mid-turn question has no early release),
         as `_hold_veto_window` measures the intercom gap -- otherwise a long
         question eats most of the ttl. A question nobody could have heard
-        (no TTS, synth error, no listener: zero samples) leaves the voice arm
+        (no TTS, synth error: nothing streamed) leaves the voice arm
         off and the plain ttl from now, as does one that would need clipping
         -- the dialog blocks Allow until a clipped value is expanded, and a
         spoken twin has no expand."""
@@ -3207,52 +3246,26 @@ class Organizer:
         trace.event(
             "tool_confirm_spoken", request_id=pending.request_id, question=question
         )
-        samples = await self._speak_unless_answered(pending, question, trace)
-        if pending.fut.done():
-            return plain_deadline
-        if samples <= 0:
+        pending.asked_at = loop.time()
+        played_out = await self._speak(pending.session_id, room_id, question, trace)
+        if played_out <= 0.0:
             trace.event(
                 "tool_confirm_voice_skipped",
                 request_id=pending.request_id,
                 reason="no_audio",
             )
             return plain_deadline
+        # Where the room has a gated mic its horizon is the authority (it
+        # adds the cooldown tail); elsewhere the playback estimate stands.
         gate = self._tts_gate.get(room_id)
         reopens_at = (
-            gate.closed_until
+            max(gate.closed_until, played_out)
             if gate is not None and gate.session_id == pending.session_id
-            else loop.time()
+            else played_out
         )
         pending.answers_after = reopens_at
         pending.voice_armed = True
         return reopens_at + self._confirm_timeout_s
-
-    async def _speak_unless_answered(
-        self, pending: _PendingConfirm, question: str, trace
-    ) -> int:
-        """Race the question against the Future: a dialog answer that lands
-        mid-question stops the question rather than letting it play out
-        over an already-decided call. The worker's own cancellation reaches
-        the speak task through the finally."""
-        speak_task = asyncio.create_task(
-            self._speak(pending.session_id, pending.room_id, question, trace)
-        )
-        try:
-            await asyncio.wait(
-                {speak_task, pending.fut}, return_when=asyncio.FIRST_COMPLETED
-            )
-            if speak_task.done():
-                return speak_task.result()
-            return 0
-        finally:
-            if not speak_task.done():
-                # Awaited, not just cancelled: the speak's finally arms the
-                # room's gate, and a cancelled worker must not leave that on
-                # a later tick where a successor turn may already own it.
-                speak_task.cancel()
-                await asyncio.shield(
-                    asyncio.gather(speak_task, return_exceptions=True)
-                )
 
     def _room_can_confirm(self, room_id: str) -> bool:
         """Whether anyone in `room_id` could answer a confirmation request:

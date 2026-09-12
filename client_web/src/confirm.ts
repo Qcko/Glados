@@ -4,7 +4,7 @@
 // escaped so it cannot fake a row, a button or a reordering.
 
 import { ConfirmState, DEADLINE_MARGIN_MS, type LiveRequest } from "./confirm_state";
-import type { ServerMessage, ToolConfirmRequest } from "./protocol";
+import type { ServerMessage, ToolConfirmRequest, ToolConfirmResolved } from "./protocol";
 
 const CLIP_CHARS = 300;
 const HIDDEN_TITLE = "(!) Confirmation needed";
@@ -81,7 +81,10 @@ export class ConfirmDialog {
       return;
     }
     const live = this.state.current;
-    if (live && this.state.dropsOn(msg)) {
+    if (!live) return;
+    if (this.state.resolvedBy(msg)) {
+      this.finish(resolvedNote(live, msg));
+    } else if (this.state.dropsOn(msg)) {
       this.finish(`confirmation for ${toolLabel(live)} dropped -- the turn moved on`);
     }
   }
@@ -326,6 +329,14 @@ export class ConfirmDialog {
 
 function toolLabel(live: LiveRequest): string {
   return visible(live.request.tool);
+}
+
+function resolvedNote(live: LiveRequest, msg: ToolConfirmResolved): string {
+  const tool = toolLabel(live);
+  if (msg.via === "timeout") return `confirmation for ${tool} timed out -- not sent`;
+  const verdict = msg.granted ? "allowed" : "denied";
+  const by = msg.via === "voice" ? "by voice" : "on screen";
+  return `${tool} ${verdict} ${by}`;
 }
 
 function visible(text: string): string {
