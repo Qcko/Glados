@@ -216,14 +216,27 @@ _REMOVAL_CUE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A count stated as the END state ("buy milk so I have three", "add milk up to
+# three in total"). That is a set in add's clothing, and only a set says it:
+# the add tool with that count would overshoot whatever is already there.
+_ABSOLUTE_COUNT_CUE_RE = re.compile(
+    r"\b(?:total|altogether|exactly|in\s+all|up\s+to"
+    r"|so\s+(?:i|we|there)\s+(?:have|has|are|is|got))\b",
+    re.IGNORECASE,
+)
+
 
 def is_add_request(text: str) -> bool:
     """True if the utterance opens with an add-class verb ("add tomatoes",
-    "please buy milk") and says nothing about taking anything out."""
+    "please buy milk") and says nothing about taking anything out or about the
+    count the cart should end at."""
     stripped = text.strip() if text else ""
     if not stripped or _ADD_INTENT_RE.match(stripped) is None:
         return False
-    return _REMOVAL_CUE_RE.search(stripped) is None
+    return (
+        _REMOVAL_CUE_RE.search(stripped) is None
+        and _ABSOLUTE_COUNT_CUE_RE.search(stripped) is None
+    )
 
 
 # A spoken answer to a confirmation question (DESIGN-voice-confirm.md). Both

@@ -261,8 +261,8 @@ timeout_s = 400.0
 # write when the utterance only asked to add. `count_arg` (an absolute count)
 # and `delta_arg` (a relative change) narrow that to calls where the named
 # argument is <= 0, so an upward adjust still serves "add one more". A
-# `count_arg` set answering an add with no count in it is refused as a guessed
-# quantity too: set(milk, 1) from three takes two out. Observed 11-09-2026:
+# `count_arg` set answering an add is refused whatever the count: "add two
+# milk" -> set(milk, 2) from three takes one out. Observed 11-09-2026:
 # "add tomatoes" said twice opened with remove_from_cart.
 [server.tool_overlays.set_cart_quantity]
 mutating = true

@@ -632,11 +632,6 @@ async def test_a_count_free_adjust_is_not_a_guess(tmp_path: Path) -> None:
     assert len(calls) == 1
 
 
-async def test_a_counted_add_licenses_an_upward_set(tmp_path: Path) -> None:
-    calls, _ = await _one_call(tmp_path, _set_spec(), {"name": "milk", "quantity": 2})
-    assert len(calls) == 1
-
-
 @pytest.mark.parametrize("utterance", ["add one more milk", "add milk"])
 async def test_a_set_to_zero_under_an_add_is_a_removal_first(tmp_path: Path, utterance: str) -> None:
     """The removal check runs ahead of the count check, so the note says what
@@ -646,25 +641,44 @@ async def test_a_set_to_zero_under_an_add_is_a_removal_first(tmp_path: Path, utt
     assert "not_removed" in message
 
 
-@pytest.mark.parametrize("quantity", [1, 2])
-async def test_a_set_answering_a_count_free_add_is_a_guess(tmp_path: Path, quantity: int) -> None:
-    """set(milk, 1) from three takes two out; "add milk" named no number."""
-    calls, message = await _one_call(tmp_path, _set_spec(), {"name": "milk", "quantity": quantity}, "add milk")
+@pytest.mark.parametrize(
+    "utterance, quantity",
+    [
+        ("add milk", 1),
+        ("add milk", 2),
+        ("add milk again", 2),
+        ("add two milk", 2),
+        ("add some milk", 1),
+        ("add more milk", 1),
+        ("add one more milk", 4),
+    ],
+)
+async def test_a_set_never_answers_an_add(tmp_path: Path, utterance: str, quantity: int) -> None:
+    """"Add" is relative and a set is absolute: set(milk, 2) under "add two
+    milk" takes one out of a cart holding three, and the harness cannot see
+    the cart to know. A count in the utterance does not bridge that."""
+    calls, message = await _one_call(tmp_path, _set_spec(), {"name": "milk", "quantity": quantity}, utterance)
     assert calls == []
-    assert "quantity_needed" in message
+    assert "use_add_tool" in message
+    assert "<external>" not in message
+    assert "set_for_add_refused" in [e.get("event") for e in trace_events(tmp_path)]
 
 
-async def test_a_counted_add_licenses_a_set(tmp_path: Path) -> None:
-    calls, _ = await _one_call(tmp_path, _set_spec(), {"name": "milk", "quantity": 2}, "add two milk")
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "set the milk to two",
+        "buy milk so I have three",
+        "add milk up to three in total",
+        "put three milk in, exactly three",
+    ],
+)
+async def test_a_set_answering_an_end_state_request_goes_through(tmp_path: Path, utterance: str) -> None:
+    """A removal cue, or a count stated as where the cart should end, makes
+    the utterance not add-only: the absolute count is the user's to give, and
+    the add tool with it would overshoot."""
+    calls, _ = await _one_call(tmp_path, _set_spec(), {"name": "milk", "quantity": 3}, utterance)
     assert len(calls) == 1
-
-
-async def test_a_repeat_word_is_not_a_count(tmp_path: Path) -> None:
-    """"again" says on top of what is there, not how many: set(milk, 2) from
-    three would take one out."""
-    calls, message = await _one_call(tmp_path, _set_spec(), {"name": "milk", "quantity": 2}, "add milk again")
-    assert calls == []
-    assert "quantity_needed" in message
 
 
 def test_count_arg_and_quantity_arg_together_is_a_config_error() -> None:
