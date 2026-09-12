@@ -442,3 +442,48 @@ def test_a_quantity_claim_is_never_judged_by_its_number() -> None:
         [("dunnes.add_to_cart_by_name", True, True, {"name": "milk"})],
     )
     assert not claimed_a_change_it_did_not_make(turn)
+
+
+def test_a_claim_that_names_pack_sizes_not_the_product_is_not_accused() -> None:
+    """Bake-off T3 (12-09-2026): add_by_volume(milk, 4) landed and the reply
+    named the packs it chose rather than the product. Split on "and", the clause
+    "I added one 3-litre" carried only "litre", which no argument contains, and
+    a true report was replaced by "I don't have a record of doing that". A size
+    or container says HOW MUCH was changed, never WHAT, so like the cart-meta
+    nouns it can neither corroborate nor contradict a call."""
+    for reply in (
+        "I added one 3-litre and one 1-litre bottle to reach your 4 litres.",
+        "Added two cartons.",
+        "Removed a 500ml pack and added a 2 litre bottle.",
+        "Added 3 bags, 1 kilo each.",
+    ):
+        turn = _claim(reply, [("dunnes.add_by_volume", True, True, {"query": "milk", "litres": 4})])
+        assert not claimed_a_change_it_did_not_make(turn), reply
+
+
+def test_a_size_does_not_excuse_a_product_nobody_touched() -> None:
+    """The sizes are ignored, not matched: a claim that also names a product
+    the calls never touched is still accused."""
+    turn = _claim(
+        "Added a 2 litre bottle of orange juice.",
+        [("dunnes.add_by_volume", True, True, {"query": "milk", "litres": 2})],
+    )
+    assert claimed_a_change_it_did_not_make(turn)
+
+
+def test_a_shared_container_word_still_corroborates_a_brand_name_reply() -> None:
+    """Sizes are set aside only before ACCUSING. A container shared with the
+    query is often the only link between a brand-name reply and a generic
+    request, and dropping it from both sides would accuse a true report."""
+    for reply, query in (
+        ("Added a can of Coca-Cola.", "coke can"),
+        ("Added two tins of John West.", "tuna tins"),
+    ):
+        turn = _claim(reply, [("dunnes.add_to_cart_by_name", True, True, {"query": query})])
+        assert not claimed_a_change_it_did_not_make(turn), reply
+
+
+def test_glued_and_multipack_measures_are_sizes_too() -> None:
+    for reply in ("Added 500mls.", "Added a 6x330ml multipack.", "Added 3kgs."):
+        turn = _claim(reply, [("dunnes.add_to_cart_by_name", True, True, {"query": "milk"})])
+        assert not claimed_a_change_it_did_not_make(turn), reply

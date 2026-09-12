@@ -293,6 +293,29 @@ _UNDISTINCTIVE = frozenset(
     }
 )
 
+# Sizes and containers: they say HOW MUCH changed, never WHAT. Kept out of
+# `_UNDISTINCTIVE` on purpose -- a shared container word is often the only link
+# between a brand-name reply and a generic query ("a can of Coca-Cola" for
+# "coke can"), so these still CORROBORATE a claim. They are only dropped before
+# ACCUSING one: a volume add is routinely reported by the packs it chose ("one
+# 3-litre and one 1-litre bottle"), and bake-off T3 (12-09-2026) replaced such a
+# true report with "no record of that".
+_MEASURE_WORDS = frozenset(
+    {
+        "litre", "litres", "liter", "liters", "millilitre", "millilitres",
+        "gram", "grams", "kilo", "kilos", "kilogram", "kilograms",
+        "pint", "pints", "dozen",
+        "pack", "packs", "packet", "packets", "multipack", "multipacks",
+        "bottle", "bottles", "carton", "cartons", "tin", "tins", "can", "cans",
+        "jar", "jars", "bag", "bags", "box", "boxes", "tub", "tubs",
+        "punnet", "punnets", "tray", "trays", "sachet", "sachets",
+        "loaf", "loaves", "size", "sizes", "unit", "units",
+    }
+)
+_GLUED_MEASURE_RE = re.compile(
+    r"(?:\d+x)?\d+(?:mls?|cls?|ltrs?|litres?|liters?|kgs?|grams?|kilos?|oz|lbs?|pk|packs?)"
+)
+
 
 def claimed_a_change_it_did_not_make(turn: TurnRecord) -> bool:
     """The reply says something was added/removed/set, and the dispatch record
@@ -382,7 +405,18 @@ def _claim_unsupported(clause: str, subject_words: set[str]) -> bool:
         # ever accuse.
         if not w.isdigit()
     }
-    return bool(named) and not (named & subject_words)
+    if named & subject_words:
+        return False
+    return bool(_without_measures(named))
+
+
+def _without_measures(words: set[str]) -> set[str]:
+    """What a claim names once its sizes are set aside -- including a number
+    glued to its unit ("500ml", "6x330ml"), the same measure as one token."""
+    return {
+        w for w in words
+        if w not in _MEASURE_WORDS and not _GLUED_MEASURE_RE.fullmatch(w)
+    }
 
 
 def asserts_a_change(text: str) -> bool:
