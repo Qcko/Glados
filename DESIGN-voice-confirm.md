@@ -325,6 +325,12 @@ stateDiagram-v2
 - Speaker identification for true per-user consent (ARCH section 3); a
   speech-energy floor on the VAD segment before a verdict counts.
 - A short re-ask ("yes or no?") on the first non-answer.
+- **Learned affirmatives (user direction, 12-09-2026):** when GLaDOS memory
+  is built, the per-user way of saying yes ("yeah", "yep", "go on") should
+  widen the lexicon from memory rather than from a hardcoded table. The
+  shape must stay the same as today: memory feeds the DETERMINISTIC matcher
+  (a per-user alias table, hash-gated per ARCH section 14), never a model
+  judging "did that sound like a yes" at grant time.
 - Per-tool spoken templates (`confirm_phrase`), if a `requires_confirmation`
   tool ever needs a nicer sentence than the generic render.
 - Everything listed under *Deferred* in `DESIGN-confirm-modal.md`.
