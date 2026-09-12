@@ -388,6 +388,22 @@ _ALREADY_ATTEMPTED = (
     "and its outcome is unknown"
 )
 
+# The same footing for a call that already came back a definitive failure this
+# turn. One identical retry is allowed -- a "busy, changes nothing" refusal is
+# worth one, and its text is the server's, which no control decision here may
+# read -- and every attempt after that is answered locally.
+#
+# Per drive, like `in_flight`: a specialist escalation mints a fresh record, so
+# the re-roll gets its own two sends. Deliberate -- escalation is a clean view of
+# the request -- and still bounded, where the observed turn was not.
+_MAX_IDENTICAL_RETRIES = 1
+_ALREADY_FAILED_NOTE = (
+    "GLaDOS note, not tool output: not sent -- this exact call already failed "
+    "twice in this turn, so do not send it again this turn. Use the error it "
+    "returned: change the arguments or the tool, or tell the user it did not "
+    "work."
+)
+
 # Answers from the cross-turn write ledger (core/write_ledger.py). Same
 # footing as `_ALREADY_ATTEMPTED`: harness-authored, never sent, and delivered
 # outside any <external> wrapper. `ok=True` like the intercom refusal, so the
@@ -495,6 +511,37 @@ def _in_flight_key(call: LLMToolCall) -> WriteKey:
     write ledger's canonicaliser so key order and letter case cannot disguise
     a re-issue as a new call."""
     return canonical_key(call)
+
+
+def _retries_spent(call: LLMToolCall, outcome: TurnRecord) -> bool:
+    """This exact call already failed definitively more often this turn than a
+    retry is worth."""
+    return outcome.failed_calls.get(_in_flight_key(call), 0) > _MAX_IDENTICAL_RETRIES
+
+
+def _note_definitive_failure(
+    call: LLMToolCall, result: MCPCallResult, outcome: TurnRecord
+) -> None:
+    """Count a sent call that came back failed with a KNOWN outcome. An
+    indeterminate one belongs to the in-flight set instead.
+
+    A success on the same server forgets that server's counts: "not in the
+    cart" or "not logged in" can stop being true once another call lands, and
+    telling them apart from a duplicate refusal would mean reading the server's
+    text. The observed loop had no success in between, so it stays covered."""
+    if result.indeterminate:
+        return
+    if result.ok:
+        _forget_failures_on(call.server, outcome)
+        return
+    key = _in_flight_key(call)
+    outcome.failed_calls[key] = outcome.failed_calls.get(key, 0) + 1
+
+
+def _forget_failures_on(server: str, outcome: TurnRecord) -> None:
+    prefix = f"{server}."
+    for key in [k for k in outcome.failed_calls if k[0].startswith(prefix)]:
+        del outcome.failed_calls[key]
 
 
 @dataclass(frozen=True)
@@ -2435,12 +2482,26 @@ class Organizer:
                 or (outcome.untrusted_seen and spec.mutating)
             )
             answered_from_ledger = _in_flight_key(tc) in outcome.in_flight
+            retry_refused = (
+                mutating and not answered_from_ledger and _retries_spent(tc, outcome)
+            )
             refusal = None
-            if not answered_from_ledger and mutating:
+            if not answered_from_ledger and not retry_refused and mutating:
                 refusal = self._refuse_write(tc, spec, session_id, utterance, trace)
-            # Either ledger answered locally: never sent, nothing ingested.
-            answered_locally = answered_from_ledger or refusal is not None
-            if answered_from_ledger:
+            # Any ledger answered locally: never sent, nothing ingested.
+            answered_locally = answered_from_ledger or retry_refused or refusal is not None
+            if retry_refused:
+                result = MCPCallResult(ok=False, error=_ALREADY_FAILED_NOTE)
+                log.warning(
+                    "refused identical retry of failed %s.%s in session %s",
+                    tc.server,
+                    tc.name,
+                    session_id,
+                )
+                trace.event(
+                    "retry_refused", call_id=tc.call_id, server=tc.server, name=tc.name
+                )
+            elif answered_from_ledger:
                 # Answered from the ledger, never re-sent. The first attempt is
                 # still running somewhere; issuing it again is the duplicate
                 # cart line this whole design exists to prevent. Ahead of the
@@ -2494,6 +2555,8 @@ class Organizer:
                 )
             if mutating and result.indeterminate and not denied:
                 outcome.in_flight.add(_in_flight_key(tc))
+            if mutating and not answered_locally and not denied:
+                _note_definitive_failure(tc, result, outcome)
             if mutating and not answered_locally and not denied:
                 self._ledger_outcome(tc, spec, session_id, result)
             await self._broadcast(

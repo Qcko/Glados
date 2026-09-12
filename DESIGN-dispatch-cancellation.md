@@ -139,6 +139,16 @@ it on a mutating timeout. A re-dispatch matching a marked key returns a syntheti
 `ok=False, indeterminate=True, "already attempted this turn; outcome unknown"`
 **without touching the wire**. The prose explains; the ledger enforces.
 
+**Its sibling for a KNOWN failure (added 12-09-2026).** The ledger above only
+marks an unknown outcome, so a call the server definitively refused went back on
+the wire every hop -- bake-off T8 sent one identical add eight times into the
+shop's duplicate refusal. `TurnRecord.failed_calls` counts definitive failures
+by the same key; one identical retry is sent (a "busy, changes nothing" refusal
+earns one, and telling it from a duplicate would mean reading server text), and
+later attempts are answered locally, `ok=False`, not wrapped. A success on the
+same server forgets that server's counts, since "not in the cart" can stop being
+true. Per drive: an escalation's fresh record gets its own two sends.
+
 ### The recovery path has to be reachable
 
 The advice "re-read state to check" sends the model straight back to the same

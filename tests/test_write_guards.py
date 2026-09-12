@@ -752,3 +752,107 @@ async def test_the_removal_guard_stands_down_off_english(tmp_path: Path) -> None
         await _say(h, llm, "add rajcata")
 
     assert len(remove.calls) == 1
+
+
+# ---- an identical retry of a call that already failed this turn -------------
+
+
+_REFUSED_AS_DUPLICATE = MCPCallResult(ok=False, error="Not run: this exact call already completed.")
+
+
+async def _one_turn_of_identical_adds(tmp_path: Path, attempts: int) -> tuple[_RecordingTool, _TurnScriptedLLM]:
+    tool = _RecordingTool(_add_spec(), _REFUSED_AS_DUPLICATE)
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    calls = [_add("milk", f"c{i}") for i in range(attempts)]
+    llm = _TurnScriptedLLM([calls])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "now add it back")
+    return tool, llm
+
+
+async def test_a_failed_call_gets_one_identical_retry_and_no_more(tmp_path: Path) -> None:
+    """Observed 12-09-2026 (bake-off T8): eight identical adds in one turn, each
+    refused by the server as a duplicate. The in-flight set only covers an
+    unknown outcome, so every one went back on the wire."""
+    tool, llm = await _one_turn_of_identical_adds(tmp_path, attempts=4)
+
+    assert len(tool.calls) == 2
+    tool_messages = [m.content or "" for m in llm.passes[-1] if m.role == "tool"]
+    assert len(tool_messages) == 4
+    assert all("already failed twice in this turn" in m for m in tool_messages[2:])
+    assert all("<external>" not in m for m in tool_messages[2:])
+    assert [e.get("event") for e in trace_events(tmp_path)].count("retry_refused") == 2
+
+
+async def test_a_retry_with_different_arguments_is_sent(tmp_path: Path) -> None:
+    """Only the IDENTICAL call is pointless; changing it is what the note asks for."""
+    tool = _RecordingTool(_add_spec(), _REFUSED_AS_DUPLICATE)
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM(
+        [[_add("milk", "c1"), _add("milk", "c2"), _add("low fat milk", "c3")]]
+    )
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "add the milk")
+
+    assert [c["query"] for c in tool.calls] == ["milk", "milk", "low fat milk"]
+
+
+async def test_the_retry_count_starts_again_next_turn(tmp_path: Path) -> None:
+    """A fresh turn is a fresh decision by the user, as for the in-flight set."""
+    tool = _RecordingTool(_add_spec(), _REFUSED_AS_DUPLICATE)
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    three = [_add("milk", f"c{i}") for i in range(3)]
+    llm = _TurnScriptedLLM([three, three])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "add the milk")
+        await _say(h, llm, "add the milk again")
+
+    assert len(tool.calls) == 4
+
+
+async def test_an_unknown_outcome_is_left_to_the_in_flight_set(tmp_path: Path) -> None:
+    """An indeterminate result is not a known failure: its re-issue is refused
+    as outstanding (never re-sent at all), not counted as a retry."""
+    tool = _RecordingTool(_add_spec(), MCPCallResult(ok=False, indeterminate=True, error="timeout"))
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM([[_add("milk", "c1"), _add("milk", "c2")]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "add the milk")
+
+    assert len(tool.calls) == 1
+    events = [e.get("event") for e in trace_events(tmp_path)]
+    assert "reissue_refused" in events and "retry_refused" not in events
+
+
+class _ScriptedResultsTool(_RecordingTool):
+    """Answers each call with the next result in the script."""
+
+    def __init__(self, spec: ToolSpec, results: list[MCPCallResult]) -> None:
+        super().__init__(spec)
+        self._results = list(results)
+
+    async def call(self, args: dict, envelope: CallEnvelope) -> MCPCallResult:
+        self.calls.append(dict(args))
+        return self._results.pop(0)
+
+
+async def test_a_success_on_the_same_server_forgets_the_failures(tmp_path: Path) -> None:
+    """"Not in the cart" can stop being true once an add lands, so the remove
+    that failed twice before it is sent again rather than refused."""
+    not_there = MCPCallResult(ok=False, error="not in cart")
+    remove = _ScriptedResultsTool(_remove_spec(), [not_there, not_there, not_there])
+    add = _RecordingTool(_add_spec())
+    mcp = MCPRegistry()
+    mcp.register(remove)
+    mcp.register(add)
+    drop = lambda i: _call("remove_from_cart", {"productId": "1"}, f"r{i}")  # noqa: E731
+    llm = _TurnScriptedLLM([[drop(0), drop(1), _add("milk", "a1"), drop(2)]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "swap the milk for a fresh one")
+
+    assert len(remove.calls) == 3
+    assert "retry_refused" not in [e.get("event") for e in trace_events(tmp_path)]

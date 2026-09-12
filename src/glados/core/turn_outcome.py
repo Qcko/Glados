@@ -120,6 +120,12 @@ class TurnRecord:
     # answers it from here instead of putting it back on the wire. Per turn,
     # because a fresh turn is a fresh decision by the user.
     in_flight: set[tuple[str, str]] = field(default_factory=set)
+    # Mutating calls this turn sent that came back a definitive failure, by the
+    # same key, counted. The in-flight set above covers only an UNKNOWN outcome;
+    # an identical call the server already refused would otherwise go back on
+    # the wire every hop (observed 12-09-2026: eight identical adds in one turn,
+    # each refused as a duplicate). Per turn, like `in_flight`.
+    failed_calls: dict[tuple[str, str], int] = field(default_factory=dict)
     # Rooms this turn has already handed a spoken message to. One compromised
     # turn must not be able to loop the intercom, and a model that re-emits the
     # same call must not double-announce.
