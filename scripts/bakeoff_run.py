@@ -252,6 +252,18 @@ def _resolve_runtime(ws_url: str) -> tuple[str, str]:
 
 _VERIFY_PROMPT = "Call view_cart and list what is in the cart."
 
+# The seed add is usually identical to T2's "milk" add a minute or two earlier.
+# Dunnes refuses an identical additive call inside two minutes (DunnesStoresMCP
+# 365047c) and removing the line does not reset that, so on 12-09-2026 the seed
+# was refused and the reset left an empty cart. Waiting it out keeps the seed
+# utterance plain; a repeat word would change what the write guards read.
+_DUPLICATE_WINDOW_S = 125
+
+
+async def _outlast_duplicate_window() -> None:
+    print(f"    (waiting {_DUPLICATE_WINDOW_S}s for the shop's duplicate-add window to lapse)")
+    await asyncio.sleep(_DUPLICATE_WINDOW_S)
+
 
 async def _reset_cart(ws) -> None:
     """Drive the cart back to a known single-milk state via RESET_PROMPTS, then
@@ -264,9 +276,10 @@ async def _reset_cart(ws) -> None:
     looks like a control and is not one.
     """
     print("=== CART RESET (--reset) -- empty + seed single milk ===")
-    for prompt in RESET_PROMPTS:
-        rep = await _run_turn(ws, prompt)
-        _print_turn(rep)
+    empty_prompt, seed_prompt = RESET_PROMPTS
+    _print_turn(await _run_turn(ws, empty_prompt))
+    await _outlast_duplicate_window()
+    _print_turn(await _run_turn(ws, seed_prompt))
     rep = await _run_turn(ws, _VERIFY_PROMPT)
     _print_turn(rep)
     lines = _count_cart_lines(rep)
