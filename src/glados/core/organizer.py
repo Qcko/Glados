@@ -84,6 +84,7 @@ from .utterance import (
     is_action_request,
     is_add_request,
     is_time_request,
+    spoken_count,
 )
 from .write_ledger import (
     REPEAT_ARG,
@@ -428,6 +429,18 @@ _QUANTITY_UNGROUNDED_NOTE = (
     "so the quantity here is a guess. Ask how many they want, or send the "
     "call again without a quantity to add one."
 )
+# The opposite refusal: the user DID say how many, and the call carries another
+# count or none. Refused rather than rewritten -- a misread count re-sent by the
+# model is visible in the next call, while a rewrite would put it silently in the
+# cart. The number is parsed from the user's own words, so it may be quoted, but
+# the note does not order it: a parse can still catch a size, and an order to
+# multiply by it would be a real over-add.
+_QUANTITY_DROPPED_NOTE = (
+    "GLaDOS note, not tool output: not sent -- the user said {count}, and this "
+    "call would add a different number of items. If {count} is how many they "
+    "want, send it again with quantity {count}. If {count} is part of the product "
+    "(a pack or a size), send the same call again unchanged."
+)
 # The refusal for an absolute set answering "add X". "Add" is relative and a
 # set is absolute; bridging them needs the cart's current count, which the
 # harness cannot see -- so even "add two milk" -> set(milk, 2) takes one out of
@@ -596,6 +609,47 @@ def _removal_unasked(call: LLMToolCall, spec: ToolSpec, utterance: str) -> bool:
     if not spec.removes or not _removes_with(call, spec):
         return False
     return is_add_request(utterance)
+
+
+def _quantity_dropped(call: LLMToolCall, spec: ToolSpec, utterance: str) -> int | None:
+    """The count the user said, when this add would send a different one --
+    including none at all, which the server reads as one. Observed 12-09-2026
+    (bake-off T10): "add two more milks" -> add(milk) with no quantity, one
+    carton added, turn reported done. None when there is nothing to compare."""
+    if not spec.additive or not spec.quantity_arg:
+        return None
+    said = spoken_count(utterance)
+    if said is None:
+        return None
+    return None if _sent_quantity(call, spec) == said else said
+
+
+def _sent_quantity(call: LLMToolCall, spec: ToolSpec) -> int | None:
+    """The count this add would send; an absent argument is the server's one."""
+    if call.args.get(spec.quantity_arg) is None:
+        return 1
+    return coerce_quantity(call.args.get(spec.quantity_arg))
+
+
+# Dropped-quantity refusals per tool per turn. A model that varies the query
+# ("milk", "milks", "whole milk") mints a new key each time; this stops that
+# walking the turn to its pass cap.
+_MAX_QUANTITY_NUDGES = 2
+
+
+def _considered_the_note(outcome: TurnRecord, key: WriteKey, sent: int | None) -> bool:
+    """The same call, with the same count, re-sent in a later pass than the one
+    it was refused in -- so the model has read the note and kept its count. Two
+    identical calls in one pass have read nothing, and a different count is a
+    new answer to judge."""
+    nudged = outcome.quantity_nudged.get(key)
+    return nudged is not None and nudged[1] == sent and nudged[0] < outcome.tool_passes
+
+
+def _nudges_spent(outcome: TurnRecord, call: LLMToolCall) -> bool:
+    tool = f"{call.server}.{call.name}"
+    refused = sum(1 for key in outcome.quantity_nudged if key[0] == tool)
+    return refused >= _MAX_QUANTITY_NUDGES
 
 
 def _set_answers_add(spec: ToolSpec, utterance: str) -> bool:
@@ -2433,6 +2487,7 @@ class Organizer:
         outcome: TurnRecord,
     ) -> None:
         utterance = _last_user_text(messages)
+        outcome.tool_passes += 1
         for tc in calls:
             spec = self.mcp.spec_for(tc.server, tc.name)
             # Rewrites the args, so it runs before the broadcast and the trace
@@ -2487,7 +2542,9 @@ class Organizer:
             )
             refusal = None
             if not answered_from_ledger and not retry_refused and mutating:
-                refusal = self._refuse_write(tc, spec, session_id, utterance, trace)
+                refusal = self._refuse_write(
+                    tc, spec, session_id, utterance, trace, outcome
+                )
             # Any ledger answered locally: never sent, nothing ingested.
             answered_locally = answered_from_ledger or retry_refused or refusal is not None
             if retry_refused:
@@ -2685,6 +2742,7 @@ class Organizer:
         session_id: str,
         utterance: str,
         trace,
+        outcome: TurnRecord,
     ) -> "_WriteRefusal | None":
         """The harness guards on a mutating call, in the order that keeps them
         honest: a removal the user never asked for is refused first, and an
@@ -2724,6 +2782,9 @@ class Organizer:
             return _WriteRefusal(
                 _local_result("use_add_tool", _SET_FOR_ADD_NOTE), satisfied=False
             )
+        mismatch = self._refuse_dropped_quantity(tc, spec, session_id, utterance, trace, outcome)
+        if mismatch is not None:
+            return mismatch
         if _quantity_invented(tc, spec, utterance):
             trace.event(
                 "quantity_refused",
@@ -2747,6 +2808,44 @@ class Organizer:
             )
             return None
         return self._refusal_for(tc, session_id, entry, trace)
+
+    def _refuse_dropped_quantity(
+        self,
+        tc: LLMToolCall,
+        spec: ToolSpec,
+        session_id: str,
+        utterance: str,
+        trace,
+        outcome: TurnRecord,
+    ) -> "_WriteRefusal | None":
+        """Refuse an add whose count differs from the one the user said -- ONCE
+        per identical call per turn. The count is parsed from speech and can be
+        part of the product ("a 6 pack" slipping past the parser), so a model
+        that re-sends the very same call is taken to have considered the note,
+        and the call goes through. That bounds the worst case to the old
+        behaviour instead of a loop to the pass cap."""
+        said = _quantity_dropped(tc, spec, utterance)
+        if said is None:
+            return None
+        sent = _sent_quantity(tc, spec)
+        key = canonical_key(tc, [spec.quantity_arg])
+        facts = dict(call_id=tc.call_id, server=tc.server, name=tc.name, said=said, sent=sent)
+        if _considered_the_note(outcome, key, sent) or _nudges_spent(outcome, tc):
+            trace.event("quantity_mismatch_overridden", **facts)
+            return None
+        outcome.quantity_nudged[key] = (outcome.tool_passes, sent)
+        log.warning(
+            "refused %s.%s in session %s: the user said %d",
+            tc.server,
+            tc.name,
+            session_id,
+            said,
+        )
+        trace.event("quantity_mismatch_refused", **facts)
+        return _WriteRefusal(
+            _local_result("quantity_mismatch", _QUANTITY_DROPPED_NOTE.format(count=said)),
+            satisfied=False,
+        )
 
     def _refusal_for(
         self, tc: LLMToolCall, session_id: str, entry: WriteEntry, trace

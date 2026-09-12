@@ -126,6 +126,16 @@ class TurnRecord:
     # the wire every hop (observed 12-09-2026: eight identical adds in one turn,
     # each refused as a duplicate). Per turn, like `in_flight`.
     failed_calls: dict[tuple[str, str], int] = field(default_factory=dict)
+    # Adds refused this turn for a count that differs from the one the user
+    # said: the call minus its quantity -> (tool pass it was refused in, the
+    # quantity it sent). The same call with the same quantity, sent again in a
+    # LATER pass, goes through -- the count is parsed from speech and may be
+    # part of the product, and a later pass is one that read the note.
+    quantity_nudged: dict[tuple[str, str], tuple[int, int | None]] = field(
+        default_factory=dict
+    )
+    # Tool-call passes run so far this turn; stamps the nudges above.
+    tool_passes: int = 0
     # Rooms this turn has already handed a spoken message to. One compromised
     # turn must not be able to loop the intercom, and a model that re-emits the
     # same call must not double-announce.

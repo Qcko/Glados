@@ -21,7 +21,7 @@ from glados.core.turn_outcome import (
     classify,
 )
 from glados.core.config import ServerEntry, ToolOverlay
-from glados.core.utterance import has_quantity_cue, has_repeat_cue, is_add_request
+from glados.core.utterance import has_quantity_cue, has_repeat_cue, is_add_request, spoken_count
 from glados.core.write_ledger import WriteLedger, canonical_key, coerce_quantity
 from glados.mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
 from tests.organizer_harness import CLIENT_ID, desk_organizer, trace_events
@@ -856,3 +856,176 @@ async def test_a_success_on_the_same_server_forgets_the_failures(tmp_path: Path)
 
     assert len(remove.calls) == 3
     assert "retry_refused" not in [e.get("event") for e in trace_events(tmp_path)]
+
+
+# ---- a count the user said, dropped by the model ----------------------------
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("add two more milks to the cart", 2),
+        ("Add two more milks to the cart.", 2),
+        ("add 3 butters", 3),
+        ("add one milk", 1),
+        ("put 4 yoghurts in", 4),
+        ("please add another two milks", 2),
+        ("add milk", None),
+        ("add some milk", None),
+        ("add more milk", None),
+        ("add 2 litres of milk", None),
+        ("add two pints of milk", None),
+        ("add 500 grams of mince", None),
+        ("add 2 carrots and an onion", None),
+        ("add 2 carrots, 3 onions", None),
+        ("add two milks then bread", None),
+        ("add two milks with some bread", None),
+        ("remove two milks", None),
+        ("set the milk to two", None),
+        ("add 7up", None),
+        ("add 1L milk", None),
+        # A number that is part of the product, found by the code duck: the
+        # refusal would have named it and steered the model to multiply.
+        ("add a 6 pack of eggs", None),
+        ("add a six pack of beer", None),
+        ("add 6 pack of eggs", None),
+        ("add weetabix 24 pack", None),
+        ("add a 12 inch pizza", None),
+        ("add Heinz 57 sauce", None),
+        ("add number 5 pasta", None),
+        ("add 2% milk", None),
+        ("add two 2-litre milks", 2),
+        ("add 2-litre milk", None),
+        ("buy a dozen eggs", None),
+        ("add half a dozen eggs", None),
+        ("add 2 dozen eggs", None),
+        ("add milk for 2 people", None),
+        ("add bread by 5", None),
+        ("add 2.5kg potatoes", None),
+        ("add 1.5 litre coke", None),
+    ],
+)
+def test_spoken_count(text: str, expected: int | None) -> None:
+    assert spoken_count(text) == expected
+
+
+@pytest.mark.parametrize(
+    "args, sent",
+    [
+        ({"query": "milk"}, False),
+        ({"query": "milk", "quantity": 1}, False),
+        ({"query": "milk", "quantity": 3}, False),
+        ({"query": "milk", "quantity": 2}, True),
+        ({"query": "milk", "quantity": "2"}, True),
+    ],
+)
+async def test_an_add_must_carry_the_count_the_user_said(tmp_path: Path, args: dict, sent: bool) -> None:
+    """Bake-off T10 (12-09-2026): "add two more milks" -> add(milk) with no
+    quantity; one carton went in and the turn was reported done."""
+    tool = _RecordingTool(_add_spec())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM([[_call("add_to_cart_by_name", args)]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "add two more milks to the cart")
+
+    assert (len(tool.calls) == 1) is sent
+    if not sent:
+        message = _last_tool_message(llm)
+        assert "quantity_mismatch" in message and "quantity 2" in message
+        assert "<external>" not in message
+        assert "quantity_mismatch_refused" in [e.get("event") for e in trace_events(tmp_path)]
+
+
+async def test_the_model_can_recover_by_resending_the_count(tmp_path: Path) -> None:
+    tool = _RecordingTool(_add_spec())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM(
+        [[_add("milk", "c1", repeat=True), _add("milk", "c2", repeat=True, quantity=2)]]
+    )
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "add two more milks to the cart")
+
+    assert [c.get("quantity") for c in tool.calls] == [2]
+
+
+async def test_an_ambiguous_utterance_leaves_the_call_alone(tmp_path: Path) -> None:
+    """A list of items: the count cannot be tied to this call, so it stands down."""
+    tool = _RecordingTool(_add_spec())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM([[_add("onion", "c1")]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "add 2 carrots and an onion")
+
+    assert len(tool.calls) == 1
+
+
+async def test_the_same_call_sent_again_goes_through(tmp_path: Path) -> None:
+    """The count is parsed from speech and can be part of the product, so the
+    refusal is a nudge, not a wall: the identical call re-sent after it is taken
+    as considered. Bounds a wrong parse to the old behaviour, not a loop."""
+    tool = _RecordingTool(_add_spec())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM([[_add("milk", "c1", repeat=True), _add("milk", "c2", repeat=True)]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "add two more milks to the cart")
+
+    assert len(tool.calls) == 1
+    events = [e.get("event") for e in trace_events(tmp_path)]
+    assert events.count("quantity_mismatch_refused") == 1
+    assert "quantity_mismatch_overridden" in events
+
+
+async def test_two_identical_calls_in_one_pass_do_not_override(tmp_path: Path) -> None:
+    """Found by the code duck: the second of two identical calls in the SAME
+    pass has read no note, so it must be refused too, not waved through."""
+    tool = _RecordingTool(_add_spec())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+
+    class _TwoAtOnce(_TurnScriptedLLM):
+        async def chat(self, messages, tools):
+            self.passes.append([m.model_copy(deep=True) for m in messages])
+            if self._pass == 0:
+                self._pass = 1
+                yield _add("milk", "c1", repeat=True)
+                yield _add("milk", "c2", repeat=True)
+                return
+            yield LLMText(text=self._reply)
+
+    llm = _TwoAtOnce([[]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "add two more milks to the cart")
+
+    assert tool.calls == []
+
+
+async def test_a_different_wrong_count_is_refused_again(tmp_path: Path) -> None:
+    """The override is for the SAME count re-sent. A new wrong answer is judged."""
+    tool = _RecordingTool(_add_spec())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM(
+        [[_add("milk", "c1", repeat=True), _add("milk", "c2", repeat=True, quantity=3)]]
+    )
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "add two more milks to the cart")
+
+    assert tool.calls == []
+
+
+async def test_varying_the_query_cannot_walk_the_turn_to_its_pass_cap(tmp_path: Path) -> None:
+    tool = _RecordingTool(_add_spec())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    queries = ["milk", "milks", "whole milk", "low fat milk"]
+    llm = _TurnScriptedLLM([[_add(q, f"c{i}", repeat=True) for i, q in enumerate(queries)]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "add two more milks to the cart")
+
+    events = [e.get("event") for e in trace_events(tmp_path)]
+    assert events.count("quantity_mismatch_refused") == 2
+    assert len(tool.calls) == 2

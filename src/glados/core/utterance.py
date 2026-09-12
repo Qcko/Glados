@@ -187,6 +187,60 @@ def has_quantity_cue(text: str) -> bool:
     return bool(text) and _QUANTITY_CUE_RE.search(text) is not None
 
 
+_COUNT_VALUES = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+}
+# The count must sit directly after the add verb ("add [another|more] two
+# milks", "put 4 yoghurts in"). Anywhere else a number is far more often part of
+# the product -- "a 6 pack", "Heinz 57", "number 5 pasta", "milk for 2 people" --
+# and the refusal it would trigger names that number. "dozen" is absent on
+# purpose: "a dozen eggs" is one box as often as twelve.
+_ANCHORED_COUNT_RE = re.compile(
+    rf"^{_LEAD_IN}(?:add|put|buy|order)\s+(?:(?:another|more|extra)\s+)?"
+    r"(\d+|" + "|".join(_COUNT_VALUES) + r")(?![%\w-]|\.\d)(?:\s+(\w+))?",
+    re.IGNORECASE,
+)
+# The word after the count says it is a size, not a number of items.
+_SIZE_WORDS = frozenset(
+    {
+        "l", "ml", "cl", "litre", "litres", "liter", "liters", "g", "kg", "gram",
+        "grams", "kilo", "kilos", "kilogram", "kilograms", "lb", "lbs", "pound",
+        "pounds", "oz", "ounce", "ounces", "pint", "pints", "percent", "euro",
+        "euros", "cent", "cents", "pack", "packs", "multipack", "pk", "x",
+        "inch", "inches", "dozen",
+    }
+)
+# Several items, or a count that may belong to another one: stand down.
+_MANY_ITEMS_RE = re.compile(
+    r"\band\b|,|&|\bplus\b|\beach\b|\bper\b|\bthen\b|\bwith\b|\balso\b|\btoo\b"
+    r"|\bfor\b|\bby\b",
+    re.IGNORECASE,
+)
+
+
+def spoken_count(text: str) -> int | None:
+    """The item count an add-only request names right after its verb ("add two
+    more milks" -> 2), or None whenever it cannot be read with confidence: not
+    an add-only request, no count in that position, a size ("add 2 litres", "a
+    6 pack"), or a list or compound request. None means the dropped-quantity
+    guard stands down."""
+    if not is_add_request(text) or _MANY_ITEMS_RE.search(text):
+        return None
+    match = _ANCHORED_COUNT_RE.match(text.strip())
+    if match is None or (match.group(2) or "").lower() in _SIZE_WORDS:
+        return None
+    count = _count_value(match.group(1))
+    return count if count > 0 else None
+
+
+def _count_value(token: str) -> int:
+    lowered = token.lower()
+    return int(lowered) if lowered.isdigit() else _COUNT_VALUES[lowered]
+
+
 def has_repeat_cue(text: str) -> bool:
     """True if the utterance asks for something in addition to what was
     already done ("add another", "more tomatoes", "do that again")."""

@@ -16,8 +16,9 @@ second write was not identical. The organizer's in-flight ledger
 were two turns. And the project rule stands: small local models follow prompts
 unreliably, so the fix is code in the harness, not a line in the system prompt.
 
-Four guards (the third added after a re-run, invariant 10; the fourth split
-out of guard 1, invariant 11), all in
+Five guards (the third added after a re-run, invariant 10; the fourth split
+out of guard 1, invariant 11; the fifth for a count the model dropped,
+invariant 12), all in
 `Organizer._run_tool_calls`, all ahead of the confirmation gate (like the in-flight ledger: a call that is not being sent must not prompt
 the room), and all standing down when `reply_language` is not English, because
 the cue tables cannot read anything else.
@@ -36,7 +37,9 @@ flowchart TD
     G3 -- yes --> R3["refuse: not_removed<br/>ok=True, satisfied=False"]
     G3 -- no --> G4{"count_arg (absolute set)<br/>under an add-only utterance?"}
     G4 -- yes --> R4["refuse: use_add_tool<br/>ok=True, satisfied=False"]
-    G4 -- no --> G1{"quantity_arg != 1<br/>and no count in utterance?"}
+    G4 -- no --> G5{"additive with quantity_arg,<br/>user said one count N,<br/>call sends another?"}
+    G5 -- yes --> R5["refuse: quantity_mismatch<br/>ok=True, satisfied=False"]
+    G5 -- no --> G1{"quantity_arg != 1<br/>and no count in utterance?"}
     G1 -- yes --> R1["refuse: quantity_needed<br/>ok=True, satisfied=False"]
     G1 -- no --> G2{"additive and<br/>ledger has the key<br/>inside the window?"}
     G2 -- no --> C["confirm gate -> dispatch"]
@@ -50,6 +53,7 @@ flowchart TD
     R2 --> T
     R3 --> T
     R4 --> T
+    R5 --> T
     L --> T
     X --> T
     T["tool message to the model<br/>(refusals unwrapped: GLaDOS wrote them)"]
@@ -143,6 +147,38 @@ The in-flight ledger uses the same canonicaliser with nothing dropped.
     the milk to two" carry removal cues, so their sets go through. A
     `delta_arg` tool is exempt: a delta of one is "add one", not a guess. The
     cost is one round-trip when the model reaches for the set first.
+
+12. **A count the user said must reach the call** (added 12-09-2026, bake-off
+    T10). "Add two more milks" became `add_to_cart_by_name(milk, repeat=true)`
+    with no quantity: one carton went in and the turn was `done`. Guard 1 only
+    refuses a count the user never said. `utterance.spoken_count` reads a count
+    ONLY directly after the add verb ("add [another|more] two milks", "put 4
+    yoghurts in"); an additive `quantity_arg` call sending any other count --
+    absent counts as one -- is refused with `quantity_mismatch`,
+    `satisfied=False`. Three limits, all from the code duck, which found the first
+    version reading "a 6 pack", "Heinz 57" and "2% milk" as counts and the note
+    then ORDERING the model to multiply -- a real over-add from a correct call:
+    - The parse stands down on anything it cannot tie to the call: a number
+      not right after the verb, a size or pack word after it ("2 litres", "6
+      pack", "12 inch", "dozen"), a hyphen or percent, and any list or compound
+      ("and", commas, "then", "with", "for", "by", "each", "per").
+    - The note names the number but does not order it: count, or part of the
+      product, the model decides.
+    - A nudge, not a wall (`TurnRecord.quantity_nudged`, keyed on the call
+      minus its quantity). The same call with the SAME count, re-sent in a
+      LATER pass, goes through (`quantity_mismatch_overridden`): that pass read
+      the note and kept its count. Two identical calls in one pass have read
+      nothing and are both refused; a different wrong count is judged afresh.
+      At most two refusals per tool per turn, so a model varying the query
+      ("milk", "whole milk") cannot walk the turn to its pass cap. A wrong parse
+      costs a round-trip; a model that ignores the note still under-adds, and the
+      override adds no note of its own, because it cannot tell a real drop from
+      a pack size and "you asked for 6" after "a 6 pack" would mislead.
+    Refused, not rewritten: unlike `repeat` (a flag the ledger and the server
+    backstop), a wrong quantity is money with nothing downstream to catch it.
+    Accepted gaps: "add 12 eggs" means twelve items here, whatever the shop
+    sells; a model that ignores the note twice still under-adds, as before.
+    `adjust_*` (`delta_arg`) is not additive and is not checked.
 
 ## Cue tables
 
