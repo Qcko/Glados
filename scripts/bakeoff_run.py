@@ -118,7 +118,9 @@ TESTS: list[BakeoffTest] = [
     BakeoffTest(
         "T5",
         ["Which of my favorites are on sale?"],
-        "lists only promo items; describes IsRealSale=null as unverified.",
+        "lists only promo items; never misrepresents an unverified item (not a "
+        "verified bargain, not 'not a real sale'). Naming it as unverified is a "
+        "bonus, not required (relaxed 12-09-2026).",
     ),
     BakeoffTest(
         "T6",
