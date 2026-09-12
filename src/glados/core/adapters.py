@@ -68,6 +68,9 @@ class ToolSpec(BaseModel):
     removes: bool = False
     count_arg: str | None = None
     delta_arg: str | None = None
+    # Spoken confirmation template, set via the overlay after it has been
+    # checked against `parameters`; see ToolOverlay.confirm_phrase.
+    confirm_phrase: str | None = None
 
     @property
     def qualified(self) -> str:

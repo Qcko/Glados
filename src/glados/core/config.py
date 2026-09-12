@@ -5,6 +5,7 @@ Schema is intentionally tiny in v0 -- fields will accrete as adapters land.
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from datetime import time as clock_time
@@ -13,7 +14,10 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .confirm_phrase import PhraseError, parse_phrase
 from .protocols import Role
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # `adapters` is import-light, but keep config dependency-free at runtime
     from .adapters import ToolSpec
@@ -497,6 +501,24 @@ class ToolOverlay(BaseModel):
     removes: bool = False
     count_arg: str | None = None
     delta_arg: str | None = None
+    # The spoken confirmation question as a sentence (core/confirm_phrase.py,
+    # DESIGN-voice-confirm.md "The spoken question"): `{arg}` speaks a value,
+    # `{arg:A|B}` speaks A when a boolean is true and B when false, `[ ... ]`
+    # is dropped when an argument inside is absent. Every argument the call
+    # carries must be spoken by it, fixed-typed ones before free text, or the
+    # generic form is spoken instead. The dialog still shows the raw
+    # arguments. A template that does not parse is a boot error.
+    confirm_phrase: str | None = None
+
+    @field_validator("confirm_phrase")
+    @classmethod
+    def _phrase_parses(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                parse_phrase(value)
+            except PhraseError as exc:
+                raise ValueError(f"confirm_phrase {value!r}: {exc}") from exc
+        return value
 
     @model_validator(mode="after")
     def _removal_flags_are_live(self) -> "ToolOverlay":
@@ -583,6 +605,7 @@ class ServerEntry(BaseModel):
         overlay = self.tool_overlays.get(spec.name) or ToolOverlay()
         return spec.model_copy(
             update={
+                "confirm_phrase": _phrase_fitting(overlay, spec),
                 "untrusted": self.untrusted or overlay.untrusted,
                 "requires_confirmation": overlay.requires_confirmation,
                 "mutating": overlay.mutating,
@@ -598,6 +621,22 @@ class ServerEntry(BaseModel):
                 "delta_arg": overlay.delta_arg,
             }
         )
+
+
+def _phrase_fitting(overlay: "ToolOverlay", spec: "ToolSpec") -> str | None:
+    """The overlay's template, or None with a warning when it cannot fit the
+    tool's schema -- a renamed argument is then loud at server start rather
+    than a silent generic fallback on every ask."""
+    if overlay.confirm_phrase is None:
+        return None
+    try:
+        problem = parse_phrase(overlay.confirm_phrase).schema_problem(spec.parameters)
+    except Exception as exc:
+        problem = f"schema could not be read ({exc})"
+    if problem is None:
+        return overlay.confirm_phrase
+    _log.warning("confirm_phrase for %s dropped: %s", spec.qualified, problem)
+    return None
 
 
 class ServersConfig(BaseModel):

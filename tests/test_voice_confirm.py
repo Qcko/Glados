@@ -219,7 +219,7 @@ def test_render_speaks_fixed_args_before_text_and_quotes_text() -> None:
         {"product_name": "tomatoes, quantity one", "quantity": 4, "fresh": True},
     )
     assert q == (
-        "GLaDOS needs a yes: dunnes add to cart by name, quantity 4, fresh yes, "
+        "Say yes to: dunnes add to cart by name, quantity 4, fresh true, "
         "product name, quote, tomatoes, quantity one, unquote -- shall I go ahead?"
     )
 
@@ -292,6 +292,30 @@ async def test_spoken_yes_grants(tmp_path: Path) -> None:
         assert voice["verdict"] == "yes" and voice["client_id"] == "k-mic"
         # The answer was consumed: not a transcript, not a turn.
         assert _transcripts(sink) == ["do it"]
+async def test_a_tool_with_a_phrase_is_asked_as_a_sentence(tmp_path: Path) -> None:
+    tts = _FakeTts()
+    async with _make_org(tmp_path, [MIC, SPEAKER], tts=tts) as (org, _, tool):
+        tool.spec = tool.spec.model_copy(update={"confirm_phrase": "count {x} things"})
+        await org.handle_user_text("k-mic", "do it")
+        await _wait_until_asked(org, "kitchen")
+        assert tts.spoken == ["Say yes to: count 1 things -- shall I go ahead?"]
+        assert "tool_confirm_phrase_fallback" not in _kinds(tmp_path)
+
+
+async def test_a_phrase_that_misses_an_argument_falls_back_and_is_traced(
+    tmp_path: Path,
+) -> None:
+    tts = _FakeTts()
+    llm = _ToolCallingLLM({"x": 1, "y": "smuggled"})
+    async with _make_org(tmp_path, [MIC, SPEAKER], tts=tts, llm=llm) as (org, _, tool):
+        tool.spec = tool.spec.model_copy(update={"confirm_phrase": "count {x} things"})
+        await org.handle_user_text("k-mic", "do it")
+        await _wait_until_asked(org, "kitchen")
+        assert tts.spoken == [render_confirm_question("t.boom", {"x": 1, "y": "smuggled"})]
+        fallback = next(
+            e for e in _events(tmp_path) if e["event"] == "tool_confirm_phrase_fallback"
+        )
+        assert fallback["reason"] == "unmentioned" and fallback["keys"] == ["y"]
 
 
 async def test_spoken_no_denies_and_does_not_fail_the_turn(tmp_path: Path) -> None:
@@ -508,7 +532,7 @@ async def test_a_clipped_question_is_not_asked_aloud(tmp_path: Path) -> None:
     ) as (org, sink, tool):
         await org.handle_user_text("k-mic", "do it")
         await org.flush()
-        assert not any(t.startswith("GLaDOS needs a yes") for t in tts.spoken)
+        assert not any(t.startswith("Say yes to") for t in tts.spoken)
         skipped = [e for e in _events(tmp_path) if e["event"] == "tool_confirm_voice_skipped"]
         assert skipped and skipped[0]["reason"] == "clipped"
 

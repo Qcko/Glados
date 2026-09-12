@@ -77,7 +77,7 @@ from .turn_outcome import (
     said_nothing,
 )
 from ..servers.room_intercom import MAX_MESSAGE_CHARS, SPEAK_INTO
-from .confirm_phrase import render_confirm_question, tts_safe
+from .confirm_phrase import compose_confirm_question, tts_safe
 from .utterance import (
     classify_confirm_answer,
     has_quantity_cue,
@@ -3470,12 +3470,20 @@ class Organizer:
         room_id = pending.room_id
         if not (self._room_can_hear(room_id) and self._room_can_answer_by_voice(room_id)):
             return plain_deadline
-        question = render_confirm_question(spec.qualified, args)
+        spoken = compose_confirm_question(spec.qualified, args, spec.confirm_phrase)
+        if spoken.fallback is not None:
+            trace.event(
+                "tool_confirm_phrase_fallback",
+                request_id=pending.request_id,
+                reason=spoken.fallback,
+                keys=list(spoken.fallback_keys),
+            )
+        question = spoken.text
         if question is None:
             trace.event(
                 "tool_confirm_voice_skipped",
                 request_id=pending.request_id,
-                reason="clipped",
+                reason=spoken.skipped,
             )
             return plain_deadline
         trace.event(

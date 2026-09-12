@@ -171,17 +171,122 @@ the deadline the server will actually enforce:
    resolution into the transcript: "<tool> allowed by voice", "... denied on
    screen", "... timed out -- not sent".
 
-The question: `"GLaDOS needs a yes: <server> <tool words>, <arg> <value>, ...
--- shall I go ahead?"`. Fixed args (numbers, booleans, null) first, in call
-order; free text last, each as `<key>, quote, <text>, unquote`, so a product
-name cannot mimic a following `quantity one`. Nested values are JSON. Text
-goes through the same printable-only / whitespace-collapse rule as the
+The generic question: `"Say yes to: <server> <tool words>, <arg> <value>,
+... -- shall I go ahead?"`. Fixed args (numbers, booleans, null) first, in
+call order; free text last, each as `<key>, quote, <text>, unquote`, so a
+product name cannot mimic a following `quantity one`. Nested values are JSON.
+Text goes through the same printable-only / whitespace-collapse rule as the
 intercom (`_spoken_message`, now shared). Limits: 8 args, 60 characters per
 rendered value, key or tool name, 240 characters of question body; over any
-of them -> `None`, nothing is ever clipped. The suffix ends on a word outside
-the lexicon: the desk's mic is not gated server-side (`_arm_gate_after_send`
-pops the gate in a room with no `speaker`), so a VAD split near the end of a
-"yes or no?" tail could transcribe as "no?" and self-deny.
+of them -> `None`, nothing is ever clipped. The prefix names the one accepted
+token at the FRONT (the lexicon is a bare "yes", so the sentence has to say
+so) and the suffix ends on a word outside the lexicon: the desk's mic is not
+gated server-side (`_arm_gate_after_send` pops the gate in a room with no
+`speaker`), so a VAD split near the end of a "yes or no?" tail could
+transcribe as "no?" and self-deny -- and "yes" anywhere near the tail would
+self-grant. Numbers: a negative is "minus 1"; a run of five or more digits (a
+product id) is read digit by digit in threes, "1 0 0, 8 0 6, 8 9 3", because
+TTS otherwise reads it in the hundreds of millions and the listener cannot
+check an id either way -- what they verify on an id-bearing tool is the verb
+and the count, so those come first.
+
+#### Per-tool sentences (`confirm_phrase`, landed 12-09-2026)
+
+The generic form is what the user hears most, and it is an argument dump.
+A tool's `servers.toml` overlay may carry a template that reads as a
+sentence -- `add[ {quantity}] {repeat:more |}{query} to the cart` is heard
+as "Say yes to: add 2 more milk to the cart -- shall I go ahead?". Design
+roster 12-09-2026 (architect, security, UX; user sign-off on the two open
+calls). The home is the overlay because core carries no server's field
+names, and a template from the server itself would be the distrusted party
+phrasing what the user approves.
+
+The grammar is deliberately tiny and hand-parsed (`parse_phrase`, one
+parser, cached, so boot and render see the same tree): `{arg}` speaks a
+value; `{arg:A|B}` speaks A when a boolean is true and B when false, either
+side may be empty; `[ ... ]` is dropped whole when an argument inside is
+absent from the call. Anything else is literal. No nesting, no placeholder
+twice, no empty `{}`, no segment without a placeholder: each is a boot
+error (`ToolOverlay` validator), never a runtime fallback.
+
+What survives from the generic form, and how:
+
+- **Every argument the call carries is heard.** This was the objection that
+  dropped templates from v1 ("a template naming the product but not the
+  copied `product_id` is the attack"), and the coverage check is its direct
+  answer: after substitution, any present key the template did not speak --
+  including one inside a segment that was dropped for another reason -- sets
+  the template aside for the generic form (`tool_confirm_phrase_fallback
+  reason=unmentioned`, bounded keys). The model may OMIT an argument
+  (`quantity`), and the segment vanishes; the harness never speaks a
+  default it invented, and the dialog shows the raw call either way.
+- **Fixed before free text**, now without `quote ... unquote`: the literal
+  tail the author wrote is what follows the value, and the real number was
+  already heard. At most one free-text value per template (two could mimic
+  each other). A switch requires a real `bool` (a string `"false"` is
+  `not_bool` -> fallback) and counts as fixed for ordering; a plain
+  placeholder given a bool or null is `not_a_number` -> fallback, so "add
+  yes more milk" is never heard. The free-text / fixed split is known from
+  the MCP schema, so it is checked ONCE when the overlay meets the spec
+  (`ServerEntry.apply_flags` -> `Phrase.schema_problem`): an unknown
+  argument name, a fixed placeholder after free text, a switch on a
+  non-boolean, a boolean without a switch, two free-text placeholders --
+  each drops the template with a
+  WARNING at server start, so a renamed Dunnes argument is loud rather than
+  a robotic sentence nobody explains. A nullable type list (`["integer",
+  "null"]`) is fixed; `anyOf`, `$ref`, a boolean-schema property or any
+  other shape is free text (the ordering-strict side), and a schema the
+  check cannot read at all drops the template with the same warning rather
+  than failing boot. The per-call checks remain as the fail-safe for a value
+  that contradicts the schema.
+- **The body never contains a stretch that classifies as an answer** --
+  both forms. An injected `query = "milk, yes please"` split by the VAD at
+  the comma on the ungated desk mic would transcribe "Yes, please." and
+  grant its own request. The rendered body is split at the pauses TTS makes
+  (`, . ; : ! ?`, quotes, brackets and a spaced dash) and every run of
+  words inside a stretch is classified; any hit makes the question
+  dialog-only (`tool_confirm_voice_skipped reason=answer_in_value`). Checked
+  on the body rather than the values because a key the model chose
+  (`{"yes": "milk"}`), a JSON value, or a template literal can carry it too;
+  a template whose own words -- literals or either side of a switch -- read
+  as an answer is a boot error. Measured on grocery names, the hits are
+  products whose name starts with "no" / "don't" ("No Added Sugar", "Don't
+  Go Nuts"): each is a self-deny if split, so a screen tap for those is the
+  right trade. The same rule found that the
+  generic form spoke a boolean as "fresh yes," -- booleans are now "true" /
+  "false", which the lexicon does not contain. Partly pre-existing: the old
+  wrapper only put a non-lexicon token on each side of a value.
+- **Same limits, same never-clip.** A templated body over 240 characters is
+  dialog-only, NOT a generic fallback (which is longer still). Spacing is the
+  renderer's problem, not the author's: doubled spaces and a space before a
+  comma from an empty switch side are collapsed.
+
+The decision on an empty switch side: `{repeat:more |}` speaks nothing for
+`repeat=false`, which is a present argument going unheard. Kept, on the
+user's call: the invariant guards against an INJECTED VALUE going unheard,
+a boolean carries no payload, and the silence is the trusted config author
+asserting the false case is the plain reading ("add 2 milk" is not a
+repeat). A future rule of two may forbid it if a second switch wants it.
+
+```mermaid
+flowchart TD
+    A[gated call: spec + args] --> B{spec.confirm_phrase?}
+    B -- none --> G[generic form:<br/>tool words, fixed args, then<br/>key, quote, text, unquote]
+    B -- template --> R[render from the parsed tree:<br/>drop segments with an absent arg,<br/>switch on bool, substitute values]
+    R --> C{every present arg spoken?<br/>fixed before text?<br/>one text value? switches are bool?}
+    C -- no: trace the fallback --> G
+    C -- yes --> L
+    G --> L{body within 240 chars?}
+    L -- no --> S[dialog only<br/>voice_skipped clipped]
+    L -- yes --> V{any stretch of the body<br/>classifies as yes or no?}
+    V -- yes --> S2[dialog only<br/>voice_skipped answer_in_value]
+    V -- no --> Q["Say yes to: body -- shall I go ahead?"]
+    Q --> SP[_speak, arm the voice answer]
+    subgraph boot["at server start (once per tool)"]
+        P[parse_phrase: grammar error or<br/>answer-like literal = boot error] --> F[schema_problem vs MCP inputSchema:<br/>unknown arg, fixed after text,<br/>non-bool switch, two texts -> WARN, drop]
+    end
+    F -. sets .-> B
+```
 
 ### The answer
 
@@ -345,8 +450,8 @@ stateDiagram-v2
   shape must stay the same as today: memory feeds the DETERMINISTIC matcher
   (a per-user alias table, hash-gated per ARCH section 14), never a model
   judging "did that sound like a yes" at grant time.
-- Per-tool spoken templates (`confirm_phrase`), if a `requires_confirmation`
-  tool ever needs a nicer sentence than the generic render.
+- ~~Per-tool spoken templates (`confirm_phrase`)~~ -- landed 12-09-2026, see
+  "Per-tool sentences" above.
 - Everything listed under *Deferred* in `DESIGN-confirm-modal.md`.
 
 ## Verification

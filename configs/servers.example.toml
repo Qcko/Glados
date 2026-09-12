@@ -179,11 +179,20 @@ timeout_s = 400.0
 # refuses a count the user never said. Both on the adds only -- set/adjust
 # tools take 1 and -1 as real requests. Observed 11-09-2026: "add tomatoes"
 # twice became remove + add four.
+# `confirm_phrase` is the spoken confirmation question as a sentence
+# (core/confirm_phrase.py; DESIGN-voice-confirm.md "The spoken question").
+# `{arg}` speaks the value, `{arg:A|B}` speaks A when a boolean is true and B
+# when false, `[ ... ]` is dropped when an argument inside is absent. Numbers
+# and switches must come before the free-text argument, and every argument
+# the call carries must be spoken, or GLaDOS speaks the generic form instead
+# (the dialog always shows the raw arguments). A template that does not
+# parse, or names an argument the tool does not have, is refused at start-up.
 [server.tool_overlays.add_to_cart]
 mutating = true
 timeout_s = 400.0
 additive = true
 quantity_arg = "quantity"
+confirm_phrase = "add[ {quantity}] {repeat:more |}of product {productId} to the cart"
 
 # The one-shot search+add path the model prefers for "add <name>". Needs the
 # same Selenium timeout as a search, and is a cart write (mutating).
@@ -192,6 +201,7 @@ mutating = true
 timeout_s = 400.0
 additive = true
 quantity_arg = "quantity"
+confirm_phrase = "add[ {quantity}] {repeat:more |}{query} to the cart"
 
 # Volume-aware add ("4 litres of milk") -- composes the target across pack
 # sizes and writes them to the cart, so it is mutating like the other adds.
@@ -202,6 +212,7 @@ quantity_arg = "quantity"
 mutating = true
 timeout_s = 400.0
 additive = true
+confirm_phrase = "add {litres} litres of {repeat:more |}{query} to the cart"
 
 # Added 20-08-2026. This tool had NO overlay at all, which cost two things:
 #   1. `mutating` defaulted to false, so the escalation guard could not see it.
@@ -269,11 +280,13 @@ mutating = true
 timeout_s = 400.0
 removes = true
 count_arg = "quantity"
+confirm_phrase = "set the quantity to {quantity} for product {productId}"
 
 [server.tool_overlays.remove_from_cart]
 mutating = true
 timeout_s = 400.0
 removes = true
+confirm_phrase = "remove product {productId} from the cart"
 
 # Name-resolving cart mutators (the model's preferred path: "set milk to 2",
 # "take one off", "remove the bread"). Each resolves a free-text name to a
@@ -286,17 +299,20 @@ mutating = true
 timeout_s = 400.0
 removes = true
 count_arg = "quantity"
+confirm_phrase = "set the quantity to {quantity} for {name}"
 
 [server.tool_overlays.remove_from_cart_by_name]
 mutating = true
 timeout_s = 400.0
 removes = true
+confirm_phrase = "remove {name} from the cart"
 
 [server.tool_overlays.adjust_cart_quantity_by_name]
 mutating = true
 timeout_s = 400.0
 removes = true
 delta_arg = "delta"
+confirm_phrase = "{repeat:again, |}change the count by {delta} for {name}"
 
 # Added 11-09-2026 with the tool (DunnesStoresMCP 8c8d504). Takes a volume out
 # of one product line and lands on the right amount: drops held packs when
@@ -308,6 +324,7 @@ delta_arg = "delta"
 mutating = true
 timeout_s = 400.0
 removes = true
+confirm_phrase = "{repeat:again, |}take {litres} litres of {name} out of the cart"
 
 # --- Checkout (stops at slot selection) --------------------------------
 
