@@ -233,10 +233,10 @@ def test_local_specialist_distinct_model_builds_separate_ollama() -> None:
     from glados.core.server import _build_specialist_llm
 
     cfg = RouterConfig(
-        enabled=True, provider="local", local_smart_model="qwen2.5:14b-instruct"
+        enabled=True, provider="local", local_smart_model="ministral3:14b-instruct"
     )
     specialist = _build_specialist_llm(
-        cfg, LLMConfig(model="qwen3:4b", text_tool_format=None), FakeLLM()
+        cfg, LLMConfig(), FakeLLM()
     )
     assert isinstance(specialist, OllamaLLM) and specialist is not None
 

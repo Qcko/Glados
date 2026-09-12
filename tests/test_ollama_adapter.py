@@ -246,7 +246,7 @@ async def test_request_payload_shape() -> None:
     captured: list[dict] = []
     body = _ndjson({"message": {"content": "ok"}, "done": True})
     adapter = OllamaLLM(
-        model="qwen3:4b",
+        model="ministral3:8b-instruct",
         transport=_mock_transport(body, captured=captured),
     )
     msgs = [
@@ -256,7 +256,7 @@ async def test_request_payload_shape() -> None:
     await _collect(adapter, msgs, [_now_spec()])
 
     payload = captured[0]
-    assert payload["model"] == "qwen3:4b"
+    assert payload["model"] == "ministral3:8b-instruct"
     assert payload["stream"] is True
     assert payload["tools"][0]["function"]["name"] == "time__now"
     assert [m["role"] for m in payload["messages"]] == ["system", "user"]

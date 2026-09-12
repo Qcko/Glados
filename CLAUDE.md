@@ -41,18 +41,24 @@ reaper sleep a server a dispatch just woke?" or "does this leak state across
 rooms?". Point the duck at the relevant `ARCHITECTURE.md` section so it can judge
 fit with the design.
 
-## Model testing: always run BOTH shipped-tier models
+## Model testing: measure every live model surface
+
+GLaDOS runs the **Ministral 3 family** (decided 12-09-2026): today
+`ministral3:8b-instruct`, which is both what `configs/glados.toml` ships and the
+default in `core/config.py`. A move to a bigger card changes WHICH Ministral,
+not the family. Do not propose or measure other model families.
 
 Whenever a change is measured against a model -- bake-off suites
-(`scripts/bakeoff_run.py`), dispatch scoring, prompt changes, a regression
-probe -- run it against **both `qwen3:8b` and `qwen3:4b`**, never only the
-shipped one. `qwen3:8b` is what `configs/glados.toml` ships; `qwen3:4b` is the
-hardcoded default in `core/config.py`, so a config omitting `model` runs it.
-Both are live surfaces and a result from one is not evidence about the other.
+(`scripts/bakeoff_run.py`), dispatch scoring, prompt or tool-description
+changes, a regression probe -- run it on **every model a live config can
+reach**. Today that is one. If the shipped tag and the code default ever
+diverge again, or a router specialist gets its own tag, each is a live surface
+and a result from one is not evidence about the other.
 
 Measuring only the shipped model is how the `num_predict = 512` bug survived:
-it was harmless on the non-reasoning incumbent and silently blanked every qwen3
-turn, and nothing caught it because nothing exercised the other model.
+it was harmless on the non-reasoning shipped model and silently blanked every
+turn of the reasoning model that was the code default, and nothing caught it
+because nothing exercised that default.
 
 Restart GLaDOS between models -- room history carries across runs and a killed
 run's turns get replayed into the next one (see the confabulation trigger).

@@ -235,10 +235,11 @@ small enough to ride along; the rest are deferred.
 Deferred, each its own slice:
 - **Escalation re-prompts.** A turn whose only failure is a denied or timed-out
   confirm still escalates, so the specialist asks again for the same call
-  (observed 11-09-2026). `_should_escalate` should skip it. Until then the
-  second prompt is expected.
+  (observed 11-09-2026). `_should_escalate` should skip it. *Built in
+  `b5ee07a` (`TurnRecord.confirm_refused`, `DESIGN-voice-confirm.md`).*
 - **A `tool_confirm_resolved` broadcast**, so other `ui` clients close their
   dialog on an exact signal instead of the next-session-frame heuristic.
+  *Built in `b5ee07a` / `b162517` (`ToolConfirmResolved`).*
 - **Per-user consent across several `ui` clients** (ARCH section 3): today one
   desk tab's Allow authorises another person's utterance in the same room.
 - **Scoping the request broadcast to `ui` clients**, so mic and speaker devices
