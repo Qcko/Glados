@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import pytest
 
-from glados.core.adapters import LLMMessage
+from glados.core.adapters import LLMMessage, ToolSpec
 from glados.core.config import LLMConfig
 from glados.core.prompt_budget import (
+    ServerCost,
     dense_payload,
     measure_boot_budget,
     verdict_for,
@@ -40,6 +41,122 @@ def test_a_prompt_that_does_not_fit_says_which_knob_to_turn() -> None:
     assert not v.fits
     assert "max_history_external_bytes" in v.detail
     assert "num_ctx" in v.detail
+
+
+def _spec(server: str, name: str, description: str) -> ToolSpec:
+    return ToolSpec(server=server, name=name, description=description, parameters={})
+
+
+class _ToolPricingLLM:
+    """System prompt costs its length; each tool costs its description length."""
+
+    async def price_prompt(self, messages, tools):
+        return sum(len(m.content or "") for m in messages) + sum(
+            len(t.description) for t in tools
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_names_the_dearest_server_first() -> None:
+    """The boot refusal of 10-09-2026 needed a probe script to find that the
+    Dunnes descriptions were the cost. The message has to say it on its own."""
+    tools = [
+        _spec("toy", "roll", "d" * 10),
+        _spec("dunnes", "add", "d" * 300),
+        _spec("dunnes", "remove", "d" * 200),
+    ]
+    v = await measure_boot_budget(
+        _ToolPricingLLM(),
+        system_prompt="s" * 40,
+        tools=tools,
+        max_history_external_bytes=50,
+        num_ctx=1000,
+        num_predict=500,
+    )
+    assert v is not None and not v.fits
+    assert v.breakdown is not None
+    assert v.breakdown.system_prompt_tokens == 40
+    assert v.breakdown.tool_tokens_by_server == (
+        ServerCost("dunnes", 2, 500),
+        ServerCost("toy", 1, 10),
+    )
+    assert "system prompt 40" in v.detail
+    assert v.detail.index("dunnes 500 (2 tools)") < v.detail.index("toy 10 (1 tools)")
+    assert "retained external 50" in v.detail and "reply reserve 500" in v.detail
+
+
+@pytest.mark.asyncio
+async def test_an_unpriceable_part_drops_the_breakdown_not_the_verdict() -> None:
+    class _FailsWithoutTools:
+        async def price_prompt(self, messages, tools):
+            if not tools:
+                return None
+            return 100 + sum(len(m.content or "") for m in messages[1:])
+
+    v = await measure_boot_budget(
+        _FailsWithoutTools(),
+        system_prompt="s",
+        tools=[_spec("toy", "roll", "x")],
+        max_history_external_bytes=50,
+        num_ctx=100_000,
+        num_predict=10,
+    )
+    assert v is not None and v.fits
+    assert v.breakdown is None
+    assert "system+tools 100" in v.detail
+
+
+@pytest.mark.asyncio
+async def test_a_breakdown_that_raises_does_not_abort_a_boot_that_fits() -> None:
+    class _BreaksOnItemising:
+        async def price_prompt(self, messages, tools):
+            if not tools:
+                raise ValueError("daemon answered garbage")
+            return 100 + sum(len(m.content or "") for m in messages[1:])
+
+    v = await measure_boot_budget(
+        _BreaksOnItemising(),
+        system_prompt="s",
+        tools=[_spec("toy", "roll", "x")],
+        max_history_external_bytes=50,
+        num_ctx=100_000,
+        num_predict=10,
+    )
+    assert v is not None and v.fits and v.breakdown is None
+
+
+@pytest.mark.asyncio
+async def test_a_price_that_hits_the_window_is_marked_as_a_floor() -> None:
+    """Ollama truncates at num_ctx and stops counting, so the figure is a
+    lower bound -- read as exact it would tie two oversized servers."""
+
+    class _Saturating:
+        """The whole prefix prices first; the per-server price that follows
+        comes back pinned at the window."""
+
+        prefix_priced = False
+
+        async def price_prompt(self, messages, tools):
+            if len(messages) > 1:
+                return 150
+            if not tools:
+                return 40
+            if self.prefix_priced:
+                return 1000
+            self.prefix_priced = True
+            return 100
+
+    v = await measure_boot_budget(
+        _Saturating(),
+        system_prompt="s",
+        tools=[_spec("dunnes", "add", "x")],
+        max_history_external_bytes=50,
+        num_ctx=1000,
+        num_predict=10,
+    )
+    assert v is not None and v.breakdown is not None
+    assert v.breakdown.tool_tokens_by_server == (ServerCost("dunnes", 1, 960, saturated=True),)
+    assert "dunnes >=960" in v.detail
 
 
 def test_the_dense_payload_fills_the_budget_exactly_and_is_ascii() -> None:
@@ -79,8 +196,9 @@ async def test_the_result_cost_is_the_difference_between_the_two_prices() -> Non
     assert v is not None
     assert v.fixed_prefix_tokens == 100
     assert v.retained_external_tokens == 50
-    # One fixed-prefix price, then one per candidate worst-case payload shape.
-    assert len(llm.calls) == 3
+    # One fixed-prefix price, one per candidate worst-case payload shape, then
+    # the system prompt alone for the breakdown (no tools, so no server groups).
+    assert len(llm.calls) == 4
 
 
 @pytest.mark.asyncio

@@ -43,9 +43,12 @@ Nothing here decides policy. It reports, and the caller refuses to boot.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, replace
 
 from .adapters import LLMMessage, ToolSpec
+
+log = logging.getLogger(__name__)
 
 # Alphabet for the pricing payload. Deliberately nothing like English -- no
 # word boundaries for the tokenizer to exploit -- and deliberately NOT a
@@ -81,6 +84,30 @@ MAX_CREDIBLE_BYTES_PER_TOKEN = _MAX_CREDIBLE_BYTES_PER_TOKEN
 
 
 @dataclass(frozen=True)
+class ServerCost:
+    server: str
+    tool_count: int
+    tokens: int
+    # The price hit num_ctx, where Ollama truncates and stops counting: the
+    # figure is a floor, and two saturated servers would tie.
+    saturated: bool = False
+
+
+@dataclass(frozen=True)
+class PrefixBreakdown:
+    """Where the fixed prefix goes, so a refusal names what to shrink.
+
+    Each server's figure is priced as the system prompt plus that server's tools
+    alone, minus the system prompt alone. Schema framing is shared, so the
+    parts need not sum to the whole -- they rank the culprits, they do not audit
+    the total. Advisory only: nothing here feeds the verdict.
+    """
+
+    system_prompt_tokens: int
+    tool_tokens_by_server: tuple[ServerCost, ...]  # dearest first
+
+
+@dataclass(frozen=True)
 class BudgetVerdict:
     fits: bool
     fixed_prefix_tokens: int
@@ -89,6 +116,7 @@ class BudgetVerdict:
     num_ctx: int
     num_predict: int
     detail: str
+    breakdown: PrefixBreakdown | None = None
 
 
 def dense_payload(byte_budget: int) -> str:
@@ -139,32 +167,59 @@ def verdict_for(
     *,
     num_ctx: int,
     num_predict: int,
+    breakdown: PrefixBreakdown | None = None,
 ) -> BudgetVerdict:
     total = worst_case_total(
         fixed_prefix_tokens, retained_external_tokens, num_predict
     )
     fits = total <= num_ctx
-    return BudgetVerdict(
+    verdict = BudgetVerdict(
         fits=fits,
         fixed_prefix_tokens=fixed_prefix_tokens,
         retained_external_tokens=retained_external_tokens,
         worst_case_total=total,
         num_ctx=num_ctx,
         num_predict=num_predict,
-        detail=_detail(total, fits, num_ctx),
+        detail="",
+        breakdown=breakdown,
+    )
+    return replace(verdict, detail=_detail(verdict))
+
+
+def _detail(v: BudgetVerdict) -> str:
+    parts = _parts(v)
+    if v.fits:
+        return (
+            f"worst-case prompt {v.worst_case_total} tokens fits num_ctx "
+            f"{v.num_ctx} ({parts})"
+        )
+    return (
+        f"retained-session prompt {v.worst_case_total} tokens EXCEEDS num_ctx "
+        f"{v.num_ctx} ({parts}): an over-long session would be truncated from "
+        f"the front, silently deleting the system prompt. Raise llm.num_ctx, "
+        f"shorten llm.system_prompt or the largest server's tool descriptions, "
+        f"or lower the organizer's max_history_external_bytes (currently "
+        f"constructor-only, in core/organizer.py)."
     )
 
 
-def _detail(total: int, fits: bool, num_ctx: int) -> str:
-    if fits:
-        return f"worst-case prompt {total} tokens fits num_ctx {num_ctx}"
+def _parts(v: BudgetVerdict) -> str:
     return (
-        f"retained-session prompt {total} tokens EXCEEDS num_ctx {num_ctx}: an "
-        f"over-long session would be truncated from the front, silently "
-        f"deleting the system prompt. Raise llm.num_ctx, shorten "
-        f"llm.system_prompt, or lower the organizer's "
-        f"max_history_external_bytes (currently constructor-only, in "
-        f"core/organizer.py)."
+        f"{_prefix_parts(v)}, retained external {v.retained_external_tokens}, "
+        f"reply reserve {v.num_predict}"
+    )
+
+
+def _prefix_parts(v: BudgetVerdict) -> str:
+    if v.breakdown is None:
+        return f"system+tools {v.fixed_prefix_tokens}"
+    servers = ", ".join(
+        f"{c.server} {'>=' if c.saturated else ''}{c.tokens} ({c.tool_count} tools)"
+        for c in v.breakdown.tool_tokens_by_server
+    )
+    return (
+        f"system+tools {v.fixed_prefix_tokens} = system prompt "
+        f"{v.breakdown.system_prompt_tokens} + tools [{servers or 'none'}]"
     )
 
 
@@ -213,7 +268,53 @@ async def measure_boot_budget(
         retained_tokens,
         num_ctx=num_ctx,
         num_predict=num_predict,
+        breakdown=await _best_effort_breakdown(price, system_prompt, tools, num_ctx),
     )
+
+
+async def _best_effort_breakdown(
+    price, system_prompt: str, tools: list[ToolSpec], num_ctx: int
+) -> PrefixBreakdown | None:
+    """The verdict already stands on the whole-prefix price, so nothing that
+    goes wrong while itemising it may abort a boot that fits."""
+    try:
+        return await _price_breakdown(price, system_prompt, tools, num_ctx)
+    except Exception:
+        log.warning("prompt budget breakdown could not be priced", exc_info=True)
+        return None
+
+
+async def _price_breakdown(
+    price, system_prompt: str, tools: list[ToolSpec], num_ctx: int
+) -> PrefixBreakdown | None:
+    system_only = [LLMMessage(role="system", content=system_prompt)]
+    system_tokens = await price(system_only, [])
+    if system_tokens is None:
+        return None
+    costs: list[ServerCost] = []
+    for server, group in _group_by_server(tools).items():
+        with_group = await price(system_only, group)
+        if with_group is None:
+            return None
+        costs.append(
+            ServerCost(
+                server=server,
+                tool_count=len(group),
+                tokens=max(0, with_group - system_tokens),
+                saturated=with_group >= num_ctx,
+            )
+        )
+    costs.sort(key=lambda cost: cost.tokens, reverse=True)
+    return PrefixBreakdown(
+        system_prompt_tokens=system_tokens, tool_tokens_by_server=tuple(costs)
+    )
+
+
+def _group_by_server(tools: list[ToolSpec]) -> dict[str, list[ToolSpec]]:
+    groups: dict[str, list[ToolSpec]] = {}
+    for tool in tools:
+        groups.setdefault(tool.server, []).append(tool)
+    return groups
 
 
 def _reject_a_compressible_price(byte_budget: int, tokens: int) -> None:

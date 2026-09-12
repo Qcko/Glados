@@ -675,13 +675,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
                 "it is a distinct adapter whose prefix is not what this budget "
                 "priced. Coupling checks still run there."
             )
-        log.info(
-            "prompt budget ok: %s (system+tools %d, retained %d, reply %d)",
-            verdict.detail,
-            verdict.fixed_prefix_tokens,
-            verdict.retained_external_tokens,
-            verdict.num_predict,
-        )
+        log.info("prompt budget ok: %s", verdict.detail)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
