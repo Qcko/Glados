@@ -300,8 +300,13 @@ was right; the argument was an id.
 `core/product_names.py` remembers, per **room and server**, every
 id-to-name pair the server's own results have shown: a record with an id
 key beside a `name` (`view_cart` lines), or an inline "Name (productId=N)"
-/ "(top: Name, productId=N)" in result text and error text alike. Bounded
-(512 per scope, newest wins), harvested after every `tool_result`.
+/ "(top: Name, productId=N)" in result text and error text alike. A prose
+name is only taken behind a known lead (a list separator, a
+label, or a report verb with its count -- "Added 2 x "); the count alone is
+not one, because "Volvic Water 6 x 1.5l" carries one inside the name, and a
+run-up this cannot classify ("Could not add Name (") leaves the id digits.
+A record's name outranks a prose guess for the same id. Bounded (512 per
+scope, newest wins within a rank), harvested after every `tool_result`.
 `_ask_aloud` substitutes the name into the args **for the spoken form
 only**: the dialog shows the id the model chose and the wire sends it. A
 name is bounded (60 printable chars) and goes through the same answer check

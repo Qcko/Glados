@@ -190,3 +190,30 @@ def test_a_semicolon_joined_list_names_each_id() -> None:
     assert names.resolve("r", "s", {"productId": 555})[0] == {"productId": "Eggs 6 pack"}
     # The first element has no lead in front of it: digits beat a guess.
     assert names.resolve("r", "s", {"productId": 1})[1] == []
+
+
+def test_a_count_inside_a_name_is_not_a_lead() -> None:
+    # Live 19-09-2026: the "6 x" inside the name was taken as the count lead
+    # and the question said "remove product 1.5l".
+    names = ProductNames()
+    names.learn("r", "s", "Added 1 x Volvic Natural Mineral Water 6 x 1.5l (productId=100299422) to cart.")
+    assert names.resolve("r", "s", {"productId": "100299422"})[0] == {
+        "productId": "Volvic Natural Mineral Water 6 x 1.5l"
+    }
+
+
+def test_a_record_name_is_not_overwritten_by_a_prose_guess() -> None:
+    names = ProductNames()
+    names.learn("r", "s", {"productId": "9", "name": "Volvic Water 6 x 1.5l"})
+    names.learn("r", "s", "Changed the count: 1.5l (productId=9) is now 2.")
+    assert names.resolve("r", "s", {"productId": "9"})[0] == {"productId": "Volvic Water 6 x 1.5l"}
+    names.learn("r", "s", {"productId": "9", "name": "Volvic Water 6 x 1.5L (new)"})
+    assert names.resolve("r", "s", {"productId": "9"})[0] == {"productId": "Volvic Water 6 x 1.5L (new)"}
+
+
+def test_a_bracket_inside_a_name_is_not_a_lead() -> None:
+    names = ProductNames()
+    names.learn("r", "s", "Added 2 x Coca-Cola (Diet) 330ml (productId=1) to cart.")
+    names.learn("r", "s", "Found 30 matches (top: Ben & Jerry's Cookie Dough (500ml), productId=2) but it failed.")
+    assert names.resolve("r", "s", {"productId": "1"})[0] == {"productId": "Coca-Cola (Diet) 330ml"}
+    assert names.resolve("r", "s", {"productId": "2"})[0] == {"productId": "Ben & Jerry's Cookie Dough (500ml)"}

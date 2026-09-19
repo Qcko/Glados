@@ -22,14 +22,15 @@ MAX_NAME_CHARS = 60
 REMEMBERED_PER_SCOPE = 512
 
 _INLINE_ID_RE = re.compile(r"\b(\w+)=(\d+)")
-# Where a name can start, scanning back from its id: a line, a bracket, a
-# list separator, a "top:" style label, a report verb, or a "2 x " count.
-# Any other run-up ("Could not add NAME (", "Found NAME (") is not a name
-# this can trust, and the id stays digits.
+# Where a name can start, scanning back from its id: a line, a
+# list separator, a "top:" style label, or a report verb with its count
+# ("Added 2 x "). The count is not a lead on its own: "Volvic Water 6 x
+# 1.5l" carries one inside the name (seen live, spoken as "remove product
+# 1.5l"). Any other run-up ("Could not add NAME (", "Found NAME (") is not
+# a name this can trust, and the id stays digits.
 _NAME_LEAD_RE = re.compile(
-    r"(?:\n|\(|;\s*|--\s*|\w+:\s*"
-    r"|\b(?:added|removed|changed|updated)\s+(?:\d+\s*x\s+)?"
-    r"|\b\d+\s*x\s+)",
+    r"(?:\n|;\s*|--\s*|\w+:\s*"
+    r"|\b(?:added|removed|changed|updated)\s+(?:\d+\s*x\s+)?)",
     re.IGNORECASE,
 )
 _HAS_LETTER_RE = re.compile(r"[A-Za-z]")
@@ -42,20 +43,32 @@ class Named:
     name: str
 
 
+@dataclass(frozen=True)
+class _Known:
+    name: str
+    from_record: bool
+
+
 class ProductNames:
     """Bounded, scope-keyed memory of what each id was last called."""
 
     def __init__(self) -> None:
-        self._known: dict[tuple[str, str], OrderedDict[tuple[str, str], str]] = {}
+        self._known: dict[tuple[str, str], OrderedDict[tuple[str, str], _Known]] = {}
 
     def learn(self, room_id: str, server: str, content: object) -> int:
-        """Remember every id-to-name pair `content` shows; returns how many."""
+        """Remember every id-to-name pair `content` shows; returns how many.
+        A name read out of a record outranks one guessed from prose: the
+        prose form is a heuristic, and a wrong guess must not replace the
+        server's own field."""
         pairs = list(_pairs_in(content))
         if not pairs:
             return 0
         scope = self._known.setdefault((room_id, server), OrderedDict())
-        for key, id_, name in pairs:
-            scope[(key, id_)] = name
+        for key, id_, name, from_record in pairs:
+            held = scope.get((key, id_))
+            if held is not None and held.from_record and not from_record:
+                continue
+            scope[(key, id_)] = _Known(name, from_record)
             scope.move_to_end((key, id_))
             while len(scope) > REMEMBERED_PER_SCOPE:
                 scope.popitem(last=False)
@@ -74,11 +87,11 @@ class ProductNames:
                 continue
             if not isinstance(value, (str, int)):
                 continue
-            name = scope.get((key, str(value)))
-            if name is None:
+            held = scope.get((key, str(value)))
+            if held is None:
                 continue
-            resolved[key] = name
-            named.append(Named(key, str(value), name))
+            resolved[key] = held.name
+            named.append(Named(key, str(value), held.name))
         return resolved, named
 
 
@@ -103,7 +116,7 @@ def _pairs_in_record(record: dict):
         if isinstance(id_, (str, int)) and not isinstance(id_, bool):
             cleaned = _clean(name)
             if cleaned:
-                yield key, str(id_), cleaned
+                yield key, str(id_), cleaned, True
 
 
 def _pairs_in_text(text: str):
@@ -113,7 +126,7 @@ def _pairs_in_text(text: str):
             continue
         name = _name_before(text[: match.start()])
         if name:
-            yield key, id_, name
+            yield key, id_, name, False
 
 
 def _name_before(prefix: str) -> str | None:
