@@ -3385,7 +3385,8 @@ class Organizer:
             # the dialog counts down from is the one the server enforces: the
             # plain ttl plus whatever of the question is still playing. The
             # broadcast arrives about one synthesis late, as the audio starts.
-            deadline = await self._ask_aloud(pending, spec, args, trace)
+            spoken_args, arg_names = self._named_args(pending, spec, args, trace)
+            deadline = await self._ask_aloud(pending, spec, spoken_args, trace)
             ttl_s = deadline - asyncio.get_running_loop().time()
             if ttl_s <= 0.0:
                 # Nothing to show a client but an already-expired dialog.
@@ -3405,6 +3406,7 @@ class Organizer:
                     tool=spec.qualified,
                     args_summary=args,
                     ttl_s=ttl_s,
+                    arg_names=arg_names,
                 ),
             )
             try:
@@ -3476,9 +3478,7 @@ class Organizer:
         room_id = pending.room_id
         if not (self._room_can_hear(room_id) and self._room_can_answer_by_voice(room_id)):
             return plain_deadline
-        spoken = compose_confirm_question(
-            spec.qualified, self._named_args(pending, spec, args, trace), spec.confirm_phrase
-        )
+        spoken = compose_confirm_question(spec.qualified, args, spec.confirm_phrase)
         if spoken.fallback is not None:
             trace.event(
                 "tool_confirm_phrase_fallback",
@@ -3520,11 +3520,12 @@ class Organizer:
 
     def _named_args(
         self, pending: _PendingConfirm, spec: "ToolSpec", args: dict, trace
-    ) -> dict:
+    ) -> tuple[dict, dict[str, str]]:
         """The call's args with each id the server has already named
-        replaced by that name, for the spoken form only: the dialog and
-        the wire keep the id. An id the room has never seen stays digits,
-        and the trace says which so a bare id in a question is explained."""
+        replaced by that name (what is spoken), and the names by key (what
+        the dialog shows beside the id). The wire keeps the id. An id the
+        room has never seen stays digits, and the trace says which so a
+        bare id in a question is explained."""
         resolved, named = self._product_names.resolve(pending.room_id, spec.server, args)
         for hit in named:
             trace.event(
@@ -3534,7 +3535,7 @@ class Organizer:
                 id=hit.id,
                 name=hit.name,
             )
-        return resolved
+        return resolved, {hit.key: hit.name for hit in named}
 
     def _room_can_confirm(self, room_id: str) -> bool:
         """Whether anyone in `room_id` could answer a confirmation request:

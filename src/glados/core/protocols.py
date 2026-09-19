@@ -179,6 +179,10 @@ class ToolConfirmRequest(BaseModel):
     tool: str
     args_summary: dict
     ttl_s: float
+    # What an id in `args_summary` is known to name, by argument key, from
+    # this server's own earlier results in this room (core/product_names.py).
+    # Shown beside the id, never in its place: the id is what is approved.
+    arg_names: dict[str, str] = {}
 
 
 class ToolConfirmResolved(BaseModel):

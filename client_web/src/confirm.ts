@@ -145,17 +145,21 @@ export class ConfirmDialog {
     this.args.replaceChildren();
     const entries = Object.entries(request.args_summary ?? {});
     if (entries.length === 0) this.args.append(element("div", "confirm-arg", "(no arguments)"));
-    const clipped = entries.filter(([key, value]) => this.appendArgument(key, value)).length;
+    const names = request.arg_names ?? {};
+    const clipped = entries.filter(([key, value]) =>
+      this.appendArgument(key, value, names[key]),
+    ).length;
     this.state.setUnexpanded(clipped);
   }
 
-  private appendArgument(key: string, value: unknown): boolean {
+  private appendArgument(key: string, value: unknown, name?: string): boolean {
     const row = element("div", "confirm-arg");
     const keyCell = element("span", "confirm-key", visible(JSON.stringify(key)));
     const valueCell = element("span", "confirm-value");
     keyCell.dir = "ltr";
     valueCell.dir = "ltr";
     row.append(keyCell, valueCell);
+    if (typeof name === "string" && name) row.append(this.knownAs(name));
     this.args.append(row);
     const text = visible(JSON.stringify(value) ?? String(value));
     const chars = Array.from(text);
@@ -165,6 +169,15 @@ export class ConfirmDialog {
     }
     this.clipValue(valueCell, text, chars);
     return true;
+  }
+
+  // What the server's own earlier results called this id. Beside the value,
+  // never in its place: the id is what is approved and what is sent.
+  private knownAs(name: string): HTMLElement {
+    const cell = element("span", "confirm-name", `known as ${visible(name)}`);
+    cell.dir = "ltr";
+    cell.style.gridColumn = "2";
+    return cell;
   }
 
   private clipValue(cell: HTMLElement, text: string, chars: string[]): void {

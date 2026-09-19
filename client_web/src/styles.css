@@ -173,6 +173,7 @@ dialog.confirm:focus { outline: none; }
 .confirm-key, .confirm-value { unicode-bidi: isolate; overflow-wrap: anywhere; }
 .confirm-key { color: var(--muted); }
 .confirm-value { color: var(--tool); }
+.confirm-name { color: var(--muted); unicode-bidi: isolate; overflow-wrap: anywhere; }
 .confirm-more {
   margin-left: .4rem; background: none; border: 1px solid var(--line); border-radius: 3px;
   color: var(--user); font: inherit; font-size: .7rem; cursor: pointer;

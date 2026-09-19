@@ -322,8 +322,9 @@ text argument passes the boot check (the id is fixed there) and then falls
 back to the generic form on every ask that names it. Keep `{productId}` last
 among the values in a template, as the shipped ones do.
 
-Not done: the dialog still prints the id. The screen has room for both and
-should show the name beside it -- a small client change, separate.
+The dialog shows both: `ToolConfirmRequest.arg_names` carries the names by
+argument key, and the desk renders "known as Name" under the id. The id stays the
+value on screen because the id is what is approved and what is sent.
 
 ### The answer
 

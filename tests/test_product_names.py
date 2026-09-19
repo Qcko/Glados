@@ -217,3 +217,29 @@ def test_a_bracket_inside_a_name_is_not_a_lead() -> None:
     names.learn("r", "s", "Found 30 matches (top: Ben & Jerry's Cookie Dough (500ml), productId=2) but it failed.")
     assert names.resolve("r", "s", {"productId": "1"})[0] == {"productId": "Coca-Cola (Diet) 330ml"}
     assert names.resolve("r", "s", {"productId": "2"})[0] == {"productId": "Ben & Jerry's Cookie Dough (500ml)"}
+
+
+async def test_the_dialog_is_told_the_name_beside_the_id(tmp_path: Path) -> None:
+    tts = _FakeTts()
+    async with _make_org(tmp_path, [MIC, SPEAKER], tts=tts, llm=_LookThenRemoveLLM()) as (
+        org,
+        sink,
+        tool,
+    ):
+        org.mcp.register(_LookTool())
+        await org.handle_user_text("k-mic", "show the cart and remove the milk")
+        await _wait_until_asked(org, "kitchen")
+        request = next(m for _, m in sink if m["type"] == "tool_confirm_request")
+        assert request["args_summary"] == {"productId": "100806893"}
+        assert request["arg_names"] == {"productId": "Dunnes Stores Irish Low Fat Milk 3L"}
+
+
+async def test_the_dialog_gets_no_name_for_an_unseen_id(tmp_path: Path) -> None:
+    tts = _FakeTts()
+    async with _make_org(
+        tmp_path, [MIC, SPEAKER], tts=tts, llm=_LookThenRemoveLLM(look=False)
+    ) as (org, sink, tool):
+        await org.handle_user_text("k-mic", "remove the milk")
+        await _wait_until_asked(org, "kitchen")
+        request = next(m for _, m in sink if m["type"] == "tool_confirm_request")
+        assert request["arg_names"] == {}

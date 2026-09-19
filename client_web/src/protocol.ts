@@ -115,6 +115,7 @@ export interface ToolConfirmRequest {
   tool: string;
   args_summary: Record<string, unknown>;
   ttl_s: number;
+  arg_names?: Record<string, string>;
 }
 
 export interface ToolConfirmResolved {
