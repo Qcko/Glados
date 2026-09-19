@@ -60,8 +60,8 @@ export class ConfirmDialog {
   private readonly bar = element("div", "confirm-bar");
   private readonly status = element("p", "confirm-status");
   private readonly stopButton = button("confirm-stop", "stop turn");
-  private readonly denyButton = button("confirm-deny", "deny");
-  private readonly allowButton = button("confirm-allow", "allow");
+  private readonly denyButton = button("confirm-deny", "no");
+  private readonly allowButton = button("confirm-allow", "yes");
   private readonly originalTitle = document.title;
   private armTimer: ReturnType<typeof setTimeout> | null = null;
   private deadlineTimer: ReturnType<typeof setTimeout> | null = null;
@@ -254,7 +254,7 @@ export class ConfirmDialog {
 
   private statusText(live: LiveRequest): string {
     if (!this.state.isOnline()) return "reconnecting... answer once the connection is back";
-    if (live.unexpanded > 0) return "expand every clipped argument to enable allow";
+    if (live.unexpanded > 0) return "expand every clipped argument to enable yes";
     return "";
   }
 

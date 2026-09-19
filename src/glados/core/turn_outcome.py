@@ -261,7 +261,10 @@ def _confabulated(turn: TurnRecord) -> bool:
         turn.action_intent
         and not turn.tools
         and bool(turn.final_text.strip())
-        and not _ends_on_question(turn.final_text)
+        and (
+            not _ends_on_question(turn.final_text)
+            or _reports_a_change(turn.final_text)
+        )
     )
 
 
@@ -287,7 +290,7 @@ _CLAIM_RE = re.compile(
 # a denial, a report of what someone else did, or a reference back to an
 # earlier turn. Each was a real false positive before it was excluded.
 _NOT_THIS_TURNS_DOING = re.compile(
-    r"\b(not|n't|nothing|never|no)\b"  # "I have not added it", "Nothing was removed"
+    r"\b(not|nothing|never|no)\b|n't\b"  # "I have not added it", "haven't removed"
     r"|\balready\b|\bearlier\b|\bpreviously\b|\blast night\b"  # a prior turn
     r"|\bby\s+the\s+\w+",  # "was updated by the store"
     re.IGNORECASE,
@@ -354,10 +357,12 @@ def claimed_a_change_it_did_not_make(turn: TurnRecord) -> bool:
     It FAILS OPEN wherever it cannot judge, because a false positive replaces a
     correct spoken reply with a canned "no record of that" line -- telling a
     user their shopping did not happen when it did is its own kind of lie."""
-    if _ends_on_question(turn.final_text):
-        # "Shall I have the milk removed?" is an offer, not a report.
-        return False
-    claims = [c for s in _sentences(turn.final_text) for c in _claim_clauses(s)]
+    # "Shall I have the milk removed?" is an offer, not a report -- but only
+    # that sentence is excused. Seen live 19-09-2026: "I removed the chips
+    # and added one onion cheese spread. Would you like to add anything
+    # else?" with nothing but a view_cart behind it classified `done`,
+    # because the trailing question excused the whole reply.
+    claims = _report_claims(turn.final_text)
     if not claims:
         return False
 
@@ -456,8 +461,24 @@ def _claim_clauses(sentence: str) -> list[str]:
         # one disclaimed report, and splitting first would strip the "not" from
         # the clause it governs.
         return []
-    return [c for c in re.split(r"\band\b|\bbut\b|\bthen\b|[;,]", sentence)
-            if _asserts_a_change(c)]
+    return [c for c in _clauses(sentence) if _asserts_a_change(c)]
+
+
+def _clauses(sentence: str) -> list[str]:
+    return [c for c in _CLAUSE_SPLIT_RE.split(sentence) if c.strip()]
+
+
+_CLAUSE_SPLIT_RE = re.compile(r"\band\b|\bbut\b|\bthen\b|\bor\b|[;,]")
+
+# A clause that is a report in its own right: the claim verb first, or
+# behind nothing but a first-person subject. Used inside question sentences,
+# where "want it removed" and "shall I have it removed" must not count.
+_REPORT_CLAUSE_RE = re.compile(
+    r"\s*(?:(?:i|i've|i have|we|we've|we have|so|and|also|just|now)\s+)*"
+    r"(?:added|removed|deleted|cleared|emptied|updated|changed"
+    r"|set\b[^.!?]{0,20}?\bto\s+\d)\b",
+    re.IGNORECASE,
+)
 
 
 def _claim_unsupported(clause: str, subject_words: set[str]) -> bool:
@@ -502,6 +523,35 @@ def _asserts_a_change(sentence: str) -> bool:
     return bool(
         _CLAIM_RE.search(sentence) and not _NOT_THIS_TURNS_DOING.search(sentence)
     )
+
+
+def _reports_a_change(text: str) -> bool:
+    """A completed change is asserted somewhere that is not itself a
+    question: the shape an offer never has and a false report always has."""
+    return bool(_report_claims(text))
+
+
+def _report_claims(text: str) -> list[str]:
+    """Every claim clause in the reply that is a statement rather than part
+    of a question. A sentence that ends on "?" is not excused whole: "I
+    removed the chips, anything else?" reports first and asks second. But a
+    question sentence is where an offer lives ("Shall I have the milk
+    removed and the eggs added?", "want it removed?"), and openers cannot
+    be enumerated, so inside one only a clause that ITSELF reads as a
+    first-person report ("I removed the chips", "added the spread") counts;
+    a claim verb anywhere else in the clause fails open, and a sentence-
+    level denial excuses the whole sentence as it does elsewhere."""
+    claims: list[str] = []
+    for sentence in _sentences_with_endings(text):
+        if not _ends_on_question(sentence):
+            claims.extend(_claim_clauses(sentence))
+        elif not _NOT_THIS_TURNS_DOING.search(sentence):
+            claims.extend(c for c in _clauses(sentence) if _REPORT_CLAUSE_RE.match(c))
+    return claims
+
+
+def _sentences_with_endings(text: str) -> list[str]:
+    return [s for s in re.findall(r"[^.!?]+[.!?]*", text) if s.strip()]
 
 
 def _sentences(text: str) -> list[str]:

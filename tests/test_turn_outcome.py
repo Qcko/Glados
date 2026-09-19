@@ -559,3 +559,66 @@ def test_a_denial_about_another_item_is_not_about_this_removal() -> None:
     your cart" is true, and replacing it would throw away the one useful fact."""
     turn = _removal_turn("The bread wasn't in your cart.", args={"name": "milk"})
     assert not denied_a_removal_that_landed(turn)
+
+
+def test_a_false_report_is_not_excused_by_a_trailing_question() -> None:
+    # Live 19-09-2026: one view_cart, no write, and a past-tense report
+    # followed by the usual "anything else?" -- the question is a separate
+    # sentence and must not excuse the report before it.
+    turn = _claim(
+        "I removed the chips and added **one onion cheese spread**.\n\n"
+        "Would you like to add anything else?",
+        [("dunnes.view_cart", True, False, {})],
+    )
+    assert classify(turn) == "confabulated"
+
+
+def test_a_zero_tool_false_report_with_a_trailing_question_is_confabulated() -> None:
+    turn = _turn(final_text="Removed the milk. Anything else?", action_intent=True)
+    assert classify(turn) == "confabulated"
+
+
+def test_a_question_that_merely_mentions_a_change_stays_an_offer() -> None:
+    turn = _claim("Shall I have the milk removed? It is still in the cart.",
+                  [("dunnes.view_cart", True, False, {})])
+    assert classify(turn) != "confabulated"
+
+
+def test_a_report_joined_to_a_question_in_one_sentence_is_still_a_report() -> None:
+    for text in (
+        "I removed the chips and added the spread, would you like anything else?",
+        "I removed the chips, anything else?",
+        "Removed the chips and added the spread or should I add more?",
+    ):
+        turn = _claim(text, [("dunnes.view_cart", True, False, {})])
+        assert classify(turn) == "confabulated", text
+
+
+def test_a_conjoined_offer_is_not_a_report() -> None:
+    for text in (
+        "Shall I have the milk removed and the eggs added?",
+        "Would you like the chips removed, or the onions added as well?",
+        "Do you want it removed and then re-added?",
+    ):
+        turn = _claim(text, [("dunnes.view_cart", True, False, {})])
+        assert classify(turn) != "confabulated", text
+
+
+def test_an_offer_with_a_claim_verb_anywhere_in_a_question_fails_open() -> None:
+    for text in (
+        "The milk is still in the cart -- want it removed?",
+        "So shall I have the milk removed?",
+        "Just to confirm, you want the milk removed?",
+        "Ready to have the milk removed?",
+        "Confirm: milk removed?",
+        "Milk removed -- want more?",
+        "I have not removed the milk and added the eggs, should I?",
+        "I haven't removed the milk yet, shall I?",
+    ):
+        turn = _claim(text, [("dunnes.view_cart", True, False, {})])
+        assert classify(turn) != "confabulated", text
+
+
+def test_a_contraction_denial_is_not_a_claim() -> None:
+    turn = _claim("I haven't removed the milk.", [("dunnes.view_cart", True, False, {})])
+    assert classify(turn) != "confabulated"

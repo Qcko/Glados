@@ -270,7 +270,8 @@ repeat). A future rule of two may forbid it if a second switch wants it.
 
 ```mermaid
 flowchart TD
-    A[gated call: spec + args] --> B{spec.confirm_phrase?}
+    A[gated call: spec + args] --> N[name each id the room has seen<br/>from this server's own results<br/>spoken form only, the id stays on the wire]
+    N --> B{spec.confirm_phrase?}
     B -- none --> G[generic form:<br/>tool words, fixed args, then<br/>key, quote, text, unquote]
     B -- template --> R[render from the parsed tree:<br/>drop segments with an absent arg,<br/>switch on bool, substitute values]
     R --> C{every present arg spoken?<br/>fixed before text?<br/>one text value? switches are bool?}
@@ -287,6 +288,37 @@ flowchart TD
     end
     F -. sets .-> B
 ```
+
+#### Ids are spoken as names (landed 19-09-2026)
+
+Seen live on the desk, 19-09-2026: "show the cart and then remove the milk"
+made the model pick `remove_from_cart` with the `productId` it had just
+read, and the question was "remove product 1 0 0, 8 0 6, 8 9 3 from the
+cart" -- digits nobody at the desk can check against anything. The template
+was right; the argument was an id.
+
+`core/product_names.py` remembers, per **room and server**, every
+id-to-name pair the server's own results have shown: a record with an id
+key beside a `name` (`view_cart` lines), or an inline "Name (productId=N)"
+/ "(top: Name, productId=N)" in result text and error text alike. Bounded
+(512 per scope, newest wins), harvested after every `tool_result`.
+`_ask_aloud` substitutes the name into the args **for the spoken form
+only**: the dialog shows the id the model chose and the wire sends it. A
+name is bounded (60 printable chars) and goes through the same answer check
+as any value, so a product called "Yes Please" still drops the question to
+dialog-only. An id the room has never seen stays digits, and the choice is
+scoped so nothing one room saw is spoken in another. The trace names each
+substitution (`tool_confirm_id_named`: `key`, `id`, `name`), so a bare id in
+a question is explained by the absence of that event.
+
+A named id is free text when the template renders, whatever the schema
+said: a template that puts `{productId}` before a number or beside another
+text argument passes the boot check (the id is fixed there) and then falls
+back to the generic form on every ask that names it. Keep `{productId}` last
+among the values in a template, as the shipped ones do.
+
+Not done: the dialog still prints the id. The screen has room for both and
+should show the name beside it -- a small client change, separate.
 
 ### The answer
 
@@ -377,6 +409,8 @@ escalation, no confabulation retry, no reply replacement.
 - `tool_confirm_voice_skipped` (`request_id`, `reason`: `clipped` |
   `no_audio`) when the voice arm is not armed for a room that could confirm
   (not emitted when the dialog answered during the question).
+- `tool_confirm_id_named` (`request_id`, `key`, `id`, `name`) for each id
+  the spoken question says by name (the dialog and the wire keep the id).
 - `tool_confirm_voice` (`request_id`, `verdict`, `client_id`, `text`) emitted
   by the worker when a spoken answer resolved the request, before the
   existing `tool_confirm_response`.

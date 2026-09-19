@@ -78,6 +78,7 @@ from .turn_outcome import (
 )
 from ..servers.room_intercom import MAX_MESSAGE_CHARS, SPEAK_INTO
 from .confirm_phrase import compose_confirm_question, tts_safe
+from .product_names import ProductNames
 from .utterance import (
     classify_confirm_answer,
     has_quantity_cue,
@@ -989,6 +990,9 @@ class Organizer:
         self._confirm_timeout_s = confirm_timeout_s
         self._pending_confirms: dict[str, _PendingConfirm] = {}
         self._confirm_by_room: dict[str, _PendingConfirm] = {}
+        # What each id a server has shown was called, so a question can
+        # name it (per room, so nothing a room saw is spoken in another).
+        self._product_names = ProductNames()
         # Assembled system prompt: the base persona prompt plus any
         # hash-approved, guard-wrapped server memory (ARCH section 14). The base is
         # the built-in SYSTEM_PROMPT unless the operator supplies a
@@ -2678,6 +2682,8 @@ class Organizer:
                 content=result.content,
                 error=result.error,
             )
+            self._product_names.learn(room_id, tc.server, result.content)
+            self._product_names.learn(room_id, tc.server, result.error)
             # A user-denied confirmation is a deliberate boundary, not a tool
             # failure -- don't let it poison the turn outcome as `failed` (and
             # so spuriously escalate to the v2.6 specialist router). Skip recording
@@ -3470,7 +3476,9 @@ class Organizer:
         room_id = pending.room_id
         if not (self._room_can_hear(room_id) and self._room_can_answer_by_voice(room_id)):
             return plain_deadline
-        spoken = compose_confirm_question(spec.qualified, args, spec.confirm_phrase)
+        spoken = compose_confirm_question(
+            spec.qualified, self._named_args(pending, spec, args, trace), spec.confirm_phrase
+        )
         if spoken.fallback is not None:
             trace.event(
                 "tool_confirm_phrase_fallback",
@@ -3509,6 +3517,24 @@ class Organizer:
         pending.answers_after = reopens_at
         pending.voice_armed = True
         return reopens_at + self._confirm_timeout_s
+
+    def _named_args(
+        self, pending: _PendingConfirm, spec: "ToolSpec", args: dict, trace
+    ) -> dict:
+        """The call's args with each id the server has already named
+        replaced by that name, for the spoken form only: the dialog and
+        the wire keep the id. An id the room has never seen stays digits,
+        and the trace says which so a bare id in a question is explained."""
+        resolved, named = self._product_names.resolve(pending.room_id, spec.server, args)
+        for hit in named:
+            trace.event(
+                "tool_confirm_id_named",
+                request_id=pending.request_id,
+                key=hit.key,
+                id=hit.id,
+                name=hit.name,
+            )
+        return resolved
 
     def _room_can_confirm(self, room_id: str) -> bool:
         """Whether anyone in `room_id` could answer a confirmation request:
