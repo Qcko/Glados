@@ -816,3 +816,99 @@ async def test_the_stop_holds_the_guard_for_the_whole_teardown(
     assert all(at_settle), "the guard was not held while settling the reader"
     assert all(at_child_wait), "the guard was not held while awaiting the child"
     assert server._stopping is False
+
+
+# ---- Oversized response lines (live 21-09-2026: a "berries" search) ---------
+
+_BIG_ANSWER_SERVER = """
+import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    req = json.loads(line)
+    rid = req.get("id")
+    if rid is None:
+        continue
+    m = req.get("method")
+    if m == "initialize":
+        out = {"jsonrpc":"2.0","id":rid,"result":{
+            "protocolVersion":"2024-11-05","capabilities":{"tools":{}},
+            "serverInfo":{"name":"big","version":"0.1"}}}
+        sys.stdout.write(json.dumps(out)+"\\n")
+    else:
+        name = req["params"]["name"]
+        text = "x" * 20000 if name.startswith("big") else "small"
+        result = {"content":[{"type":"text","text":text}],"isError":False}
+        if name == "note_then_small":
+            note = {"jsonrpc":"2.0","method":"notifications/message",
+                    "params":{"id":rid,"data":"y" * 20000}}
+            sys.stdout.write(json.dumps(note)+"\\n"+json.dumps(
+                {"jsonrpc":"2.0","id":rid,"result":result})+"\\n")
+        elif name == "big_id_last":
+            sys.stdout.write(json.dumps({"jsonrpc":"2.0","result":result,"id":rid})+"\\n")
+        else:
+            sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":rid,"result":result})+"\\n")
+    sys.stdout.flush()
+"""
+
+
+def _big_answer_server() -> StdioServer:
+    return StdioServer(
+        sys.executable, ["-c", _BIG_ANSWER_SERVER], server_id="big", line_limit=4096
+    )
+
+
+@pytest.mark.parametrize("tool", ["big", "big_id_last"])
+async def test_an_oversized_answer_fails_its_call_and_keeps_the_server(tool: str) -> None:
+    server = _big_answer_server()
+    await server.start()
+    try:
+        await server.initialize()
+        pid = server._proc.pid  # noqa: SLF001
+
+        result = await asyncio.wait_for(server.call_tool(tool, {}), 5)
+        assert not result.ok
+        assert result.indeterminate
+        assert tool in result.error and "line limit" in result.error
+        assert not server._dead  # noqa: SLF001
+
+        after = await asyncio.wait_for(server.call_tool("small", {}), 5)
+        assert after.ok
+        assert server._proc.pid == pid  # noqa: SLF001 -- not restarted
+    finally:
+        await server.aclose()
+
+
+async def test_oversized_answers_do_not_open_the_circuit() -> None:
+    server = _big_answer_server()
+    await server.start()
+    try:
+        await server.initialize()
+        for _ in range(5):
+            result = await asyncio.wait_for(server.call_tool("big", {}), 5)
+            assert result.indeterminate
+        assert (await asyncio.wait_for(server.call_tool("small", {}), 5)).ok
+        assert server._restart_attempts == []  # noqa: SLF001
+    finally:
+        await server.aclose()
+
+
+def test_response_id_ignores_an_id_inside_the_payload() -> None:
+    from glados.mcp.stdio_client import _response_id
+
+    head = b'{"jsonrpc":"2.0","result":{"content":[{"text":"{\\"id\\": 99'
+    assert _response_id(head, b'"}]},"id":7}\n') == 7
+    assert _response_id(b'{"jsonrpc":"2.0","id":3,"result":{"x', b"") == 3
+    assert _response_id(b'{"jsonrpc":"2.0","result":{"x', b"xx") is None
+
+
+async def test_an_oversized_notification_blames_no_call_and_loses_no_line() -> None:
+    server = _big_answer_server()
+    await server.start()
+    try:
+        await server.initialize()
+        result = await asyncio.wait_for(server.call_tool("note_then_small", {}), 5)
+        assert result.ok
+        assert not server._dead  # noqa: SLF001
+    finally:
+        await server.aclose()

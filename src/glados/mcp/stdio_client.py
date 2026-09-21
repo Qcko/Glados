@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Sequence
 
 from ..core.adapters import ToolSpec
@@ -77,9 +78,24 @@ _ABANDON_TTL_S = 300.0
 # already timing, so an unbounded wait here becomes a hung turn.
 _STOP_GRACE_S = 2.0
 
+# Longest single JSON-RPC line read from a child. asyncio's default is 64 KiB,
+# which one broad Dunnes search ("berries") overran on 21-09-2026. Results are
+# capped for the model further downstream; this bounds only what is buffered.
+_LINE_LIMIT = 4 * 1024 * 1024
+# Where a response's top-level id is looked for when the line is too long to
+# parse: the head up to its payload key, or else the last bytes of the line.
+_ID_RE = re.compile(rb'"id"\s*:\s*(\d+)')
+_PAYLOAD_KEY_RE = re.compile(rb'"(?:result|error)"\s*:')
+_TAIL_BYTES = 256
+
 
 class StdioServerError(RuntimeError):
     pass
+
+
+class _OversizedResponse(StdioServerError):
+    """The child answered, but in a line too long to read. The server is
+    healthy; only this call's answer is lost."""
 
 
 class _WriteAttempt:
@@ -110,6 +126,7 @@ class StdioServer:
         max_abandoned: int = _MAX_ABANDONED,
         write_timeout_s: float = _WRITE_TIMEOUT_S,
         abandon_ttl_s: float = _ABANDON_TTL_S,
+        line_limit: int = _LINE_LIMIT,
     ) -> None:
         self._command = command
         self._args = list(args)
@@ -181,6 +198,7 @@ class StdioServer:
         self._max_abandoned = max_abandoned
         self._write_timeout_s = write_timeout_s
         self._abandon_ttl_s = abandon_ttl_s
+        self._line_limit = line_limit
 
     async def start(self) -> None:
         if self._proc is not None:
@@ -203,6 +221,7 @@ class StdioServer:
             stderr=asyncio.subprocess.PIPE,
             env={**_os_environ(), **env},
             cwd=self._cwd,
+            limit=self._line_limit,
         )
         self._reader_task = asyncio.create_task(
             self._read_loop(), name=f"stdio-reader-{self.server_id}"
@@ -216,7 +235,14 @@ class StdioServer:
         child_log = logging.getLogger(f"mcp.stdio.{self.server_id}")
         try:
             while True:
-                line = await self._proc.stderr.readline()
+                try:
+                    line = await self._proc.stderr.readline()
+                except ValueError:
+                    # One over-long diagnostic line; readline has already
+                    # dropped it. Stopping here would leave the pipe to fill
+                    # and block the child.
+                    _log.warning("stdio %s: over-long stderr line dropped", self.server_id)
+                    continue
                 if not line:
                     return
                 text = line.decode("utf-8", errors="replace").rstrip()
@@ -232,7 +258,9 @@ class StdioServer:
         assert self._proc is not None and self._proc.stdout is not None
         try:
             while True:
-                line = await self._proc.stdout.readline()
+                line = await self._next_line(self._proc.stdout)
+                if line is None:
+                    continue
                 if not line:
                     self._mark_dead("subprocess closed stdout (EOF)")
                     return
@@ -260,6 +288,39 @@ class StdioServer:
             raise
         except Exception as e:  # noqa: BLE001 - blanket guard for reader thread
             self._mark_dead(f"reader crashed: {type(e).__name__}: {e}")
+
+    async def _next_line(self, stdout: asyncio.StreamReader) -> bytes | None:
+        """The next line from the child; b"" at EOF; None for a line too long
+        to read, which is skipped and charged to its own call alone.
+
+        `readline()` turns an overrun into a ValueError after throwing the
+        buffer away, so the rest of the line would arrive as garbage -- and the
+        reader treated the ValueError as a crash, killing a healthy server and
+        spending its restart budget on one oversized answer."""
+        try:
+            return await stdout.readuntil(b"\n")
+        except asyncio.IncompleteReadError as e:
+            return e.partial
+        except asyncio.LimitOverrunError as e:
+            head = await stdout.read(e.consumed)
+            skipped, tail = await _skip_rest_of_line(stdout)
+            line_end = (head[-_TAIL_BYTES:] + tail)[-_TAIL_BYTES:]
+            self._fail_oversized(head, line_end, len(head) + skipped)
+            return None
+
+    def _fail_oversized(self, head: bytes, tail: bytes, size: int) -> None:
+        rid = _response_id(head, tail)
+        reason = (
+            f"response from {self.server_id} (id={rid}) was {size} bytes, over "
+            f"the {self._line_limit}-byte line limit; dropped unread, so the "
+            f"call's outcome is unknown"
+        )
+        _log.warning("stdio %s: %s", self.server_id, reason)
+        fut = self._pending.pop(rid, None) if rid is not None else None
+        if fut is not None and not fut.done():
+            fut.set_exception(_OversizedResponse(reason))
+        elif rid is not None:
+            self._claim_late_response(rid, {})
 
     def _claim_late_response(self, rid: object, msg: dict) -> bool:
         """Match a response against the abandoned map. True if it was one.
@@ -383,6 +444,8 @@ class StdioServer:
         try:
             await self._write_payload(payload, f"{method} id={rid}", attempt)
             return await fut
+        except _OversizedResponse:
+            raise
         except (asyncio.CancelledError, StdioServerError):
             # Two ways to reach here with the child still working: the caller
             # stopped waiting (dispatch timeout, user interrupt), or the write
@@ -549,6 +612,10 @@ class StdioServer:
                 resp = await self._call_method(
                     "tools/call", {"name": name, "arguments": args}, label=name
                 )
+            except _OversizedResponse as e:
+                # The child ran the call and answered; a write may have
+                # landed, so this is a maybe, never a clean failure.
+                return MCPCallResult(ok=False, indeterminate=True, error=f"{name}: {e}")
             except StdioServerError as e:
                 return MCPCallResult(ok=False, error=str(e))
             if "error" in resp:
@@ -847,6 +914,44 @@ async def _settle(task: asyncio.Task | None) -> None:
         await task
     except (asyncio.CancelledError, Exception):
         pass
+
+
+async def _skip_rest_of_line(stdout: asyncio.StreamReader) -> tuple[int, bytes]:
+    """Discard up to and including the next newline, bounded in memory.
+    Returns the bytes skipped and the last few of them, where an id written
+    after the payload would sit."""
+    skipped = 0
+    tail = b""
+    while True:
+        try:
+            chunk = await stdout.readuntil(b"\n")
+            done = True
+        except asyncio.LimitOverrunError as e:
+            chunk = await stdout.read(e.consumed)
+            done = False
+        except asyncio.IncompleteReadError as e:
+            chunk = e.partial
+            done = True
+        skipped += len(chunk)
+        tail = (tail + chunk)[-_TAIL_BYTES:]
+        if done:
+            return skipped, tail
+
+
+def _response_id(head: bytes, tail: bytes) -> int | None:
+    """The top-level id of a response too long to parse: before the payload
+    key in the head, else the last one in the tail. An id-shaped string
+    inside the payload is never taken from the head, and a line with no
+    payload key is a request or notification from the child, not an answer
+    to any call -- blaming one would fail a healthy call."""
+    payload = _PAYLOAD_KEY_RE.search(head)
+    if payload is None:
+        return None
+    match = _ID_RE.search(head, 0, payload.start())
+    if match is None:
+        found = _ID_RE.findall(tail)
+        return int(found[-1]) if found else None
+    return int(match.group(1))
 
 
 def _answered(fut: asyncio.Future[dict]) -> bool:
