@@ -62,7 +62,12 @@ class ToolRecord:
     # ("milk", "bananas"). Ids and numbers are excluded: they never appear in a
     # spoken reply, so they cannot corroborate or contradict one. Used only by
     # the claim check below, which asks whether the thing the reply says was
-    # changed is the thing any successful call actually touched.
+    # changed is the thing any successful call actually touched. A successful
+    # call's own report of what it touched is added by the caller (see
+    # `record_tool`): "add apple" lands on "6 Organic Apples", and a reply
+    # naming the product is naming the thing the call touched. Only the head
+    # noun of a reported name is kept -- "Dunnes Stores 6 Organic Apples"
+    # vouches for "apples", not for every claim that says "organic".
     subjects: tuple[str, ...] = ()
     # The call timed out after it was sent, so whether it landed is unknown.
     # `ok` stays False -- the turn really did fail, and saying otherwise would
@@ -161,6 +166,7 @@ class TurnRecord:
         mutating: bool = False,
         indeterminate: bool = False,
         args: dict | None = None,
+        result_subjects: tuple[str, ...] = (),
         satisfied: bool = False,
         removes: bool = False,
     ) -> None:
@@ -170,7 +176,7 @@ class TurnRecord:
                 ok=ok,
                 mutating=mutating,
                 indeterminate=indeterminate,
-                subjects=_subjects(args),
+                subjects=_subjects(args) + _head_nouns(result_subjects),
                 satisfied=satisfied,
                 removes=removes,
             )
@@ -497,9 +503,24 @@ def _claim_unsupported(clause: str, subject_words: set[str]) -> bool:
         # ever accuse.
         if not w.isdigit()
     }
-    if named & subject_words:
+    if _word_forms(named) & _word_forms(subject_words):
         return False
     return bool(_without_measures(named))
+
+
+def _word_forms(words: set[str]) -> set[str]:
+    """Each word with its plural endings shed, so "apple" meets "apples",
+    "tomato" meets "tomatoes" and "berry" meets "berries". Over-generating is
+    harmless here: an extra form can only excuse a claim, never accuse one."""
+    forms = set(words)
+    for w in words:
+        if w.endswith("ies"):
+            forms.add(w[:-3] + "y")
+        if w.endswith("es"):
+            forms.add(w[:-2])
+        if w.endswith("s") and not w.endswith("ss"):
+            forms.add(w[:-1])
+    return forms
 
 
 def _without_measures(words: set[str]) -> set[str]:
@@ -593,6 +614,22 @@ def _subjects(args: dict | None) -> tuple[str, ...]:
     )
 
 
+def _head_nouns(names: tuple[str, ...]) -> tuple[str, ...]:
+    """The last distinctive word of each product name -- English names put
+    the thing last ("Irish Low Fat Milk 3L" -> "milk"), brand and adjectives
+    first. A name with no such word contributes nothing."""
+    heads = []
+    for name in names:
+        words = [
+            w for w in re.findall(r"[a-z0-9]+", name.lower())
+            if w not in _UNDISTINCTIVE and len(w) > 2 and not w.isdigit()
+            and _without_measures({w})
+        ]
+        if words:
+            heads.append(words[-1])
+    return tuple(heads)
+
+
 def _action_drifted(turn: TurnRecord) -> bool:
     """The user asked to mutate state, the turn ran at least one tool, yet no
     successful mutating call landed. A pure read/search can't satisfy an action
@@ -621,16 +658,54 @@ def _landed(tool: ToolRecord) -> bool:
 
 def _has_unrecovered_error(tools: list[ToolRecord]) -> bool:
     """An error on a tool is recovered only by a *later* successful call to
-    the same tool. A success that precedes the error does not count."""
+    the same tool, or -- for a definitive write failure -- by a later write
+    that landed the same thing another way. A success that precedes the error
+    does not count."""
     for name in {t.tool for t in tools}:
         calls = [t for t in tools if t.tool == name]
         last_error = _last_index(calls, ok=False)
         if last_error is None:
             continue
         recovered_after = any(c.ok for c in calls[last_error + 1 :])
-        if not recovered_after:
+        if not recovered_after and not _rerouted(tools, calls[last_error]):
             return True
     return False
+
+
+def _rerouted(tools: list[ToolRecord], failed: ToolRecord) -> bool:
+    """A failed write whose goal a LATER successful write on the same server
+    met by another tool. Seen live 21-09-2026: set_cart_quantity(bananas)
+    found nothing to change, and the model added them by name instead.
+
+    Only a definitive failure qualifies -- a timed-out write may still land,
+    and a second route on top of it is a possible duplicate, not a recovery.
+    The later write must share a subject word with the failed one; a failed
+    call aimed only at an id has no words to compare, so any later write of the
+    same kind on that server stands in for it. That is fail-open by design, and still asks
+    for a landed write: a failure followed by reads alone stays `failed`."""
+    if not failed.mutating or failed.indeterminate:
+        return False
+    # Same kind of change only: an add cannot stand in for a failed removal.
+    server = _server(failed.tool)
+    failed_words = _word_forms(_subject_words(failed))
+    position = next(i for i, t in enumerate(tools) if t is failed)
+    after = tools[position + 1 :]
+    return any(
+        t.ok
+        and t.mutating
+        and t.removes == failed.removes
+        and _server(t.tool) == server
+        and (not failed_words or bool(failed_words & _word_forms(_subject_words(t))))
+        for t in after
+    )
+
+
+def _subject_words(tool: ToolRecord) -> set[str]:
+    return {w for s in tool.subjects for w in _words(s)}
+
+
+def _server(qualified_tool: str) -> str:
+    return qualified_tool.split(".", 1)[0]
 
 
 def _last_index(calls: list[ToolRecord], *, ok: bool) -> int | None:

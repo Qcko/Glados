@@ -78,7 +78,7 @@ from .turn_outcome import (
 )
 from ..servers.room_intercom import MAX_MESSAGE_CHARS, SPEAK_INTO
 from .confirm_phrase import compose_confirm_question, tts_safe
-from .product_names import ProductNames
+from .product_names import ProductNames, reported_names
 from .utterance import (
     classify_confirm_answer,
     has_quantity_cue,
@@ -2698,6 +2698,7 @@ class Organizer:
                     mutating=landed_write,
                     indeterminate=result.indeterminate,
                     args=_subject_args(tc),
+                    result_subjects=reported_names(result.content) if result.ok else (),
                     satisfied=refusal is not None and refusal.satisfied,
                     removes=landed_write
                     and spec is not None

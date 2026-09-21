@@ -243,3 +243,24 @@ async def test_the_dialog_gets_no_name_for_an_unseen_id(tmp_path: Path) -> None:
         await _wait_until_asked(org, "kitchen")
         request = next(m for _, m in sink if m["type"] == "tool_confirm_request")
         assert request["arg_names"] == {}
+
+
+def test_reported_names_reads_the_prose_report_only() -> None:
+    from glados.core.product_names import reported_names
+
+    assert reported_names(
+        {"text": "Added 1 x Dunnes Stores 6 Organic Apples (productId=100714434) to cart."}
+    ) == ("Dunnes Stores 6 Organic Apples",)
+    assert reported_names(
+        {"lines": [{"productId": "1", "name": "Irish Milk 3L", "quantity": 1}]}
+    ) == ()
+    assert reported_names(None) == ()
+
+
+def test_reported_names_ignores_a_cart_echoed_in_prose() -> None:
+    from glados.core.product_names import reported_names
+
+    assert reported_names(
+        "Added 1 x Apples (productId=1)\nCart now:\nMilk 2L (productId=2)\n"
+        "top: Bread, productId=3"
+    ) == ("Apples",)

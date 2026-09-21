@@ -95,6 +95,40 @@ class ProductNames:
         return resolved, named
 
 
+def reported_names(content: object) -> tuple[str, ...]:
+    """The names a write's own report says it touched: "Added 1 x NAME
+    (productId=N)", "Set NAME (productId=N)". Only a name behind a report
+    verb counts -- a write that echoes the cart, a record list or a line of
+    alternatives names items it never changed, and those must not vouch for
+    a claim about them."""
+    return tuple(
+        dict.fromkeys(
+            name
+            for text in _texts_in(content)
+            for match in _REPORTED_RE.finditer(text)
+            if (name := _clean(match.group(1))) and _HAS_LETTER_RE.search(name)
+        )
+    )
+
+
+_REPORTED_RE = re.compile(
+    r"\b(?:added|removed|changed|updated|set)\s+(?:\d+\s*x\s+)?"
+    r"([^()\n;]{1,%d}?)\s*\(productId=\d+\)" % MAX_NAME_CHARS,
+    re.IGNORECASE,
+)
+
+
+def _texts_in(content: object):
+    if isinstance(content, str):
+        yield content
+    elif isinstance(content, dict):
+        for value in content.values():
+            yield from _texts_in(value)
+    elif isinstance(content, list):
+        for item in content:
+            yield from _texts_in(item)
+
+
 def _pairs_in(content: object):
     if isinstance(content, dict):
         yield from _pairs_in_record(content)

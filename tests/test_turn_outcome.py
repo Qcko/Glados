@@ -622,3 +622,139 @@ def test_an_offer_with_a_claim_verb_anywhere_in_a_question_fails_open() -> None:
 def test_a_contraction_denial_is_not_a_claim() -> None:
     turn = _claim("I haven't removed the milk.", [("dunnes.view_cart", True, False, {})])
     assert classify(turn) != "confabulated"
+
+
+# --- Live trace desk_qcko_a2f407cd (21-09-2026) ------------------------------
+
+
+def test_a_claim_naming_the_product_the_add_reported_is_done() -> None:
+    # "add one apple" -> add_to_cart_by_name(query="apple") landed on
+    # "6 Organic Apples"; the reply named the product, not the query, and was
+    # replaced by the canned no-record line.
+    turn = _turn(final_text="One pack of **6 organic apples** added.")
+    turn.record_tool(
+        "dunnes.add_to_cart_by_name",
+        True,
+        mutating=True,
+        args={"query": "apple", "repeat": False},
+        result_subjects=("Dunnes Stores 6 Organic Apples",),
+    )
+    assert classify(turn) == "done"
+
+
+def test_singular_query_backs_a_plural_claim() -> None:
+    for query, reply in (
+        ("apple", "Apples added."),
+        ("tomato", "Tomatoes added."),
+        ("berry", "Berries added."),
+        ("bananas", "Banana added."),
+    ):
+        turn = _claim(reply, [("dunnes.add_to_cart_by_name", True, True, {"query": query})])
+        assert classify(turn) == "done", reply
+
+
+def test_a_reported_product_does_not_excuse_a_claim_about_another() -> None:
+    turn = _turn(final_text="Apples added and the milk removed.")
+    turn.record_tool(
+        "dunnes.add_to_cart_by_name",
+        True,
+        mutating=True,
+        args={"query": "apple"},
+        result_subjects=("Dunnes Stores 6 Organic Apples",),
+    )
+    assert classify(turn) == "confabulated"
+
+
+def test_a_failed_set_rerouted_through_an_add_is_recovered() -> None:
+    # "add 8 bananas": set_cart_quantity(id) found nothing to change, the
+    # model looked at the cart and added by name instead.
+    turn = _turn(final_text="Added one pack of bananas.")
+    turn.record_tool("dunnes.set_cart_quantity", False, mutating=True,
+                     args={"productId": "100221536", "quantity": 8})
+    turn.record_tool("dunnes.view_cart", True, args={})
+    turn.record_tool("dunnes.add_to_cart_by_name", True, mutating=True,
+                     args={"query": "bananas"})
+    assert classify(turn) == "done"
+
+
+def test_a_failed_write_followed_only_by_reads_stays_failed() -> None:
+    turn = _turn(final_text="Anything else?")
+    turn.record_tool("dunnes.set_cart_quantity", False, mutating=True,
+                     args={"productId": "100221536", "quantity": 8})
+    turn.record_tool("dunnes.view_cart", True, args={})
+    assert classify(turn) == "failed"
+
+
+def test_a_write_on_another_subject_does_not_recover_a_failed_one() -> None:
+    turn = _turn(final_text="Done.")
+    turn.record_tool("dunnes.remove_from_cart_by_name", False, mutating=True,
+                     args={"name": "milk"})
+    turn.record_tool("dunnes.add_to_cart_by_name", True, mutating=True,
+                     args={"query": "eggs"})
+    assert classify(turn) == "failed"
+
+
+def test_a_write_on_another_server_does_not_recover_a_failed_one() -> None:
+    turn = _turn(final_text="Done.")
+    turn.record_tool("dunnes.set_cart_quantity", False, mutating=True,
+                     args={"productId": "1", "quantity": 2})
+    turn.record_tool("lights.set_state", True, mutating=True, args={"state": "on"})
+    assert classify(turn) == "failed"
+
+
+def test_a_timed_out_write_is_not_recovered_by_another_route() -> None:
+    turn = _turn(final_text="Done.")
+    turn.record_tool("dunnes.set_cart_quantity", False, mutating=True,
+                     indeterminate=True, args={"productId": "1", "quantity": 2})
+    turn.record_tool("dunnes.add_to_cart_by_name", True, mutating=True,
+                     args={"query": "bananas"})
+    assert classify(turn) == "failed"
+
+
+def test_a_failed_read_is_not_recovered_by_a_write() -> None:
+    turn = _turn(final_text="Done.")
+    turn.record_tool("dunnes.view_cart", False)
+    turn.record_tool("dunnes.add_to_cart_by_name", True, mutating=True,
+                     args={"query": "bananas"})
+    assert classify(turn) == "failed"
+
+
+def test_a_brand_word_in_the_reported_name_does_not_excuse_another_item() -> None:
+    turn = _turn(final_text="Organic bananas added.")
+    turn.record_tool(
+        "dunnes.add_to_cart_by_name",
+        True,
+        mutating=True,
+        args={"query": "apple"},
+        result_subjects=("Dunnes Stores 6 Organic Apples",),
+    )
+    assert classify(turn) == "confabulated"
+
+
+def test_a_failed_removal_is_not_recovered_by_an_add() -> None:
+    turn = _turn(final_text="Done.")
+    turn.record_tool("dunnes.remove_from_cart", False, mutating=True,
+                     args={"productId": "100806893"}, removes=True)
+    turn.record_tool("dunnes.add_to_cart_by_name", True, mutating=True,
+                     args={"query": "eggs"})
+    assert classify(turn) == "failed"
+
+
+def test_failed_writes_then_reads_and_a_cheerful_question_stay_failed() -> None:
+    # T6-shaped, with the errors on writes: a reroute needs a landed write.
+    turn = _turn(final_text="Anything else I can help with?")
+    turn.record_tool("dunnes.remove_from_cart", False, mutating=True,
+                     args={"productId": "1"}, removes=True)
+    turn.record_tool("dunnes.set_cart_quantity", False, mutating=True,
+                     args={"productId": "1", "quantity": 0})
+    turn.record_tool("dunnes.view_cart", True, args={})
+    assert classify(turn) == "failed"
+
+
+def test_a_denial_of_the_reported_removed_item_is_caught() -> None:
+    # remove(id) used to carry no words; the report's name now gives it one.
+    turn = _turn(final_text="The milk wasn't in your cart.")
+    turn.record_tool("dunnes.remove_from_cart", True, mutating=True,
+                     args={"productId": "100806893"}, removes=True,
+                     result_subjects=("Dunnes Stores Irish Low Fat Milk 3L",))
+    assert denied_a_removal_that_landed(turn)
