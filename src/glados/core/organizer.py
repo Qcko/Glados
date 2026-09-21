@@ -87,6 +87,7 @@ from .utterance import (
     is_add_request,
     is_time_request,
     spoken_count,
+    spoken_target_count,
 )
 from .write_ledger import (
     REPEAT_ARG,
@@ -450,6 +451,18 @@ _QUANTITY_DROPPED_NOTE = (
     "want, send it again with quantity {count}. If {count} is part of the product "
     "(a pack or a size), send the same call again unchanged."
 )
+# The refusal for a write that would not leave the count a set-class request
+# asked the cart to end at ("set the bananas to 8" -> add(bananas) with no
+# quantity, seen live 21-09-2026). Which tool is right depends on whether the
+# item is already in the cart, which the model can see and the harness cannot.
+_QUANTITY_TARGET_NOTE = (
+    "GLaDOS note, not tool output: not sent -- the user asked for {count} in "
+    "total, and this call would not leave {count}. Check the cart if you have "
+    "not: if the item is already in it, set its quantity to {count}; if it is "
+    "not, add it with quantity {count}. If {count} is part of the product (a "
+    "pack or a size), send the "
+    "same call again unchanged."
+)
 # The refusal for an absolute set answering "add X". "Add" is relative and a
 # set is absolute; bridging them needs the cart's current count, which the
 # harness cannot see -- so even "add two milk" -> set(milk, 2) takes one out of
@@ -620,24 +633,51 @@ def _removal_unasked(call: LLMToolCall, spec: ToolSpec, utterance: str) -> bool:
     return is_add_request(utterance)
 
 
-def _quantity_dropped(call: LLMToolCall, spec: ToolSpec, utterance: str) -> int | None:
-    """The count the user said, when this add would send a different one --
-    including none at all, which the server reads as one. Observed 12-09-2026
-    (bake-off T10): "add two more milks" -> add(milk) with no quantity, one
-    carton added, turn reported done. None when there is nothing to compare."""
-    if not spec.additive or not spec.quantity_arg:
-        return None
-    said = spoken_count(utterance)
-    if said is None:
-        return None
-    return None if _sent_quantity(call, spec) == said else said
+@dataclass(frozen=True)
+class _CountAsked:
+    """A count the user said, the argument that must carry it, and the note
+    that explains a refusal."""
+
+    count: int
+    arg: str
+    note: str
 
 
-def _sent_quantity(call: LLMToolCall, spec: ToolSpec) -> int | None:
-    """The count this add would send; an absent argument is the server's one."""
-    if call.args.get(spec.quantity_arg) is None:
-        return 1
-    return coerce_quantity(call.args.get(spec.quantity_arg))
+def _quantity_dropped(call: LLMToolCall, spec: ToolSpec, utterance: str) -> _CountAsked | None:
+    """The count the user said, when this write would send a different one --
+    including none at all, which an add's server reads as one. Observed
+    12-09-2026 (bake-off T10): "add two more milks" -> add(milk) with no
+    quantity, one carton added, turn reported done; and 21-09-2026: "set the
+    bananas to 8" -> the same shape. None when there is nothing to compare."""
+    asked = _count_asked(spec, utterance)
+    if asked is None:
+        return None
+    return None if _sent_count(call, spec, asked.arg) == asked.count else asked
+
+
+def _count_asked(spec: ToolSpec, utterance: str) -> _CountAsked | None:
+    """An add request's count binds an additive tool's quantity. A set-class
+    request's end count binds a set tool's count, or an add's quantity -- the
+    right choice when the item is not yet in the cart. A relative (delta) tool
+    cannot be judged against an end count without the cart, so it is left
+    alone, and so is an add of the right count on top of items already there."""
+    if spec.additive and spec.quantity_arg:
+        said = spoken_count(utterance)
+        if said is not None:
+            return _CountAsked(said, spec.quantity_arg, _QUANTITY_DROPPED_NOTE)
+    target = spoken_target_count(utterance)
+    if target is None:
+        return None
+    arg = spec.count_arg or (spec.quantity_arg if spec.additive else None)
+    return _CountAsked(target, arg, _QUANTITY_TARGET_NOTE) if arg else None
+
+
+def _sent_count(call: LLMToolCall, spec: ToolSpec, arg: str) -> int | None:
+    """The count this write would send. An add's absent quantity is the
+    server's one; a set with no count sends nothing to compare, so None."""
+    if call.args.get(arg) is None:
+        return 1 if spec.additive and arg == spec.quantity_arg else None
+    return coerce_quantity(call.args.get(arg))
 
 
 # Dropped-quantity refusals per tool per turn. A model that varies the query
@@ -2875,17 +2915,18 @@ class Organizer:
         trace,
         outcome: TurnRecord,
     ) -> "_WriteRefusal | None":
-        """Refuse an add whose count differs from the one the user said -- ONCE
+        """Refuse a write whose count differs from the one the user said -- ONCE
         per identical call per turn. The count is parsed from speech and can be
         part of the product ("a 6 pack" slipping past the parser), so a model
         that re-sends the very same call is taken to have considered the note,
         and the call goes through. That bounds the worst case to the old
         behaviour instead of a loop to the pass cap."""
-        said = _quantity_dropped(tc, spec, utterance)
-        if said is None:
+        asked = _quantity_dropped(tc, spec, utterance)
+        if asked is None:
             return None
-        sent = _sent_quantity(tc, spec)
-        key = canonical_key(tc, [spec.quantity_arg])
+        said = asked.count
+        sent = _sent_count(tc, spec, asked.arg)
+        key = canonical_key(tc, [asked.arg])
         facts = dict(call_id=tc.call_id, server=tc.server, name=tc.name, said=said, sent=sent)
         if _considered_the_note(outcome, key, sent) or _nudges_spent(outcome, tc):
             trace.event("quantity_mismatch_overridden", **facts)
@@ -2900,7 +2941,7 @@ class Organizer:
         )
         trace.event("quantity_mismatch_refused", **facts)
         return _WriteRefusal(
-            _local_result("quantity_mismatch", _QUANTITY_DROPPED_NOTE.format(count=said)),
+            _local_result("quantity_mismatch", asked.note.format(count=said)),
             satisfied=False,
         )
 

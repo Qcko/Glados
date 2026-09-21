@@ -21,7 +21,13 @@ from glados.core.turn_outcome import (
     classify,
 )
 from glados.core.config import ServerEntry, ToolOverlay
-from glados.core.utterance import has_quantity_cue, has_repeat_cue, is_add_request, spoken_count
+from glados.core.utterance import (
+    has_quantity_cue,
+    has_repeat_cue,
+    is_add_request,
+    spoken_count,
+    spoken_target_count,
+)
 from glados.core.write_ledger import WriteLedger, canonical_key, coerce_quantity
 from glados.mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
 from tests.organizer_harness import CLIENT_ID, desk_organizer, trace_events
@@ -667,7 +673,7 @@ async def test_a_set_never_answers_an_add(tmp_path: Path, utterance: str, quanti
 @pytest.mark.parametrize(
     "utterance",
     [
-        "set the milk to two",
+        "set the milk to three",
         "buy milk so I have three",
         "add milk up to three in total",
         "put three milk in, exactly three",
@@ -1079,3 +1085,128 @@ async def test_saying_the_cart_is_now_empty_after_the_last_removal_is_left_alone
         await _say(h, llm, "take the milk off")
 
     assert "denied_removal_corrected" not in [e.get("event") for e in trace_events(tmp_path)]
+
+
+# ---- Set-class counts ("set the bananas to 8", live 21-09-2026) --------------
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("set the bananas to 8", 8),
+        ("set bananas to eight", 8),
+        ("change the milk to two", 2),
+        ("update the eggs to 12", 12),
+        ("please set it to 3", 3),
+        ("make it 8", 8),
+        ("make that two", 2),
+        ("make the bananas 8", 8),
+        ("increase the milk to 4", 4),
+        ("make it 8 bananas", 8),
+        ("set the bananas to 8 please", 8),
+        ("make it 2 more", None),
+        ("set the milk to 2 litres", None),
+        ("set the milk to 0", None),
+        ("set the milk to zero", None),
+        ("change the milk to oat milk", None),
+        ("set the bananas to 8 and the milk to 2", None),
+        ("add 8 bananas", None),
+        ("set the bananas", None),
+        ("make it a 6 pack", None),
+    ],
+)
+def test_spoken_target_count(text: str, expected: int | None) -> None:
+    assert spoken_target_count(text) == expected
+
+
+@pytest.mark.parametrize(
+    "args, sent",
+    [
+        ({"query": "bananas"}, False),
+        ({"query": "bananas", "quantity": 1}, False),
+        ({"query": "bananas", "quantity": 8}, True),
+    ],
+)
+async def test_an_add_answering_a_set_must_carry_the_end_count(
+    tmp_path: Path, args: dict, sent: bool
+) -> None:
+    """Live 21-09-2026: "set the bananas to 8" -> add(bananas) with no
+    quantity; one pack went in and the turn was reported done."""
+    tool = _RecordingTool(_add_spec())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM([[_call("add_to_cart_by_name", args)]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "set the bananas to 8")
+
+    assert (len(tool.calls) == 1) is sent
+    if not sent:
+        message = _last_tool_message(llm)
+        assert "quantity_mismatch" in message and "8 in total" in message
+
+
+@pytest.mark.parametrize(
+    "args, sent",
+    [
+        ({"name": "bananas", "quantity": 9}, False),
+        ({"name": "bananas"}, False),
+        ({"name": "bananas", "quantity": 8}, True),
+        ({"name": "bananas", "quantity": "8"}, True),
+    ],
+)
+async def test_a_set_must_carry_the_count_the_user_asked_for(
+    tmp_path: Path, args: dict, sent: bool
+) -> None:
+    tool = _RecordingTool(_set_spec())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM([[_call("set_cart_quantity_by_name", args)]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "make it 8")
+
+    assert (len(tool.calls) == 1) is sent
+
+
+async def test_a_resent_set_goes_through_after_the_note(tmp_path: Path) -> None:
+    """The count may be part of the product; the identical call re-sent in a
+    later pass is taken as considered, exactly as for an add."""
+    tool = _RecordingTool(_set_spec())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    call = {"name": "bananas", "quantity": 9}
+    llm = _TurnScriptedLLM(
+        [[_call("set_cart_quantity_by_name", call, "c1"),
+          _call("set_cart_quantity_by_name", call, "c2")]]
+    )
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "set the bananas to 8")
+
+    assert [c.get("quantity") for c in tool.calls] == [9]
+
+
+async def test_a_delta_tool_is_not_judged_against_an_end_count(tmp_path: Path) -> None:
+    tool = _RecordingTool(_adjust_spec())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM([[_call("adjust_cart_quantity_by_name", {"name": "bananas", "delta": 2})]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "set the bananas to 8")
+
+    assert len(tool.calls) == 1
+
+
+async def test_after_the_note_the_model_may_switch_to_the_set_tool(tmp_path: Path) -> None:
+    add = _RecordingTool(_add_spec())
+    setter = _RecordingTool(_set_spec())
+    mcp = MCPRegistry()
+    mcp.register(add)
+    mcp.register(setter)
+    llm = _TurnScriptedLLM(
+        [[_add("bananas", "c1"),
+          _call("set_cart_quantity_by_name", {"name": "bananas", "quantity": 8}, "c2")]]
+    )
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "set the bananas to 8")
+
+    assert add.calls == []
+    assert [c.get("quantity") for c in setter.calls] == [8]

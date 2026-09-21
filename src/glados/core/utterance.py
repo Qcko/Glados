@@ -236,6 +236,38 @@ def spoken_count(text: str) -> int | None:
     return count if count > 0 else None
 
 
+# A count stated as where the cart should END: "set the bananas to 8", "change
+# the milk to two", "make it 8", "make the eggs twelve". The count sits right
+# after "to" (set-class verbs) or right after the object of "make"; the object
+# is short, so a number buried later in a sentence is not read as the target.
+_TARGET_COUNT_RE = re.compile(
+    rf"^{_LEAD_IN}(?:(?:set|change|update|increase|decrease|reduce|lower|raise|bump)"
+    r"(?:\s+[\w']+){0,5}?\s+to|make(?:\s+[\w']+){1,5}?)\s+"
+    r"(\d+|" + "|".join(_COUNT_VALUES) + r")(?![%\w-]|\.\d)(?:\s+(\w+))?",
+    re.IGNORECASE,
+)
+# After the count, a word saying it is relative ("make it 2 more"), not an end state.
+_RELATIVE_WORDS = frozenset({"more", "extra", "less", "fewer", "additional"})
+
+
+def spoken_target_count(text: str) -> int | None:
+    """The count a set-class request asks the cart to END at ("set the bananas
+    to 8" -> 8, "make it two" -> 2), or None whenever it cannot be read with
+    confidence: no count in that position, a size ("set it to 2 litres"), a
+    relative amount ("make it 2 more"), zero, or a list. The absolute twin of
+    `spoken_count`, which reads only add requests."""
+    if not text or _MANY_ITEMS_RE.search(text):
+        return None
+    match = _TARGET_COUNT_RE.match(text.strip())
+    if match is None:
+        return None
+    after = (match.group(2) or "").lower()
+    if after in _SIZE_WORDS or after in _RELATIVE_WORDS:
+        return None
+    count = _count_value(match.group(1))
+    return count if count > 0 else None
+
+
 def _count_value(token: str) -> int:
     lowered = token.lower()
     return int(lowered) if lowered.isdigit() else _COUNT_VALUES[lowered]
