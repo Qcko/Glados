@@ -404,9 +404,14 @@ _ALREADY_ATTEMPTED = (
 # worth one, and its text is the server's, which no control decision here may
 # read -- and every attempt after that is answered locally.
 #
-# Per drive, like `in_flight`: a specialist escalation mints a fresh record, so
-# the re-roll gets its own two sends. Deliberate -- escalation is a clean view of
-# the request -- and still bounded, where the observed turn was not.
+# Per drive, like `in_flight`: a re-drive mints a fresh record. It does not get
+# fresh sends, though: an identical write an earlier drive of the request saw
+# refused is answered with that refusal (`TurnRecord.earlier_failures`), so the
+# server is not asked again and the room is not re-prompted to confirm it.
+# The cost: a TRANSIENT refusal ("busy", "not logged in") also sticks for the
+# rest of the request, since telling it apart would mean reading server text.
+# Accepted -- the first drive already had its own identical retry above, and a
+# later request by the user starts clean.
 _MAX_IDENTICAL_RETRIES = 1
 _ALREADY_FAILED_NOTE = (
     "GLaDOS note, not tool output: not sent -- this exact call already failed "
@@ -571,12 +576,21 @@ def _note_definitive_failure(
         return
     key = _in_flight_key(call)
     outcome.failed_calls[key] = outcome.failed_calls.get(key, 0) + 1
+    outcome.failure_results[key] = result
 
 
 def _forget_failures_on(server: str, outcome: TurnRecord) -> None:
     prefix = f"{server}."
-    for key in [k for k in outcome.failed_calls if k[0].startswith(prefix)]:
-        del outcome.failed_calls[key]
+    for record in (outcome.failed_calls, outcome.failure_results, outcome.earlier_failures):
+        for key in [k for k in record if k[0].startswith(prefix)]:
+            del record[key]
+
+
+def _earlier_failure(call: LLMToolCall, outcome: TurnRecord) -> MCPCallResult | None:
+    """The server's answer to this exact write in an earlier drive of the same
+    request. That drive failed with nothing landed, so its refusal still stands;
+    resending would only fetch it again, behind a second confirmation."""
+    return outcome.earlier_failures.get(_in_flight_key(call))
 
 
 @dataclass(frozen=True)
@@ -1328,7 +1342,7 @@ class Organizer:
                 trace.event("tool_scope_fallback_full")
                 final_text, outcome, new_history = await self._drive(
                     llm, session.session_id, session.room_id, envelope, text,
-                    trace, history, all_specs,
+                    trace, history, all_specs, outcome.failures_to_carry(),
                 )
                 specs = all_specs
             answered_by = llm
@@ -1338,7 +1352,7 @@ class Organizer:
                 # clean view (on the full set if the fallback above widened it).
                 final_text, outcome, new_history = await self._escalate_to_specialist(
                     session.session_id, session.room_id, envelope, text, trace,
-                    history, specs,
+                    history, specs, outcome.failures_to_carry(),
                 )
                 # Whatever comes after must run on the brain that produced this
                 # outcome, not the one that already failed.
@@ -1355,7 +1369,7 @@ class Organizer:
                 # attempts on qwen3:4b.
                 final_text, outcome, new_history = await self._finish_the_job(
                     answered_by, session.session_id, session.room_id, envelope,
-                    text, trace, history, specs,
+                    text, trace, history, specs, outcome.failures_to_carry(),
                 )
                 kind = classify(outcome)
                 if kind != "confabulated":
@@ -1654,6 +1668,7 @@ class Organizer:
         trace,
         history: list[LLMMessage],
         specs: list[ToolSpec],
+        earlier_failures: dict[WriteKey, MCPCallResult] | None = None,
     ) -> tuple[str, TurnRecord, list[LLMMessage]]:
         """Run one end-to-end turn (tool loop) on `llm` and return the final
         spoken text, the classified turn record, and the conversation history
@@ -1670,6 +1685,7 @@ class Organizer:
         outcome = TurnRecord(
             action_intent=is_action_request(text),
             untrusted_seen=session_id in self._untrusted_sessions,
+            earlier_failures=dict(earlier_failures or {}),
         )
         await self._maybe_force_time(
             session_id, room_id, envelope, text, messages, trace, outcome
@@ -1805,6 +1821,7 @@ class Organizer:
         trace,
         history: list[LLMMessage],
         specs: list[ToolSpec],
+        earlier_failures: dict[WriteKey, MCPCallResult],
     ) -> tuple[str, TurnRecord, list[LLMMessage]]:
         """Re-drive a turn that announced an action it never dispatched.
 
@@ -1832,7 +1849,7 @@ class Organizer:
         nudge = LLMMessage(role="system", content=_UNFINISHED_TURN_NUDGE)
         final_text, outcome, new_history = await self._drive(
             llm, session_id, room_id, envelope, text, trace,
-            [*history, nudge], specs,
+            [*history, nudge], specs, earlier_failures,
         )
         return final_text, outcome, [m for m in new_history if m is not nudge]
 
@@ -1845,6 +1862,7 @@ class Organizer:
         trace,
         history: list[LLMMessage],
         specs: list[ToolSpec],
+        earlier_failures: dict[WriteKey, MCPCallResult],
     ) -> tuple[str, TurnRecord, list[LLMMessage]]:
         trace.event("escalate", reason="primary outcome failed")
         await self._broadcast(
@@ -1859,7 +1877,7 @@ class Organizer:
         # Difficulty retry: same tool scope, smarter brain.
         return await self._drive(
             self._specialist_llm, session_id, room_id, envelope, text, trace,
-            history, specs,
+            history, specs, earlier_failures,
         )
 
     def _commit_history(
@@ -2629,8 +2647,16 @@ class Organizer:
             retry_refused = (
                 mutating and not answered_from_ledger and _retries_spent(tc, outcome)
             )
+            replayed = None
+            if mutating and not answered_from_ledger and not retry_refused:
+                replayed = _earlier_failure(tc, outcome)
             refusal = None
-            if not answered_from_ledger and not retry_refused and mutating:
+            if (
+                not answered_from_ledger
+                and not retry_refused
+                and replayed is None
+                and mutating
+            ):
                 refusal = self._refuse_write(
                     tc, spec, session_id, utterance, trace, outcome
                 )
@@ -2668,6 +2694,15 @@ class Organizer:
                     server=tc.server,
                     name=tc.name,
                 )
+            elif replayed is not None:
+                # The server's own refusal, replayed rather than re-fetched:
+                # still server bytes, so it is wrapped like any dispatch below.
+                # Ahead of the confirmation gate, so the room is not asked
+                # twice about a write the server already turned down.
+                result = replayed
+                trace.event(
+                    "failure_replayed", call_id=tc.call_id, server=tc.server, name=tc.name
+                )
             elif refusal is not None:
                 result = refusal.result
             elif needs_confirm:
@@ -2703,7 +2738,7 @@ class Organizer:
                 outcome.in_flight.add(_in_flight_key(tc))
             if mutating and not answered_locally and not denied:
                 _note_definitive_failure(tc, result, outcome)
-            if mutating and not answered_locally and not denied:
+            if mutating and not answered_locally and not denied and replayed is None:
                 self._ledger_outcome(tc, spec, session_id, result)
             await self._broadcast(
                 room_id,

@@ -34,7 +34,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from ..mcp.registry import MCPCallResult
 
 TurnOutcomeKind = Literal["done", "needs-user", "failed", "confabulated"]
 
@@ -135,6 +138,18 @@ class TurnRecord:
     # the wire every hop (observed 12-09-2026: eight identical adds in one turn,
     # each refused as a duplicate). Per turn, like `in_flight`.
     failed_calls: dict[tuple[str, str], int] = field(default_factory=dict)
+    # The server's answer to each of those failures, by the same key, and the
+    # answers an EARLIER drive of the same request got. A re-drive (scope
+    # fallback, escalation, finish-the-job) re-issuing an identical write is
+    # answered from `earlier_failures` instead of the wire (observed
+    # 26-09-2026: the specialist re-sent a refused add and re-prompted the
+    # room to confirm it).
+    failure_results: dict[tuple[str, str], MCPCallResult] = field(
+        default_factory=dict
+    )
+    earlier_failures: dict[tuple[str, str], MCPCallResult] = field(
+        default_factory=dict
+    )
     # Adds refused this turn for a count that differs from the one the user
     # said: the call minus its quantity -> (tool pass it was refused in, the
     # quantity it sent). The same call with the same quantity, sent again in a
@@ -189,6 +204,10 @@ class TurnRecord:
         happen. Deliberately not the replay predicate -- see
         `may_have_mutated`, which asks the different question."""
         return _has_successful_mutation(self.tools)
+
+    def failures_to_carry(self) -> dict[tuple[str, str], MCPCallResult]:
+        """Every refused write a re-drive of this request must not resend."""
+        return {**self.earlier_failures, **self.failure_results}
 
     def may_have_mutated(self) -> bool:
         """True if external state might already have changed this turn.

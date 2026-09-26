@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from glados.core.adapters import LLMMessage, LLMText, LLMToolCall, ToolSpec
 from glados.core.config import ClientBinding
 from glados.core.organizer import Organizer
+from glados.core.protocols import ToolConfirmResponse
 from glados.core.sessions import SessionRegistry
 from glados.core.traces import TraceStore
 from glados.core.turn_outcome import (
@@ -349,3 +350,107 @@ async def test_the_ledger_key_ignores_argument_order(
         await org.flush()
 
     assert len(tool.calls) == 1
+
+
+class _RefusingTool:
+    """Answers every call with a definitive refusal: nothing changed."""
+
+    def __init__(self, spec: ToolSpec) -> None:
+        self.spec = spec
+        self.calls: list[dict] = []
+
+    async def call(self, args: dict, envelope: CallEnvelope) -> MCPCallResult:
+        self.calls.append(args)
+        return MCPCallResult(ok=False, error="matches 2 sizes, nothing was added")
+
+
+async def _escalated_turn(tmp_path: Path, tool, specialist_calls: list):
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    primary = _ScriptedLLM([_call("c1", {"item": "water"})], reply="Which size?")
+    specialist = _ScriptedLLM(specialist_calls, reply="Which size?")
+    async with _organizer(
+        tmp_path, primary, mcp, specialist_llm=specialist, escalate_on_failed=True
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "add water")
+        await org.flush()
+    return specialist, sink
+
+
+async def test_escalation_does_not_resend_a_refused_write(tmp_path: Path) -> None:
+    """Observed 26-09-2026: the server refused an add, the turn escalated, and
+    the specialist sent the identical add again -- a second round trip and a
+    second confirmation for an answer that could not change."""
+    tool = _RefusingTool(_spec(mutating=True))
+    specialist, _ = await _escalated_turn(
+        tmp_path, tool, [_call("c2", {"item": "water"})]
+    )
+
+    assert len(tool.calls) == 1
+    assert "nothing was added" in _tool_messages(specialist.passes)[-1]
+
+
+async def test_a_replayed_refusal_is_still_external_content(tmp_path: Path) -> None:
+    """The replay is the server's bytes, not GLaDOS's words: it keeps the
+    wrapper a real dispatch would have put on it."""
+    tool = _RefusingTool(_spec(mutating=True, untrusted=True))
+    specialist, _ = await _escalated_turn(
+        tmp_path, tool, [_call("c2", {"item": "water"})]
+    )
+
+    assert "<external>" in _tool_messages(specialist.passes)[-1]
+
+
+async def test_a_replayed_refusal_asks_the_room_nothing(tmp_path: Path) -> None:
+    """The room already said yes once to a write the server turned down."""
+    tool = _RefusingTool(_spec(mutating=True, requires_confirmation=True))
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    primary = _ScriptedLLM([_call("c1", {"item": "water"})], reply="Which size?")
+    specialist = _ScriptedLLM([_call("c2", {"item": "water"})], reply="Which size?")
+    async with _organizer(
+        tmp_path, primary, mcp, specialist_llm=specialist, escalate_on_failed=True
+    ) as (org, sink):
+        await org.handle_user_text("desk-ui", "add water")
+        await _grant_every_confirm(org, sink)
+        await org.flush()
+
+    assert len(_confirm_requests(sink)) == 1
+    assert len(tool.calls) == 1
+
+
+def _confirm_requests(sink: list[tuple[str, dict]]) -> list[dict]:
+    return [m for _, m in sink if m.get("type") == "tool_confirm_request"]
+
+
+async def _grant_every_confirm(org: Organizer, sink: list[tuple[str, dict]]) -> None:
+    granted: set[str] = set()
+    for _ in range(100):
+        await asyncio.sleep(0.02)
+        for req in _confirm_requests(sink):
+            if req["request_id"] not in granted:
+                granted.add(req["request_id"])
+                await org.handle_tool_confirm_response(
+                    "desk-ui",
+                    ToolConfirmResponse(request_id=req["request_id"], granted=True),
+                )
+
+
+async def test_escalation_still_sends_a_different_write(tmp_path: Path) -> None:
+    """The replay is keyed on the call: the specialist picking the size the
+    refusal named is a new request and goes to the wire."""
+    tool = _RefusingTool(_spec(mutating=True))
+    await _escalated_turn(tmp_path, tool, [_call("c2", {"item": "water 9x500ml"})])
+
+    assert len(tool.calls) == 2
+
+
+async def test_a_specialist_looping_on_a_replay_still_stops(tmp_path: Path) -> None:
+    """Replays count as failures, so the identical-retry cap still ends it."""
+    tool = _RefusingTool(_spec(mutating=True))
+    specialist, _ = await _escalated_turn(
+        tmp_path, tool, [_call(f"c{i}", {"item": "water"}) for i in range(2, 5)]
+    )
+
+    assert len(tool.calls) == 1
+    assert "already failed" in _tool_messages(specialist.passes)[-1]
