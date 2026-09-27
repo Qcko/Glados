@@ -169,7 +169,7 @@ function Get-ServersToml {
     # The Dunnes server only attaches to Edge over CDP; without an address
     # every browser tool refuses.
     return $example -replace '(env\.DUNNES_EDGE_PROFILE = )"<your-secrets-dir>/dunnes-edge-profile"',
-        "`$1'$profileDir'`r`nenv.DUNNES_EDGE_DEBUGGER_ADDRESS = `"127.0.0.1:9222`""
+        "`$1'$profileDir'`r`nenv.DUNNES_EDGE_DEBUGGER_ADDRESS = `"127.0.0.1:9222`"`r`nenv.DUNNES_VIEWPORT_WIDTH = `"1280`""
 }
 
 function Write-IfMissing([string]$path, [string]$content) {
