@@ -177,7 +177,10 @@ function Add-DeployKey {
     $pub = (Get-Content -Raw $DeployKeyFile).Trim()
     if ((Test-Path $keys) -and (Select-String -Path $keys -SimpleMatch $pub -Quiet)) { return }
     $entry = Join-Path $Root 'bin\deploy-release.ps1'
-    $forced = "command=`"powershell.exe -NoProfile -ExecutionPolicy Bypass -File $entry`"," +
+    # Run IN sshd's default shell, not as a child process: a PowerShell
+    # default shell does not hand its stdin to a native child, so a spawned
+    # powershell.exe never sees the payload and waits forever.
+    $forced = "command=`"& '$entry'`"," +
               'no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty'
     Add-Content -Path $keys -Value "$forced $pub" -Encoding ascii
 }
