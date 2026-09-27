@@ -104,6 +104,15 @@ model surface.
    `GLADOS_PROD_SSH_HOST` to it, ship the Dunnes build (`-Dunnes`), then the
    first tag. That first deploy builds the release but reports "not ready":
    no client token exists yet.
-6. Set each prod client's token **as the service account**, so the service can
-   read it, then deploy the same tag again (it reuses the build):
-   `runas /user:glados-svc "<root>\current\.venv\Scripts\python.exe -m glados.secrets set client-tokens prod-desk-ui"`.
+6. Put each prod client's token in `<root>\secrets\<client-id>.token` and
+   store it **as the service account**, so the service can read it:
+   `runas /user:glados-svc "powershell -NoProfile -ExecutionPolicy Bypass -File <root>\bin\set-client-auth.ps1 -ClientId prod-desk-ui"`.
+   It reads back what it stored. Do not use the interactive
+   `glados.secrets set` prompt here: its input is hidden and unconfirmed, and
+   a console paste can be stored as a control character. Then deploy the
+   same tag again (it reuses the build).
+7. Log into Dunnes once as the service account (the task has no desktop, so
+   `bootstrap_login`'s window can never be seen there):
+   `runas /user:glados-svc "powershell -NoProfile -ExecutionPolicy Bypass -File <root>\bin\dunnes-login.ps1"`,
+   log in, close Edge, then stop the Edge background processes left running
+   as the service account before GLaDOS opens the profile.
