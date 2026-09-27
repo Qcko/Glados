@@ -83,6 +83,15 @@ A deploy never kills a server that may be mid-turn. If a turn is still running
 after 120 s (a turn held on a confirmation can wait that long), the deploy
 aborts with nothing changed; run it again.
 
+**Ollama version is pinned, and the same on both boxes (0.23.2).** It is
+part of the model surface: Ollama 0.34 strips Ministral's `[TOOL_CALLS]` /
+`[ARGS]` marker tokens from the reply, so the text tool parser never fires
+and every tool call is spoken instead of run. Upgrading means moving to
+Ollama's native tool-call parsing first, with a bake-off on both boxes;
+never upgrade one box alone. After any Ollama or GPU-driver change on prod,
+check the first `inference compute` log line names the intended GPU: the
+Vulkan device index is not stable across Ollama versions.
+
 **Model gate:** a release that changes anything measured against the model
 (prompts, tool descriptions, dispatch) is not done until the bake-off has run
 on prod too. Prod's runtime (Vulkan on a different GPU) is its own live
