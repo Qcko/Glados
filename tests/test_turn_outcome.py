@@ -332,6 +332,48 @@ def test_a_reference_to_an_earlier_turn_is_not_a_claim() -> None:
     assert classify(turn) == "done"
 
 
+def _recap(final_text: str, *, earlier_write_landed: bool = True) -> TurnRecord:
+    turn = _claim(final_text, [("dunnes.view_cart", True, False, {})])
+    turn.earlier_write_landed = earlier_write_landed
+    return turn
+
+
+def test_a_recap_of_what_the_user_did_is_not_a_claim() -> None:
+    # Live 23-09-2026 (trace desk_qcko_9d042aba): "what is in the cart" after
+    # an add landed the turn before. view_cart only, and the true reply was
+    # replaced with "I don't have a record of actually doing that".
+    turn = _recap(
+        "The cart has **50 items** for EUR 76.58.\nYou just added **4 packs of "
+        "Dunnes Still Irish Spring Water (9 x 500ml)**.\n\nWould you like to "
+        "remove anything?"
+    )
+    assert classify(turn) == "done"
+
+
+def test_a_recap_with_a_curly_apostrophe_is_not_a_claim() -> None:
+    assert classify(_recap("You\u2019ve added the water.")) == "done"
+
+
+def test_a_recap_with_nothing_earlier_to_recap_is_still_a_claim() -> None:
+    # A poisoned history answering "add another milk" in the second person,
+    # in a session where no write ever landed.
+    turn = _recap("You have added milk to your cart.", earlier_write_landed=False)
+    assert classify(turn) == "confabulated"
+
+
+def test_a_recap_excuses_only_its_own_clause() -> None:
+    turn = _recap("You've added the water and I removed the eggs.")
+    assert classify(turn) == "confabulated"
+
+
+def test_you_as_an_object_is_still_a_claim() -> None:
+    assert classify(_recap("Added the milk you asked for.")) == "confabulated"
+
+
+def test_thank_you_is_not_a_recap() -> None:
+    assert classify(_recap("Thank you added the milk.")) == "confabulated"
+
+
 def test_set_to_needs_a_number_to_be_a_quantity_claim() -> None:
     # "set to expire in 30 minutes" is not a quantity change.
     turn = _claim("Your cart is set to expire in 30 minutes.",

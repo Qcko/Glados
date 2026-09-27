@@ -118,6 +118,9 @@ class TurnRecord:
     # A retry changed to replay the failed attempt's messages would need this
     # flag carried across with them.
     untrusted_seen: bool = False
+    # A write landed in an EARLIER turn of this session. Only then can "you
+    # just added X" be a recap rather than this turn's invented report.
+    earlier_write_landed: bool = False
     # The user denied a confirmation, or let one time out. A deliberate stop,
     # not a brain failure: the turn has no landed write by the user's choice,
     # so neither the drift check nor the escalation router may read it as
@@ -288,7 +291,7 @@ def _confabulated(turn: TurnRecord) -> bool:
         and bool(turn.final_text.strip())
         and (
             not _ends_on_question(turn.final_text)
-            or _reports_a_change(turn.final_text)
+            or _reports_a_change(turn)
         )
     )
 
@@ -387,7 +390,7 @@ def claimed_a_change_it_did_not_make(turn: TurnRecord) -> bool:
     # and added one onion cheese spread. Would you like to add anything
     # else?" with nothing but a view_cart behind it classified `done`,
     # because the trailing question excused the whole reply.
-    claims = _report_claims(turn.final_text)
+    claims = _turn_claims(turn)
     if not claims:
         return False
 
@@ -467,7 +470,7 @@ def _denies_this_removal(sentence: str, removed_words: set[str]) -> bool:
     return not named or bool(named & removed_words)
 
 
-def _claim_clauses(sentence: str) -> list[str]:
+def _claim_clauses(sentence: str, recap_possible: bool) -> list[str]:
     """The individually-checkable claims inside one sentence.
 
     A sentence is subdivided because the check used to union every landed
@@ -486,7 +489,24 @@ def _claim_clauses(sentence: str) -> list[str]:
         # one disclaimed report, and splitting first would strip the "not" from
         # the clause it governs.
         return []
-    return [c for c in _clauses(sentence) if _asserts_a_change(c)]
+    return [
+        c for c in _clauses(sentence)
+        if _asserts_a_change(c)
+        and not (recap_possible and _RECAPS_THE_USER_RE.search(c))
+    ]
+
+
+# "You just added the water": the model recapping what the USER had done in an
+# earlier turn, not reporting its own work in this one. Live 23-09-2026 it
+# replaced a true cart readout with "no record of that". Judged per clause,
+# unlike `_NOT_THIS_TURNS_DOING`, so "you added X and I removed Y" still has
+# the removal checked; "you" must be the subject, so "added the milk you asked
+# for" is still a claim. `\W` takes a straight or a curly apostrophe.
+_RECAPS_THE_USER_RE = re.compile(
+    r"(?<!thank )\byou(?:\Wve|\s+have)?\s+(?:just\s+|already\s+|recently\s+)?"
+    r"(?:added|removed|deleted|cleared|emptied|updated|changed|set)\b",
+    re.IGNORECASE,
+)
 
 
 def _clauses(sentence: str) -> list[str]:
@@ -565,13 +585,17 @@ def _asserts_a_change(sentence: str) -> bool:
     )
 
 
-def _reports_a_change(text: str) -> bool:
+def _reports_a_change(turn: TurnRecord) -> bool:
     """A completed change is asserted somewhere that is not itself a
     question: the shape an offer never has and a false report always has."""
-    return bool(_report_claims(text))
+    return bool(_turn_claims(turn))
 
 
-def _report_claims(text: str) -> list[str]:
+def _turn_claims(turn: TurnRecord) -> list[str]:
+    return _report_claims(turn.final_text, turn.earlier_write_landed)
+
+
+def _report_claims(text: str, recap_possible: bool = False) -> list[str]:
     """Every claim clause in the reply that is a statement rather than part
     of a question. A sentence that ends on "?" is not excused whole: "I
     removed the chips, anything else?" reports first and asks second. But a
@@ -584,7 +608,7 @@ def _report_claims(text: str) -> list[str]:
     claims: list[str] = []
     for sentence in _sentences_with_endings(text):
         if not _ends_on_question(sentence):
-            claims.extend(_claim_clauses(sentence))
+            claims.extend(_claim_clauses(sentence, recap_possible))
         elif not _NOT_THIS_TURNS_DOING.search(sentence):
             claims.extend(c for c in _clauses(sentence) if _REPORT_CLAUSE_RE.match(c))
     return claims

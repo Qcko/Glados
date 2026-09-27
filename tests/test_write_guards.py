@@ -1210,3 +1210,34 @@ async def test_after_the_note_the_model_may_switch_to_the_set_tool(tmp_path: Pat
 
     assert add.calls == []
     assert [c.get("quantity") for c in setter.calls] == [8]
+
+
+# ---- a recap of the user's earlier add is not this turn's claim ------------
+
+
+async def _recap_after(tmp_path: Path, first_turn: list[LLMToolCall]) -> list[str]:
+    view = _RecordingTool(_view_spec(), MCPCallResult(ok=True, content={"itemCount": 1}))
+    add = _RecordingTool(_add_spec())
+    mcp = MCPRegistry()
+    mcp.register(view)
+    mcp.register(add)
+    llm = _TurnScriptedLLM(
+        [first_turn, [_call("view_cart", {}, "v2")]],
+        reply="You just added the spring water.",
+    )
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "add spring water")
+        await _say(h, llm, "what is in the cart")
+    return [e["outcome"] for e in trace_events(tmp_path) if e["event"] == "turn_outcome"]
+
+
+async def test_a_recap_after_a_landed_add_is_not_scrubbed(tmp_path: Path) -> None:
+    """Live 23-09-2026 (trace desk_qcko_9d042aba): a true cart readout was
+    replaced with "no record of that" for recapping the previous turn's add."""
+    outcomes = await _recap_after(tmp_path, [_add("spring water", "a1", quantity=1)])
+    assert outcomes[-1] == "done"
+
+
+async def test_a_recap_with_no_earlier_write_is_still_scrubbed(tmp_path: Path) -> None:
+    outcomes = await _recap_after(tmp_path, [_call("view_cart", {}, "v1")])
+    assert outcomes[-1] == "confabulated"

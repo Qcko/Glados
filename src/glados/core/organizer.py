@@ -985,6 +985,10 @@ class Organizer:
         # Sticky until the history itself is cleared -- deriving it from
         # `_cap_history` aging would reopen the hole on a quiet gap.
         self._untrusted_sessions: set[str] = set()
+        # Sessions where a write has landed in some committed turn. Lets the
+        # claim check excuse "you just added X" as a recap -- only once there
+        # is something real to recap. Same lifetime as the flag above.
+        self._written_sessions: set[str] = set()
         # Rotates the honest-failure line spoken on a `confabulated` turn so a
         # cascade of fabricated turns doesn't repeat one phrase verbatim.
         self._confab_reply_idx = 0
@@ -1685,6 +1689,7 @@ class Organizer:
         outcome = TurnRecord(
             action_intent=is_action_request(text),
             untrusted_seen=session_id in self._untrusted_sessions,
+            earlier_write_landed=session_id in self._written_sessions,
             earlier_failures=dict(earlier_failures or {}),
         )
         await self._maybe_force_time(
@@ -1900,12 +1905,15 @@ class Organizer:
             evicted = next(iter(self._history))
             del self._history[evicted]
             self._untrusted_sessions.discard(evicted)
+            self._written_sessions.discard(evicted)
             self._write_ledger.forget(evicted)
         self._history[session_id] = self._cap_history(new_history)
         # Committed alongside the history it describes: the flag is a property
         # of the retained bytes, so it lives and dies with them.
         if outcome.untrusted_seen:
             self._untrusted_sessions.add(session_id)
+        if outcome.made_successful_mutation():
+            self._written_sessions.add(session_id)
 
     def budget_inputs(self) -> tuple[str, int]:
         """What the boot budget check needs from the turn assembler.
@@ -2472,6 +2480,7 @@ class Organizer:
         if kind == "start_over":
             self._history.pop(sid, None)
             self._untrusted_sessions.discard(sid)
+            self._written_sessions.discard(sid)
             self._last_turn.pop(sid, None)
             self._write_ledger.forget(sid)
             trace.event("history_cleared", reason="user start-over")
