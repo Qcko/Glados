@@ -154,11 +154,16 @@ function New-TlsCert {
     $tls = Join-Path $Root 'tls'
     if (Test-Path (Join-Path $tls 'key.pem')) { return }
     $openssl = Join-Path (Split-Path -Parent (Split-Path -Parent (Get-Command git).Source)) 'usr\bin\openssl.exe'
-    $san = ($HostNames | ForEach-Object { if ($_ -match '^[\d.]+$') { "IP:$_" } else { "DNS:$_" } }) -join ','
-    & $openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$($HostNames[0])" `
+    $san = (Get-HostNameList | ForEach-Object { if ($_ -match '^[\d.]+$') { "IP:$_" } else { "DNS:$_" } }) -join ','
+    & $openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$((Get-HostNameList)[0])" `
         -addext "subjectAltName=$san" -keyout (Join-Path $tls 'key.pem') -out (Join-Path $tls 'cert.pem')
     if ($LASTEXITCODE -ne 0) { throw 'openssl failed to create the TLS certificate' }
     Invoke-Icacls (Join-Path $tls 'key.pem') @('/inheritance:r', '/grant:r', 'Administrators:F', "${ServiceUser}:R")
+}
+
+function Get-HostNameList {
+    # `powershell -File` passes "a,b" as ONE string, not an array.
+    return @($HostNames | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 }
 
 function Open-Firewall {

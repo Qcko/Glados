@@ -225,7 +225,7 @@ function Stop-Unready {
 function Restart-Current {
     Stop-Glados
     Start-ScheduledTask -TaskName $TaskName
-    $tag = Split-Path -Leaf (Get-CurrentRelease)
+    $tag = Get-CurrentName
     if (-not (Wait-Ready $tag)) { Fail "restarted $tag but it did not become ready" }
     Write-Output "RESTARTED $tag"
 }
@@ -233,7 +233,7 @@ function Restart-Current {
 # ---- rollback / status -------------------------------------------------
 
 function Invoke-Rollback {
-    $current = Split-Path -Leaf (Get-CurrentRelease)
+    $current = Get-CurrentName
     $target = Get-ChildItem (Join-Path $Root 'releases') -Directory |
         Where-Object { $_.Name -lt $current -and (Test-Healthy $_.FullName) } |
         Sort-Object Name | Select-Object -Last 1
@@ -251,7 +251,9 @@ function Test-Healthy([string]$release) {
 }
 
 function Show-Status {
-    Write-Output "current:   $(Split-Path -Leaf (Get-CurrentRelease))"
+    $current = Get-CurrentRelease
+    if ($current) { $current = Split-Path -Leaf $current } else { $current = '(none)' }
+    Write-Output "current:   $current"
     Write-Output "last good: $(Get-Content (Join-Path $Root 'last-good.txt') -ErrorAction SilentlyContinue)"
     Write-Output "task:      $((Get-ScheduledTask -TaskName $TaskName).State)"
     Write-Output "healthz:   $(Get-Health | ConvertTo-Json -Compress -Depth 5)"
@@ -272,7 +274,7 @@ function Invoke-DunnesInstall([string]$sha) {
     Stop-Glados
     Set-Junction (Join-Path $Root 'dunnes\current') $target
     Start-ScheduledTask -TaskName $TaskName
-    $tag = Split-Path -Leaf (Get-CurrentRelease)
+    $tag = Get-CurrentName
     if (-not (Wait-Ready $tag)) { Fail 'new Dunnes build installed but GLaDOS did not become ready' }
     Write-Output "DUNNES $($sha.Substring(0, 12)) live"
 }
@@ -283,6 +285,12 @@ function Get-CurrentRelease {
     $link = Get-Item (Join-Path $Root 'current') -ErrorAction SilentlyContinue
     if (-not $link) { return $null }
     return [string]$link.Target
+}
+
+function Get-CurrentName {
+    $current = Get-CurrentRelease
+    if (-not $current) { Fail 'no release is live yet; deploy a tag first' }
+    return (Split-Path -Leaf $current)
 }
 
 function Set-Junction([string]$link, [string]$target) {
