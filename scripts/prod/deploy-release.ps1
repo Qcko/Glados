@@ -161,7 +161,14 @@ function Stop-Glados {
     if ($code -ne '200') { Fail "shutdown request answered $code; not killing a server that may be mid-turn" }
     if (Wait-TaskStopped) { return }
     Write-Output "GLaDOS drained but did not exit within ${StopTimeoutS}s; stopping the idle task"
+    Stop-TaskAndWait
+}
+
+function Stop-TaskAndWait {
+    # A start issued while the task still reads Running is silently dropped
+    # (one instance at a time), so wait for the stop to land.
     Stop-ScheduledTask -TaskName $TaskName
+    if (-not (Wait-TaskStopped)) { Fail "the GLaDOS task is still running ${StopTimeoutS}s after being stopped" }
 }
 
 function Invoke-Shutdown {
@@ -221,7 +228,7 @@ function Stop-Unready {
     if ((Get-ScheduledTask -TaskName $TaskName).State -ne 'Running') { return }
     $code = Invoke-Shutdown
     if ($code -eq '200' -and (Wait-TaskStopped)) { return }
-    Stop-ScheduledTask -TaskName $TaskName
+    Stop-TaskAndWait
 }
 
 function Restart-Current {

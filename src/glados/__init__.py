@@ -18,12 +18,25 @@ def main() -> None:
         from glados.core.server import app
 
         main_server = uvicorn.Server(
-            uvicorn.Config(app, host=server.host, port=server.port, **ssl_args)
+            uvicorn.Config(
+                app,
+                host=server.host,
+                port=server.port,
+                timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_S,
+                **ssl_args,
+            )
         )
         _stop_on_request(app, [main_server])
         main_server.run()
         return
     _run_with_admin(server, ssl_args)
+
+
+# uvicorn's default waits for every open connection to close before it runs
+# the lifespan shutdown -- forever, with a desk tab left open. By the time
+# /admin/shutdown asks for an exit no turn is running (it drained first), so
+# closing idle connections after a short grace costs nothing.
+_GRACEFUL_SHUTDOWN_S = 10
 
 
 def _stop_on_request(app, servers: list) -> None:
@@ -57,12 +70,23 @@ def _run_with_admin(server, ssl_args: dict) -> None:
 
     admin_app = build_admin_app(app)
     main_server = uvicorn.Server(
-        uvicorn.Config(app, host=server.host, port=server.port, **ssl_args)
+        uvicorn.Config(
+            app,
+            host=server.host,
+            port=server.port,
+            timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_S,
+            **ssl_args,
+        )
     )
     # Plain HTTP on loopback -- TLS adds nothing over a 127.0.0.1 bind, and the
     # admin secret is the defense-in-depth layer on top of loopback isolation.
     admin_server = uvicorn.Server(
-        uvicorn.Config(admin_app, host="127.0.0.1", port=server.admin_port)
+        uvicorn.Config(
+            admin_app,
+            host="127.0.0.1",
+            port=server.admin_port,
+            timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_S,
+        )
     )
     _stop_on_request(app, [main_server, admin_server])
 
