@@ -68,7 +68,7 @@ function Build-DeskClient([string]$tag) {
         Invoke-Npm $web @('run', 'build')
         $zip = Join-Path $env:TEMP "glados-desk-$tag.zip"
         if (Test-Path $zip) { Remove-Item $zip }
-        Compress-Archive -Path (Join-Path $web 'dist\*') -DestinationPath $zip
+        Compress-Archive -Path (Join-Path $web 'dist\*') -DestinationPath $zip | Out-Null
         return $zip
     } finally {
         Remove-Worktree $work
@@ -106,20 +106,27 @@ function Get-Sha([string]$path) {
 }
 
 function Remove-Worktree([string]$path) {
-    & git -C $RepoRoot worktree remove --force $path 2>$null
+    # Native stderr (git progress) must not become a terminating error.
+    $ErrorActionPreference = 'Continue'
+    & git -C $RepoRoot worktree remove --force $path 2>&1 | Out-Null
     if (Test-Path $path) { Remove-Item -Recurse -Force $path }
-    & git -C $RepoRoot worktree prune
+    & git -C $RepoRoot worktree prune 2>&1 | Out-Null
 }
 
 function Invoke-Git([string[]]$gitArgs) {
-    & git -C $RepoRoot @gitArgs
+    # Native stderr (git progress) must not become a terminating error.
+    $ErrorActionPreference = 'Continue'
+    # Out-Host: a function's stray output becomes part of its caller's return value.
+    & git -C $RepoRoot @gitArgs 2>&1 | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "git $($gitArgs[0]) failed ($LASTEXITCODE)" }
 }
 
 function Invoke-Npm([string]$dir, [string[]]$npmArgs) {
+    # Native stderr (git progress) must not become a terminating error.
+    $ErrorActionPreference = 'Continue'
     Push-Location $dir
     try {
-        & npm.cmd @npmArgs
+        & npm.cmd @npmArgs 2>&1 | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "npm $($npmArgs[0]) failed ($LASTEXITCODE)" }
     } finally {
         Pop-Location

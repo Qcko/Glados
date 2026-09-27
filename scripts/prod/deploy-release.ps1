@@ -109,7 +109,7 @@ function Install-Release([string]$tag, [string]$sha) {
     $release = Join-Path $Root "releases\$tag"
     $zip = Receive-Stdin $sha
     if (Test-Path (Join-Path $release '.ready')) {
-        Write-Output "release $tag already built; reusing it"
+        Write-Host "release $tag already built; reusing it"
         Remove-Item $zip
         Remove-Item (Join-Path $release '.failed') -ErrorAction SilentlyContinue
         return $release
@@ -145,9 +145,11 @@ function Assert-TagOnMain([string]$repo, [string]$tag) {
 }
 
 function Remove-Worktree([string]$repo, [string]$path) {
-    & git -C $repo worktree remove --force $path 2>$null
+    # Native stderr (git progress) must not become a terminating error.
+    $ErrorActionPreference = 'Continue'
+    & git -C $repo worktree remove --force $path 2>&1 | Out-Null
     if (Test-Path $path) { Remove-Item -Recurse -Force $path }
-    & git -C $repo worktree prune
+    & git -C $repo worktree prune 2>&1 | Out-Null
 }
 
 # ---- stop / start ------------------------------------------------------
@@ -182,7 +184,7 @@ function Wait-Ready([string]$tag) {
         if ($health -and (Test-Ready $health $tag)) { return $true }
         Start-Sleep -Seconds 2
     }
-    Write-Output "not ready after ${ReadyTimeoutS}s; last healthz: $(Get-Health | ConvertTo-Json -Compress -Depth 5)"
+    Write-Host "not ready after ${ReadyTimeoutS}s; last healthz: $(Get-Health | ConvertTo-Json -Compress -Depth 5)"
     return $false
 }
 
@@ -312,14 +314,19 @@ function Remove-OldReleases {
 }
 
 function Invoke-Git([string]$repo, [string[]]$gitArgs) {
-    & git -C $repo @gitArgs
+    # Native stderr (git progress) must not become a terminating error.
+    $ErrorActionPreference = 'Continue'
+    # Out-Host: a function's stray output becomes part of its caller's return value.
+    & git -C $repo @gitArgs 2>&1 | Out-Host
     if ($LASTEXITCODE -ne 0) { Fail "git $($gitArgs[0]) failed ($LASTEXITCODE)" }
 }
 
 function Invoke-Native([string]$dir, [string]$exe, [string[]]$exeArgs) {
+    # Native stderr (git progress) must not become a terminating error.
+    $ErrorActionPreference = 'Continue'
     Push-Location $dir
     try {
-        & $exe @exeArgs
+        & $exe @exeArgs 2>&1 | Out-Host
         if ($LASTEXITCODE -ne 0) { Fail "$exe $($exeArgs[0]) failed ($LASTEXITCODE)" }
     } finally {
         Pop-Location
