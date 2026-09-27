@@ -30,6 +30,7 @@ $Port = 8765
 function Main {
     Assert-Admin
     Assert-ServiceUser
+    Grant-BatchLogon
     New-Layout
     Get-Repo
     Install-Bin
@@ -55,6 +56,24 @@ function Assert-ServiceUser {
     if (-not (Get-LocalUser -Name $ServiceUser -ErrorAction SilentlyContinue)) {
         throw "local user '$ServiceUser' does not exist. Create it yourself (a standard, non-admin user with a password), then re-run."
     }
+}
+
+function Grant-BatchLogon {
+    # A task that runs as a user with a stored password logs on as a batch
+    # job; without this right the scheduler fails with 0x80070569 and the
+    # task never starts.
+    $sid = (Get-LocalUser -Name $ServiceUser).SID.Value
+    $cfg = Join-Path $env:TEMP 'glados-rights.inf'
+    & secedit /export /cfg $cfg /areas USER_RIGHTS | Out-Null
+    $lines = @(Get-Content $cfg)
+    $index = [Array]::FindIndex([string[]]$lines, [Predicate[string]]{ param($l) $l -like 'SeBatchLogonRight*' })
+    if ($index -ge 0 -and $lines[$index] -like "*$sid*") { Remove-Item $cfg; return }
+    if ($index -ge 0) { $lines[$index] += ",*$sid" } else { $lines += "SeBatchLogonRight = *$sid" }
+    Set-Content -Path $cfg -Value $lines -Encoding Unicode
+    & secedit /configure /db (Join-Path $env:TEMP 'glados-rights.sdb') /cfg $cfg /areas USER_RIGHTS | Out-Null
+    $code = $LASTEXITCODE
+    Remove-Item $cfg
+    if ($code -ne 0) { throw "secedit could not grant '$ServiceUser' the batch logon right" }
 }
 
 function New-Layout {
@@ -138,10 +157,15 @@ default_user = "qcko"
 }
 
 function Get-ServersToml {
-    $dll = Join-Path $Root 'dunnes\current\McpServer.dll'
+    # The shipped Dunnes build is a single-file McpServer.exe, launched
+    # directly. The toy server is dropped: it runs `python`, which on a fresh
+    # Windows box is the Store stub.
+    $exe = Join-Path $Root 'dunnes\current\McpServer.exe'
     $profileDir = Join-Path $Root 'secrets\dunnes-edge-profile'
     $example = Get-Content -Raw (Join-Path $Root 'repo\configs\servers.example.toml')
-    $example = $example -replace '"<path-to>/DunnesStoresMCP/[^"]*McpServer\.dll"', "'$dll'"
+    $example = $example -replace '(?s)\[\[server\]\]\s*id = "toy_stdio".*?requires_confirmation = true\r?\n', ''
+    $example = $example -replace 'command = "dotnet"', "command = '$exe'"
+    $example = $example -replace '(?s)args = \[\s*"<path-to>/DunnesStoresMCP/[^"]*McpServer\.dll",\s*\]', 'args = []'
     return $example -replace '"<your-secrets-dir>/dunnes-edge-profile"', "'$profileDir'"
 }
 
