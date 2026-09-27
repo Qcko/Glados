@@ -166,7 +166,10 @@ function Get-ServersToml {
     $example = $example -replace '(?s)\[\[server\]\]\s*id = "toy_stdio".*?requires_confirmation = true\r?\n', ''
     $example = $example -replace 'command = "dotnet"', "command = '$exe'"
     $example = $example -replace '(?s)args = \[\s*"<path-to>/DunnesStoresMCP/[^"]*McpServer\.dll",\s*\]', 'args = []'
-    return $example -replace '"<your-secrets-dir>/dunnes-edge-profile"', "'$profileDir'"
+    # The Dunnes server only attaches to Edge over CDP; without an address
+    # every browser tool refuses.
+    return $example -replace '(env\.DUNNES_EDGE_PROFILE = )"<your-secrets-dir>/dunnes-edge-profile"',
+        "`$1'$profileDir'`r`nenv.DUNNES_EDGE_DEBUGGER_ADDRESS = `"127.0.0.1:9222`""
 }
 
 function Write-IfMissing([string]$path, [string]$content) {
