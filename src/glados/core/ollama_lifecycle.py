@@ -11,6 +11,12 @@ The tray executable is located via `%LOCALAPPDATA%\\Programs\\Ollama\\ollama app
 -- the default Ollama Windows install path -- or via the `GLADOS_OLLAMA_TRAY`
 env var override. No hardcoded user paths.
 
+`GLADOS_OLLAMA_AUTOSTART=0` turns the launch off for a box whose Ollama is run
+by something else (a startup service). GLaDOS then only WAITS for that daemon,
+and never launches or stops one: a tray started beside a service daemon would
+collide on the port, and a boot that races the service must not win by
+starting a second Ollama.
+
 Non-Windows platforms get a warning and a no-op: GLaDOS deployment targets
 Windows today, and `ollama serve` on Linux/macOS is typically managed by
 systemd / launchd rather than a desktop tray.
@@ -32,19 +38,25 @@ log = logging.getLogger(__name__)
 
 _PROBE_TIMEOUT_S = 2.0
 _BOOT_TIMEOUT_S = 30.0
+_EXTERNAL_WAIT_S = 180.0
 _BOOT_POLL_INTERVAL_S = 1.0
 _TRAY_ENV = "GLADOS_OLLAMA_TRAY"
+_AUTOSTART_ENV = "GLADOS_OLLAMA_AUTOSTART"
 _TRAY_RELATIVE = Path("Programs") / "Ollama" / "ollama app.exe"
 
 
 class OllamaLifecycle:
-    def __init__(self, host: str) -> None:
+    def __init__(self, host: str, autostart: bool | None = None) -> None:
         self._host = host.rstrip("/")
+        self._autostart = _autostart_from_env() if autostart is None else autostart
         self.started_by_us = False
 
     async def ensure(self) -> None:
         if await self._probe():
             log.info("Ollama already running at %s", self._host)
+            return
+        if not self._autostart:
+            await self._wait_for_external_daemon()
             return
         if sys.platform != "win32":
             log.warning(
@@ -122,8 +134,23 @@ class OllamaLifecycle:
         except (httpx.HTTPError, OSError):
             return False
 
-    async def _wait_until_ready(self) -> bool:
-        deadline = asyncio.get_running_loop().time() + _BOOT_TIMEOUT_S
+    async def _wait_for_external_daemon(self) -> None:
+        log.info(
+            "Ollama not reachable at %s and %s is off; waiting up to %.0fs "
+            "for the externally managed daemon",
+            self._host, _AUTOSTART_ENV, _EXTERNAL_WAIT_S,
+        )
+        if await self._wait_until_ready(_EXTERNAL_WAIT_S):
+            log.info("Ollama is up (externally managed)")
+            return
+        log.error(
+            "Ollama at %s did not come up within %.0fs and %s is off, so "
+            "GLaDOS will not start one -- LLM calls fail until it does",
+            self._host, _EXTERNAL_WAIT_S, _AUTOSTART_ENV,
+        )
+
+    async def _wait_until_ready(self, timeout_s: float = _BOOT_TIMEOUT_S) -> bool:
+        deadline = asyncio.get_running_loop().time() + timeout_s
         while asyncio.get_running_loop().time() < deadline:
             if await self._probe():
                 return True
@@ -147,3 +174,10 @@ class OllamaLifecycle:
             if p.is_file():
                 return p
         return None
+
+
+def _autostart_from_env() -> bool:
+    raw = os.environ.get(_AUTOSTART_ENV)
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")

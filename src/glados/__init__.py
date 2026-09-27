@@ -15,15 +15,26 @@ def main() -> None:
     )
     ssl_args = _tls_args(server.tls_certfile, server.tls_keyfile)
     if not server.admin_port:
-        uvicorn.run(
-            "glados.core.server:app",
-            host=server.host,
-            port=server.port,
-            reload=False,
-            **ssl_args,
+        from glados.core.server import app
+
+        main_server = uvicorn.Server(
+            uvicorn.Config(app, host=server.host, port=server.port, **ssl_args)
         )
+        _stop_on_request(app, [main_server])
+        main_server.run()
         return
     _run_with_admin(server, ssl_args)
+
+
+def _stop_on_request(app, servers: list) -> None:
+    """Let /admin/shutdown end the process the way uvicorn itself does on a
+    signal -- `should_exit` -- so the lifespan shutdown runs in full."""
+
+    def request_exit() -> None:
+        for s in servers:
+            s.should_exit = True
+
+    app.state.request_exit = request_exit
 
 
 def _run_with_admin(server, ssl_args: dict) -> None:
@@ -53,6 +64,7 @@ def _run_with_admin(server, ssl_args: dict) -> None:
     admin_server = uvicorn.Server(
         uvicorn.Config(admin_app, host="127.0.0.1", port=server.admin_port)
     )
+    _stop_on_request(app, [main_server, admin_server])
 
     async def _serve_both() -> None:
         # Each Server.serve() installs its own signal handlers; the second

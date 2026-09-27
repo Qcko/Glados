@@ -741,6 +741,21 @@ class RoomsConfig(BaseModel):
         return next((r for r in self.rooms if r.room_id == room_id), None)
 
     @model_validator(mode="after")
+    def _unique_client_ids(self) -> "RoomsConfig":
+        """A client id bound twice resolves to whichever row `find` meets
+        first. A machine overlay appends rows, so restating a tracked client
+        there would otherwise rebind it silently."""
+        seen: set[str] = set()
+        for client in self.clients:
+            if client.client_id in seen:
+                raise ValueError(
+                    f"client {client.client_id!r} is bound twice in rooms.toml "
+                    "(a rooms.local.toml row restating a tracked client?)"
+                )
+            seen.add(client.client_id)
+        return self
+
+    @model_validator(mode="after")
     def _coherent_room_policies(self) -> "RoomsConfig":
         """Every way a policy row can be wrong fails the load.
 
@@ -778,8 +793,11 @@ class RoomsConfig(BaseModel):
         return self
 
 
+LOCAL_CONFIG_DIR_ENV = "GLADOS_LOCAL_CONFIG_DIR"
+
+
 def load_glados_config(path: Path) -> GladosConfig:
-    return _apply_env_overrides(GladosConfig(**_read_toml(path)))
+    return _apply_env_overrides(GladosConfig(**_read_layered_toml(path)))
 
 
 def _apply_env_overrides(cfg: GladosConfig) -> GladosConfig:
@@ -885,7 +903,39 @@ def _env_bool(name: str) -> bool | None:
 
 
 def load_rooms_config(path: Path) -> RoomsConfig:
-    return RoomsConfig(**_read_toml(path))
+    return RoomsConfig(**_read_layered_toml(path))
+
+
+def local_config_dir(tracked_dir: Path) -> Path:
+    """Where this machine's gitignored config lives: `$GLADOS_LOCAL_CONFIG_DIR`,
+    else next to the tracked files. A deployed release points it outside the
+    checkout so the machine's settings survive switching releases."""
+    override = os.environ.get(LOCAL_CONFIG_DIR_ENV)
+    return Path(override) if override else tracked_dir
+
+
+def _read_layered_toml(path: Path) -> dict:
+    """The tracked file with this machine's `<stem>.local.toml` merged over it.
+
+    Tables merge key by key, arrays APPEND (so a box can add a client or a
+    room without restating the tracked ones), and any other value replaces.
+    An overlay cannot remove a tracked array entry -- that is a change to
+    the tracked file, not to one machine."""
+    overlay = local_config_dir(path.parent) / f"{path.stem}.local.toml"
+    return _merge_overlay(_read_toml(path), _read_toml(overlay))
+
+
+def _merge_overlay(base: dict, overlay: dict) -> dict:
+    merged = dict(base)
+    for key, value in overlay.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _merge_overlay(current, value)
+        elif isinstance(current, list) and isinstance(value, list):
+            merged[key] = current + value
+        else:
+            merged[key] = value
+    return merged
 
 
 def _read_toml(path: Path) -> dict:

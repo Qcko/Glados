@@ -47,6 +47,11 @@ class RoomQueueManager:
         # the worker and relying on the worker's own cancel-handler to
         # forward the signal -- see close() for the rationale).
         self._active_actions: dict[str, asyncio.Task] = {}
+        self._draining = False
+
+    @property
+    def draining(self) -> bool:
+        return self._draining
 
     def enqueue(
         self, room_id: str, action: Action, *, max_depth: int | None = None
@@ -68,6 +73,9 @@ class RoomQueueManager:
         whose own occupant already has a backlog is the room an announcement
         has least claim to join.
         """
+        if self._draining:
+            log.info("room %s: draining for shutdown; refusing a new action", room_id)
+            return False
         queue = self._queues.get(room_id)
         if queue is not None and max_depth is not None and queue.qsize() >= max_depth:
             log.info(
@@ -136,6 +144,24 @@ class RoomQueueManager:
                 return
             for queue in queues:
                 await queue.join()
+
+    async def drain(self, timeout_s: float) -> bool:
+        """Stop taking new actions and wait for everything queued or running to
+        finish, so a shutdown never cuts a turn -- above all a write to an
+        outside service -- in half.
+
+        True: idle, and STILL refusing new actions, so the caller can shut
+        down without a turn slipping in between. False: work outlived the
+        timeout (a turn held on a confirmation can wait a long time); intake
+        reopens and the caller must not shut down. Nothing is cancelled
+        either way."""
+        self._draining = True
+        try:
+            await asyncio.wait_for(self.flush(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            self._draining = False
+            return False
+        return True
 
     async def close(self) -> None:
         """Cancel all room workers and the action they're currently running.

@@ -959,6 +959,7 @@ class Organizer:
         # error), so the gate releases no matter what.
         self._llm_warmed = asyncio.Event()
         self._llm_warmed.set()
+        self._llm_warm_ok = False
         # v2.6 local multi-model router. When `router` is None the organizer
         # behaves exactly as before -- every turn runs on `self.llm` (the primary
         # brain) with no RouteNotice emitted. `specialist_llm` is the second
@@ -1174,6 +1175,23 @@ class Organizer:
         """Wait until every room's queue is drained. Test hook."""
         await self._queues.flush()
 
+    @property
+    def llm_warm_ok(self) -> bool:
+        """The boot warm-up finished AND succeeded. `_llm_warmed` is set on
+        failure too (so turns never deadlock), which makes it no readiness
+        signal: a deploy must not call a release healthy whose model never
+        answered."""
+        return self._llm_warm_ok
+
+    @property
+    def draining(self) -> bool:
+        return self._queues.draining
+
+    async def drain(self, timeout_s: float) -> bool:
+        """Refuse new turns and wait for the running ones. See
+        RoomQueueManager.drain."""
+        return await self._queues.drain(timeout_s)
+
     async def close(self) -> None:
         """Cancel all room workers. Server lifespan calls this on shutdown."""
         await self._queues.close()
@@ -1215,6 +1233,7 @@ class Organizer:
             async with aclosing(self.llm.chat(free_warm, [])) as stream:
                 async for _ in stream:
                     pass
+            self._llm_warm_ok = True
         except Exception:
             log.exception("LLM warm-up failed (continuing -- first turn may be cold)")
         finally:

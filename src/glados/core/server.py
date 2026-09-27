@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
@@ -44,6 +44,7 @@ from ..servers.toy_server import TOY_TOOLS
 from .adapters import LLM, STT, TTS, VAD
 from .audio_sink import AudioSink, FrameTooShort
 from .config import (
+    local_config_dir,
     GladosConfig,
     HandshakeConfig,
     LLMConfig,
@@ -64,6 +65,7 @@ from . import memory_gate
 from .ollama_lifecycle import OllamaLifecycle
 from .organizer import Organizer
 from .prompt_budget import measure_boot_budget
+from .release import describe_release
 from .secrets import KeyringSecrets, SecretsStore
 from .protocols import (
     AdminClientMessage,
@@ -132,7 +134,7 @@ def _build_tool_router(servers_cfg: ServersConfig) -> "ToolRouter | None":
 
 
 def _resolve_servers_toml(cfg_dir: Path) -> Path:
-    real = cfg_dir / "servers.toml"
+    real = local_config_dir(cfg_dir) / "servers.toml"
     if real.exists():
         return real
     example = cfg_dir / "servers.example.toml"
@@ -920,6 +922,13 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     # Secrets store: defaults to the real OS keyring. Tests inject
     # InMemorySecrets via `app.state.secrets = ...` after build_app().
     app.state.secrets = KeyringSecrets()
+    app.state.release = describe_release(_REPO_ROOT)
+    # How /admin/shutdown ends the process once drained. `glados.main` points
+    # it at the running uvicorn servers' `should_exit`, which runs the full
+    # lifespan shutdown. Emulating Ctrl-C instead is not graceful with two
+    # servers in one loop: each captures SIGINT and re-raises it on exit.
+    # Until main wires it, there is no server to stop.
+    app.state.request_exit = _no_server_to_stop
     # Handshake admission control (caps + per-IP failure lockout). Tests
     # swap it post-build_app() to drive its injectable clock.
     app.state.handshake_gate = HandshakeGate(glados_cfg.handshake)
@@ -1035,6 +1044,33 @@ async def _admin_reject(ws: WebSocket, code: str) -> None:
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 
 
+def _no_server_to_stop() -> None:
+    log.error("shutdown: no running server registered to stop; staying up (draining)")
+
+
+_MAX_DRAIN_S = 600.0
+# Long enough for the 200 to reach the caller before the exit starts.
+_EXIT_GRACE_S = 0.5
+
+
+def _clients_with_token(rooms_cfg: RoomsConfig, secrets: SecretsStore) -> list[str]:
+    """Client ids whose token this process can READ -- ids only, never values.
+    Proves the keyring is usable under whatever account runs the server,
+    which a service account can get wrong in a way nothing else surfaces
+    until the first client is refused."""
+    return sorted(
+        {c.client_id for c in rooms_cfg.clients if _token_readable(secrets, c.client_id)}
+    )
+
+
+def _token_readable(secrets: SecretsStore, client_id: str) -> bool:
+    try:
+        return secrets.get("client-tokens", client_id) is not None
+    except Exception as exc:
+        log.warning("healthz: keyring read for client %s failed: %s", client_id, exc)
+        return False
+
+
 def _require_loopback(request: Request) -> None:
     """Reject non-loopback callers with 403.
 
@@ -1075,7 +1111,33 @@ def _register_routes(app: FastAPI) -> None:
                 "backend": s.glados_cfg.llm.backend,
                 "model": s.glados_cfg.llm.model,
             },
+            "release": s.release,
+            "ready": {
+                "llm_warm": s.organizer.llm_warm_ok,
+                "draining": s.organizer.draining,
+                "clients_with_token": await asyncio.to_thread(
+                    _clients_with_token, s.rooms_cfg, s.secrets
+                ),
+            },
         }
+
+    @app.post("/admin/shutdown")
+    async def admin_shutdown(request: Request, timeout_s: float = 120.0) -> Response:
+        """Drain, then exit: refuse new turns, wait for running ones, and only
+        then stop the process. A deploy calls this instead of killing the
+        process, which would cut an in-flight write to an outside service in
+        half and leave it indeterminate. 409 when turns outlive `timeout_s`;
+        intake reopens and the process keeps serving. Loopback-only, like
+        the other operator routes."""
+        _require_loopback(request)
+        s = request.app.state
+        timeout_s = min(max(timeout_s, 1.0), _MAX_DRAIN_S)
+        if not await s.organizer.drain(timeout_s):
+            log.warning("shutdown refused: turns still running after %.0fs", timeout_s)
+            return JSONResponse({"ok": False, "reason": "busy"}, status_code=409)
+        log.info("shutdown: drained; exiting")
+        asyncio.get_running_loop().call_later(_EXIT_GRACE_S, s.request_exit)
+        return JSONResponse({"ok": True})
 
     @app.get("/admin/memory")
     async def admin_memory(request: Request) -> dict:
