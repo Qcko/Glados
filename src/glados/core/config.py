@@ -501,6 +501,11 @@ class ToolOverlay(BaseModel):
     removes: bool = False
     count_arg: str | None = None
     delta_arg: str | None = None
+    # A tool on the same server that must have answered ok earlier in this
+    # turn, else the call is refused unsent (DESIGN-write-guards.md, guard 0).
+    # 27-09-2026: "am I logged in?" became start_browser -> bootstrap_login,
+    # a confirm prompt for a login nobody needed, with no status check between.
+    requires_prior: str | None = None
     # The spoken confirmation question as a sentence (core/confirm_phrase.py,
     # DESIGN-voice-confirm.md "The spoken question"): `{arg}` speaks a value,
     # `{arg:A|B}` speaks A when a boolean is true and B when false, `[ ... ]`
@@ -533,6 +538,13 @@ class ToolOverlay(BaseModel):
         if self.removes and not (self.mutating or self.requires_confirmation):
             raise ValueError("removes is set on a tool that is not mutating")
         return self
+
+    @field_validator("requires_prior")
+    @classmethod
+    def _prior_is_a_name(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("requires_prior is empty")
+        return value
 
 
 class ServerEntry(BaseModel):
@@ -619,6 +631,7 @@ class ServerEntry(BaseModel):
                 "removes": overlay.removes,
                 "count_arg": overlay.count_arg,
                 "delta_arg": overlay.delta_arg,
+                "requires_prior": overlay.requires_prior,
             }
         )
 

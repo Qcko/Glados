@@ -147,9 +147,13 @@ timeout_s = 400.0
 # room worker if it fires unattended.
 requires_confirmation = true
 timeout_s = 400.0
+# Refused unsent unless check_login_status answered ok earlier in the turn:
+# "am I logged in?" became start_browser -> bootstrap_login on 27-09-2026.
+requires_prior = "check_login_status"
 
 [server.tool_overlays.open_login_page]
 timeout_s = 400.0
+requires_prior = "check_login_status"
 
 [server.tool_overlays.check_login_status]
 timeout_s = 400.0

@@ -18,10 +18,10 @@ unreliably, so the fix is code in the harness, not a line in the system prompt.
 
 Five guards (the third added after a re-run, invariant 10; the fourth split
 out of guard 1, invariant 11; the fifth for a count the model dropped,
-invariant 12), all in
+invariant 12; guard 0 for a step taken before its check, invariant 13), all in
 `Organizer._run_tool_calls`, all ahead of the confirmation gate (like the in-flight ledger: a call that is not being sent must not prompt
-the room), and all standing down when `reply_language` is not English, because
-the cue tables cannot read anything else.
+the room), and all but guard 0 standing down when `reply_language` is not
+English, because the cue tables cannot read anything else.
 
 ## The flow
 
@@ -33,7 +33,9 @@ flowchart TD
     A --> B["broadcast ToolCall + trace<br/>(args as they will go to the wire)"]
     B --> IF{"in-flight this turn?"}
     IF -- yes --> R0["_ALREADY_ATTEMPTED<br/>(existing)"]
-    IF -- no --> G3{"removes with these args,<br/>utterance only asks to add?"}
+    IF -- no --> G0{"requires_prior set and<br/>that tool not ok this turn?"}
+    G0 -- yes --> R6["refuse: check_first<br/>ok=True, satisfied=False"]
+    G0 -- no --> G3{"removes with these args,<br/>utterance only asks to add?"}
     G3 -- yes --> R3["refuse: not_removed<br/>ok=True, satisfied=False"]
     G3 -- no --> G4{"count_arg (absolute set)<br/>under an add-only utterance?"}
     G4 -- yes --> R4["refuse: use_add_tool<br/>ok=True, satisfied=False"]
@@ -54,6 +56,7 @@ flowchart TD
     R3 --> T
     R4 --> T
     R5 --> T
+    R6 --> T
     L --> T
     X --> T
     T["tool message to the model<br/>(refusals unwrapped: GLaDOS wrote them)"]
@@ -179,6 +182,20 @@ The in-flight ledger uses the same canonicaliser with nothing dropped.
     Accepted gaps: "add 12 eggs" means twelve items here, whatever the shop
     sells; a model that ignores the note twice still under-adds, as before.
     `adjust_*` (`delta_arg`) is not additive and is not checked.
+
+13. **Guard 0: a step runs after its check** (added 28-09-2026). On prod,
+    27-09-2026, "am I logged in to Dunnes?" became `start_browser` then
+    `bootstrap_login`: a confirm prompt for a login nobody needed, with no
+    `check_login_status` between. The overlay field `requires_prior` names a
+    tool on the same server that must have answered `ok` earlier in the SAME
+    turn; otherwise the call is refused unsent with `check_first`,
+    `satisfied=False`. It reads only that the prerequisite ran, never what it
+    said -- that is server bytes (section 7), so the model, not the harness,
+    decides whether "Not logged in" warrants the login. A failed check does
+    not count, and neither does one from an earlier turn: login state
+    changes between turns. It runs first, stands for any language (no cue
+    table is read), and widens the guard call to non-mutating tools, since
+    `open_login_page` is neither gated nor mutating.
 
 ## Cue tables
 

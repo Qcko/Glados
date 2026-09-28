@@ -1254,3 +1254,120 @@ def test_every_harness_answer_status_is_declared_a_refusal() -> None:
     literals |= set(re.findall(r'"status": "([a-z_]+)"', source))
     delivered = {"queued"}
     assert literals and literals - delivered <= organizer.HARNESS_REFUSAL_STATUSES
+
+
+def _login_spec(name: str = "bootstrap_login", **kwargs) -> ToolSpec:
+    base = dict(
+        server="dunnes",
+        name=name,
+        description=name,
+        parameters={"type": "object", "properties": {}},
+        requires_prior="check_login_status",
+    )
+    base.update(kwargs)
+    return ToolSpec(**base)
+
+
+def _check_spec() -> ToolSpec:
+    return ToolSpec(
+        server="dunnes",
+        name="check_login_status",
+        description="check",
+        parameters={"type": "object", "properties": {}},
+    )
+
+
+async def _login_turns(
+    tmp_path: Path,
+    login: ToolSpec,
+    turns: list[list[LLMToolCall]],
+    check_result: MCPCallResult | None = None,
+) -> tuple[_RecordingTool, _RecordingTool, _TurnScriptedLLM]:
+    login_tool = _RecordingTool(login)
+    check_tool = _RecordingTool(_check_spec(), check_result or MCPCallResult(ok=True, content={"text": "Not logged in"}))
+    mcp = MCPRegistry()
+    mcp.register(login_tool)
+    mcp.register(check_tool)
+    llm = _TurnScriptedLLM(turns)
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        for _ in turns:
+            await _say(h, llm, "am I logged in to Dunnes?")
+    return login_tool, check_tool, llm
+
+
+@pytest.mark.parametrize(
+    "login",
+    [
+        _login_spec(requires_confirmation=True),
+        _login_spec("open_login_page"),
+    ],
+)
+async def test_a_login_step_without_a_status_check_is_refused_unsent(tmp_path: Path, login: ToolSpec) -> None:
+    """27-09-2026 on prod: "am I logged in?" -> start_browser -> bootstrap_login
+    with no check between. Refused ahead of the confirm gate, gated or not,
+    so the room is never asked about a login nobody needed."""
+    login_tool, _, llm = await _login_turns(tmp_path, login, [[_call(login.name, {})]])
+    assert login_tool.calls == []
+    message = _last_tool_message(llm)
+    assert "check_first" in message and "check_login_status" in message
+    assert "<external>" not in message
+    assert "prior_missing_refused" in [e.get("event") for e in trace_events(tmp_path)]
+
+
+async def test_a_login_step_after_an_ok_check_goes_through(tmp_path: Path) -> None:
+    login_tool, _, _ = await _login_turns(
+        tmp_path,
+        _login_spec("open_login_page"),
+        [[_call("check_login_status", {}, "c1"), _call("open_login_page", {}, "c2")]],
+    )
+    assert len(login_tool.calls) == 1
+
+
+async def test_a_failed_check_is_not_a_check(tmp_path: Path) -> None:
+    """"Browser not started" answered nothing about the login."""
+    login_tool, _, _ = await _login_turns(
+        tmp_path,
+        _login_spec("open_login_page"),
+        [[_call("check_login_status", {}, "c1"), _call("open_login_page", {}, "c2")]],
+        check_result=MCPCallResult(ok=False, error="Browser not started."),
+    )
+    assert login_tool.calls == []
+
+
+async def test_a_check_from_an_earlier_turn_does_not_count(tmp_path: Path) -> None:
+    """The login state can change between turns; the check must be fresh."""
+    login_tool, check_tool, _ = await _login_turns(
+        tmp_path,
+        _login_spec("open_login_page"),
+        [[_call("check_login_status", {}, "c1")], [_call("open_login_page", {}, "c2")]],
+    )
+    assert len(check_tool.calls) == 1
+    assert login_tool.calls == []
+
+
+def test_the_overlay_carries_requires_prior_onto_the_spec() -> None:
+    entry = ServerEntry(
+        id="dunnes",
+        command="x",
+        tool_overlays={"bootstrap_login": ToolOverlay(requires_prior="check_login_status")},
+    )
+    spec = entry.apply_flags(_login_spec(requires_prior=None))
+    assert spec.requires_prior == "check_login_status"
+    with pytest.raises(ValueError):
+        ToolOverlay(requires_prior=" ")
+
+
+async def test_the_refusal_recovers_inside_the_same_turn(tmp_path: Path) -> None:
+    """check_first is ok=True, so the turn neither fails nor escalates: the
+    model reads the note, checks, and the login step then goes through."""
+    login_tool, check_tool, _ = await _login_turns(
+        tmp_path,
+        _login_spec("open_login_page"),
+        [[
+            _call("open_login_page", {}, "c1"),
+            _call("check_login_status", {}, "c2"),
+            _call("open_login_page", {}, "c3"),
+        ]],
+    )
+    assert len(check_tool.calls) == 1
+    assert len(login_tool.calls) == 1

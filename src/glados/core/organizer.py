@@ -478,6 +478,13 @@ _SET_FOR_ADD_NOTE = (
     "holds some. Use the add tool instead, with the count the user said if "
     "they said one; if they did not say how many, add one or ask."
 )
+
+# A step whose check has not run this turn (guard 0).
+_PRIOR_MISSING_NOTE = (
+    "GLaDOS note, not tool output: not sent -- call {prior} first in this "
+    "turn and act on what it says. Only then, and only if it shows this step "
+    "is needed, call {tool}."
+)
 # The removal refusal. The user asked only to add; a remove, a set to zero or
 # a negative adjust is the model re-planning around an add it thinks already
 # happened. Nothing is met by it, so the goal-check still wants the add.
@@ -614,6 +621,7 @@ HARNESS_REFUSAL_STATUSES = frozenset({
     "already_done",
     "outcome_unknown",
     "refused",
+    "check_first",
 })
 
 
@@ -651,6 +659,15 @@ def _quantity_invented(call: LLMToolCall, spec: ToolSpec, utterance: str) -> boo
     if quantity is None or quantity == 1:
         return False
     return not has_quantity_cue(utterance)
+
+
+def _prior_missing(call: LLMToolCall, spec: ToolSpec, outcome: TurnRecord) -> bool:
+    """A step whose prerequisite has not answered ok this turn. Only that the
+    call ran is read, never what it said: the result is server bytes."""
+    if not spec.requires_prior:
+        return False
+    wanted = f"{call.server}.{spec.requires_prior}"
+    return not any(t.tool == wanted and t.ok for t in outcome.tools)
 
 
 def _removal_unasked(call: LLMToolCall, spec: ToolSpec, utterance: str) -> bool:
@@ -2697,7 +2714,7 @@ class Organizer:
                 not answered_from_ledger
                 and not retry_refused
                 and replayed is None
-                and mutating
+                and (mutating or (spec is not None and spec.requires_prior))
             ):
                 refusal = self._refuse_write(
                     tc, spec, session_id, utterance, trace, outcome
@@ -2924,7 +2941,11 @@ class Organizer:
         done" and so launder it into a satisfied claim. Ahead of the
         confirmation gate, like the in-flight ledger, so a refused call never
         prompts the room for something not being sent."""
-        if spec is None or not self._cues_readable():
+        if spec is None:
+            return None
+        if _prior_missing(tc, spec, outcome):
+            return self._refuse_without_prior(tc, spec, session_id, trace)
+        if not self._cues_readable():
             return None
         if _removal_unasked(tc, spec, utterance):
             log.warning(
@@ -2982,6 +3003,26 @@ class Organizer:
             )
             return None
         return self._refusal_for(tc, session_id, entry, trace)
+
+    def _refuse_without_prior(
+        self, tc: LLMToolCall, spec: ToolSpec, session_id: str, trace
+    ) -> "_WriteRefusal":
+        log.warning(
+            "refused %s.%s in session %s: %s has not answered this turn",
+            tc.server,
+            tc.name,
+            session_id,
+            spec.requires_prior,
+        )
+        trace.event(
+            "prior_missing_refused",
+            call_id=tc.call_id,
+            server=tc.server,
+            name=tc.name,
+            prior=spec.requires_prior,
+        )
+        note = _PRIOR_MISSING_NOTE.format(prior=spec.requires_prior, tool=tc.name)
+        return _WriteRefusal(_local_result("check_first", note), satisfied=False)
 
     def _refuse_dropped_quantity(
         self,
