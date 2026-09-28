@@ -10,10 +10,12 @@ landed (the cross-turn write ledger).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
+from glados.core import organizer
 from glados.core.adapters import LLMMessage, LLMText, LLMToolCall, ToolSpec
 from glados.core.turn_outcome import (
     TurnRecord,
@@ -1241,3 +1243,14 @@ async def test_a_recap_after_a_landed_add_is_not_scrubbed(tmp_path: Path) -> Non
 async def test_a_recap_with_no_earlier_write_is_still_scrubbed(tmp_path: Path) -> None:
     outcomes = await _recap_after(tmp_path, [_call("view_cart", {}, "v1")])
     assert outcomes[-1] == "confabulated"
+
+
+def test_every_harness_answer_status_is_declared_a_refusal() -> None:
+    """The bake-off log reads HARNESS_REFUSAL_STATUSES to tell a refused write
+    from one that landed; a new guard whose status is missing would print as
+    "ok" again, the misreading behind the 27-09-2026 "1 -> 5" over-order."""
+    source = Path(organizer.__file__).read_text(encoding="utf-8")
+    literals = set(re.findall(r'_local_result\(\s*"([a-z_]+)"', source))
+    literals |= set(re.findall(r'"status": "([a-z_]+)"', source))
+    delivered = {"queued"}
+    assert literals and literals - delivered <= organizer.HARNESS_REFUSAL_STATUSES

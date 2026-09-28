@@ -603,6 +603,20 @@ class _WriteRefusal:
     satisfied: bool
 
 
+# Every status the harness answers a write with instead of sending it. Public
+# so a reader of the wire (the bake-off log) can tell a refusal, which arrives
+# `ok=True`, from a write that landed.
+HARNESS_REFUSAL_STATUSES = frozenset({
+    "not_removed",
+    "use_add_tool",
+    "quantity_needed",
+    "quantity_mismatch",
+    "already_done",
+    "outcome_unknown",
+    "refused",
+})
+
+
 def _local_result(status: str, note: str, **facts: object) -> MCPCallResult:
     """A harness-authored result: `ok=True` so the turn does not fail or
     escalate, a `status` the model can read, and only facts GLaDOS knows."""

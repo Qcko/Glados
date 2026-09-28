@@ -499,6 +499,9 @@ def test_a_claim_that_names_pack_sizes_not_the_product_is_not_accused() -> None:
         "Added two cartons.",
         "Removed a 500ml pack and added a 2 litre bottle.",
         "Added 3 bags, 1 kilo each.",
+        "I have added one 3-litre pack and one 1-litre pack of Irish low-fat milk, totaling 4 litres.",
+        "I've just added one 3-litre pack and one 1-litre pack.",
+        "Two cartons have been successfully added.",
     ):
         turn = _claim(reply, [("dunnes.add_by_volume", True, True, {"query": "milk", "litres": 4})])
         assert not claimed_a_change_it_did_not_make(turn), reply
@@ -512,6 +515,14 @@ def test_a_size_does_not_excuse_a_product_nobody_touched() -> None:
         [("dunnes.add_by_volume", True, True, {"query": "milk", "litres": 2})],
     )
     assert claimed_a_change_it_did_not_make(turn)
+
+
+def test_claim_grammar_does_not_excuse_a_product_nobody_touched() -> None:
+    """The auxiliaries are ignored, not matched: "I have added bread" after a
+    milk add still names bread."""
+    for reply in ("I have added bread.", "Bread has just been added into your cart."):
+        turn = _claim(reply, [("dunnes.add_by_volume", True, True, {"query": "milk", "litres": 2})])
+        assert claimed_a_change_it_did_not_make(turn), reply
 
 
 def test_a_shared_container_word_still_corroborates_a_brand_name_reply() -> None:

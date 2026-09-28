@@ -337,6 +337,12 @@ _UNDISTINCTIVE = frozenset(
         # verified false positives of that shape.
         "total", "order", "basket", "trolley", "list", "quantity", "qty",
         "everything",
+        # The grammar around a claim verb ("I have added", "has been
+        # removed", "just updated"). The 12-09-2026 fix for sizes still left
+        # "I have added one 3-litre pack" naming "have", and prod bake-off T3
+        # (27-09-2026) replaced that true report with "no record of that".
+        "have", "has", "had", "been", "being", "was", "were", "are", "just",
+        "now", "also", "successfully", "you", "into", "with", "from",
     }
 )
 

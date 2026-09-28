@@ -53,6 +53,7 @@ import httpx
 import websockets
 
 from _ws import ssl_context
+from glados.core.organizer import HARNESS_REFUSAL_STATUSES
 from glados.core.secrets import KeyringSecrets
 
 
@@ -66,6 +67,11 @@ class BakeoffTest:
     # is emptied and reseeded to a known single-milk state once, before the
     # first stateful test that actually runs (so it works under --only too).
     stateful: bool = False
+    # Re-adds a line an earlier turn added by name. The shop refuses an
+    # identical add inside its duplicate window even after a remove, so on
+    # 27-09-2026 every arm that re-added by name lost T8 and, with an empty
+    # cart, T10-T12 with it. Waiting keeps the test about memory, not timing.
+    after_duplicate_window: bool = False
 
 
 # Prompts that drive the cart back to a known starting state through the same
@@ -134,6 +140,7 @@ TESTS: list[BakeoffTest] = [
         "re-adds the milk by the productId it just removed, without re-searching.",
         memory_dependent=True,
         stateful=True,
+        after_duplicate_window=True,
     ),
     BakeoffTest(
         "T10",
@@ -163,6 +170,17 @@ TESTS: list[BakeoffTest] = [
         stateful=True,
     ),
 ]
+
+
+# A harness refusal arrives `ok=True` so the turn does not fail; printed as
+# plain "ok" it reads as a write that landed, which is how the 27-09-2026 prod
+# bake-off scored a refused set-to-3 as a 1 -> 5 over-order.
+def _result_line(msg: dict) -> str:
+    if not msg["ok"]:
+        return f"ERROR: {msg.get('error')}"
+    content = msg.get("content")
+    status = content.get("status") if isinstance(content, dict) else None
+    return f"REFUSED by harness ({status}), not sent" if status in HARNESS_REFUSAL_STATUSES else "ok"
 
 
 @dataclass
@@ -210,7 +228,7 @@ async def _run_turn(ws, prompt: str) -> TurnReport:
             names_by_call_id[msg["call_id"]] = msg["name"]
         elif kind == "tool_result":
             rep.tool_results.append(
-                "ok" if msg["ok"] else f"ERROR: {msg.get('error')}"
+                f"{names_by_call_id.get(msg['call_id'], '?')}: {_result_line(msg)}"
             )
             # Kept separately from the ok/ERROR line above, which is what the
             # human-readable report prints. The reset verification needs the
@@ -403,6 +421,8 @@ async def run(args: argparse.Namespace) -> None:
             if reset_pending and test.stateful:
                 await _reset_cart(ws)
                 reset_pending = False
+            if test.after_duplicate_window:
+                await _outlast_duplicate_window()
             note = "  (memory-dependent -- v0 single-turn may not honour this)" if test.memory_dependent else ""
             print(f"--- {test.id}{note}")
             print(f"    pass if: {test.criterion}")
