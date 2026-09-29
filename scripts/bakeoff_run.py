@@ -142,7 +142,9 @@ TESTS: list[BakeoffTest] = [
     # reset empties it anyway.
     BakeoffTest(
         "T15",
-        ["Add eggs, bread and 2 litres of milk."],
+        # Items no earlier test adds: GLaDOS's write ledger refuses a repeat
+        # add inside two minutes (T4's eggs collided on 29-09-2026).
+        ["Add butter, bread and 2 litres of orange juice."],
         "ONE add_recipe_ingredients call carrying the whole list verbatim -- not "
         "three separate adds, and no item dropped. Reply names what went in and "
         "anything not found; no invented quantities.",

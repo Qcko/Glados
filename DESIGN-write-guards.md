@@ -37,7 +37,9 @@ flowchart TD
     G0 -- yes --> R6["refuse: check_first<br/>ok=True, satisfied=False"]
     G0 -- no --> G3{"removes with these args,<br/>utterance only asks to add?"}
     G3 -- yes --> R3["refuse: not_removed<br/>ok=True, satisfied=False"]
-    G3 -- no --> G4{"count_arg (absolute set)<br/>under an add-only utterance?"}
+    G3 -- no --> G7{"removes, not a volume tool,<br/>utterance names litres, and the<br/>server has a volume_arg tool?"}
+    G7 -- yes --> R7["refuse: use_volume_tool<br/>ok=True, satisfied=False"]
+    G7 -- no --> G4{"count_arg (absolute set)<br/>under an add-only utterance?"}
     G4 -- yes --> R4["refuse: use_add_tool<br/>ok=True, satisfied=False"]
     G4 -- no --> G5{"additive with quantity_arg,<br/>user said one count N,<br/>call sends another?"}
     G5 -- yes --> R5["refuse: quantity_mismatch<br/>ok=True, satisfied=False"]
@@ -57,6 +59,7 @@ flowchart TD
     R4 --> T
     R5 --> T
     R6 --> T
+    R7 --> T
     L --> T
     X --> T
     T["tool message to the model<br/>(refusals unwrapped: GLaDOS wrote them)"]
@@ -196,6 +199,30 @@ The in-flight ledger uses the same canonicaliser with nothing dropped.
     changes between turns. It runs first, stands for any language (no cue
     table is read), and widens the guard call to non-mutating tools, since
     `open_login_page` is neither gated nor mutating.
+
+14. **Guard 7: litres named, items taken** (added 29-09-2026). Prod bake-off
+    T14: "take 3 litres of milk off" with two 3L packs in the cart became
+    `remove_from_cart` and emptied the line. The overlay field `volume_arg`
+    marks a removal that takes out an AMOUNT (`remove_by_volume`, `litres`).
+    When the utterance names litres followed by of / off / out
+    (`utterance.names_a_volume`), any other removal on the same server is
+    refused unsent with `use_volume_tool`, `satisfied=False`, and the note
+    names that tool. A size that is part of a product name ("the 3 litre
+    milk", no of/off/out) is not an amount. Stands down when the server has
+    no `volume_arg` tool -- a refusal with nowhere to go would only strand
+    the request -- so a deployment whose overlay lacks the field keeps the old
+    behaviour. English cue table, so behind `_cues_readable` like guards 1-5.
+    Refusing even when a whole-line remove would land right (asking for 3 L
+    of a single 3L pack) costs one round-trip: the volume tool removes a
+    whole line when asked for at least what it holds; "all / whole / entire"
+    before the amount is read as the whole line and not redirected.
+    Only a call that removes with its arguments counts (`_removes_with`), so
+    an adjust with a positive delta passes. **Once per tool per turn**
+    (`TurnRecord.volume_redirected`), from the code duck: the cue reads the
+    whole utterance, not the item, so "take 2 litres of milk off and remove
+    the eggs" redirects the eggs removal too -- accepted, because the model's
+    second send goes through, and a model that ignores the note can never
+    loop to the pass cap.
 
 ## Cue tables
 

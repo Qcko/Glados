@@ -325,6 +325,33 @@ def is_add_request(text: str) -> bool:
     )
 
 
+# An amount of liquid to take out: "3 litres of milk", "a litre off", "2L
+# out". The unit must be followed by of / off / out, so a size that names the
+# product ("the 3 litre milk", "3L milk") is not an amount.
+# "all 6 litres of milk" / "the whole 3 litres" is the whole line, which a
+# line removal gets right, so it is not an amount to redirect.
+_VOLUME_AMOUNT_RE = re.compile(
+    r"\b(?P<before>\w+\s+)?"
+    r"(?:\d+(?:[.,]\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten"
+    r"|half\s+a|a\s+half)\s*"
+    r"(?:l|litres?|liters?)\s+(?:of|off|out)\b",
+    re.IGNORECASE,
+)
+_WHOLE_LINE_WORDS = frozenset({"all", "whole", "entire"})
+
+
+def names_a_volume(text: str) -> bool:
+    """True if the utterance names an amount of liquid in litres, as opposed
+    to a count of items, a pack size that is part of a product's name, or the
+    whole of a line ("all 6 litres of milk")."""
+    if not text:
+        return False
+    return any(
+        (match.group("before") or "").strip().lower() not in _WHOLE_LINE_WORDS
+        for match in _VOLUME_AMOUNT_RE.finditer(text)
+    )
+
+
 # A spoken answer to a confirmation question (DESIGN-voice-confirm.md). Both
 # sides are whole-utterance and anchored like barge-in, so a sentence that
 # merely contains "yes" is not consent. The yes side is deliberately narrow:

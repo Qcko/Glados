@@ -90,6 +90,7 @@ from .utterance import (
     is_action_request,
     is_add_request,
     is_time_request,
+    names_a_volume,
     spoken_count,
     spoken_target_count,
 )
@@ -514,6 +515,15 @@ _REMOVAL_UNASKED_NOTE = (
     "the addition they asked for, or tell them it is already there."
 )
 
+# The user named an amount in litres; this removal would take out items or a
+# whole line. Bake-off T14 (29-09-2026): "take 3 litres of milk off" with two
+# 3L packs became remove_from_cart and emptied the line.
+_VOLUME_NAMED_NOTE = (
+    "GLaDOS note, not tool output: not sent -- the user named an amount in "
+    "litres, and this call would take out items or the whole line instead. "
+    "Call {tool} with the litres they said; it works out which packs to take out."
+)
+
 # Upper bound on how many sessions' conversation buffers are held in RAM at
 # once. Far above any realistic concurrent-session count; exists only so a long
 # uptime accumulating dead sessions can't grow the history dict without limit.
@@ -636,6 +646,7 @@ class _WriteRefusal:
 HARNESS_REFUSAL_STATUSES = frozenset({
     "not_removed",
     "use_add_tool",
+    "use_volume_tool",
     "quantity_needed",
     "quantity_mismatch",
     "already_done",
@@ -3014,6 +3025,26 @@ class Organizer:
             return _WriteRefusal(
                 _local_result("not_removed", _REMOVAL_UNASKED_NOTE), satisfied=False
             )
+        volume_tool = self._volume_removal_for(tc, spec, utterance, outcome)
+        if volume_tool is not None:
+            outcome.volume_redirected.add(f"{tc.server}.{tc.name}")
+            log.warning(
+                "refused %s.%s in session %s: the utterance named litres",
+                tc.server,
+                tc.name,
+                session_id,
+            )
+            trace.event(
+                "volume_removal_redirected",
+                call_id=tc.call_id,
+                server=tc.server,
+                name=tc.name,
+                volume_tool=volume_tool,
+            )
+            return _WriteRefusal(
+                _local_result("use_volume_tool", _VOLUME_NAMED_NOTE.format(tool=volume_tool)),
+                satisfied=False,
+            )
         if _set_answers_add(spec, utterance):
             log.warning(
                 "refused %s.%s in session %s: an absolute set answering an add",
@@ -3057,6 +3088,29 @@ class Organizer:
             )
             return None
         return self._refusal_for(tc, session_id, entry, trace)
+
+    def _volume_removal_for(
+        self, tc: LLMToolCall, spec: ToolSpec, utterance: str, outcome: TurnRecord
+    ) -> str | None:
+        """The same server's volume-removal tool, when the user named litres and
+        this call would take out items or a whole line instead. None when there
+        is no such tool to point at -- the guard then stands down rather than
+        refuse a removal it cannot redirect -- and for a tool already redirected
+        this turn (see `TurnRecord.volume_redirected`)."""
+        if not spec.removes or spec.volume_arg or not _removes_with(tc, spec):
+            return None
+        if f"{tc.server}.{tc.name}" in outcome.volume_redirected:
+            return None
+        if not names_a_volume(utterance):
+            return None
+        return next(
+            (
+                s.name
+                for s in self.mcp.specs()
+                if s.server == tc.server and s.removes and s.volume_arg
+            ),
+            None,
+        )
 
     def _refuse_without_prior(
         self, tc: LLMToolCall, spec: ToolSpec, session_id: str, trace

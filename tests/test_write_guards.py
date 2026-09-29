@@ -1443,3 +1443,147 @@ async def test_the_trace_records_the_typed_result_beside_the_text(tmp_path: Path
 
     results = [e for e in trace_events(tmp_path) if e.get("event") == "tool_result"]
     assert results[0]["structured"] == _volume_result().structured
+
+
+# ---- litres named, but the removal takes items or a whole line --------------
+
+
+def _remove_by_volume_spec(volume_arg: str | None = "litres") -> ToolSpec:
+    return ToolSpec(
+        server="dunnes",
+        name="remove_by_volume",
+        description="remove by volume",
+        parameters={
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "litres": {"type": "number"}},
+        },
+        mutating=True,
+        removes=True,
+        volume_arg=volume_arg,
+    )
+
+
+async def _litres_removal_turn(tmp_path: Path, utterance: str, call: LLMToolCall, volume_arg="litres"):
+    whole = _RecordingTool(_remove_spec(), MCPCallResult(ok=True, content={"text": "Removed."}))
+    by_volume = _RecordingTool(
+        _remove_by_volume_spec(volume_arg), MCPCallResult(ok=True, content={"text": "Took 3L out."})
+    )
+    mcp = MCPRegistry()
+    mcp.register(whole)
+    mcp.register(by_volume)
+    llm = _TurnScriptedLLM([[call]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, utterance)
+    events = [e for e in trace_events(tmp_path) if e.get("event") == "volume_removal_redirected"]
+    return whole, by_volume, events, llm
+
+
+async def test_a_whole_line_remove_for_named_litres_is_redirected(tmp_path: Path) -> None:
+    """Bake-off T14 (29-09-2026): "take 3 litres of milk off" with two 3L packs
+    became remove_from_cart and emptied the line."""
+    whole, _, events, llm = await _litres_removal_turn(
+        tmp_path, "Take 3 litres of milk off.", _call("remove_from_cart", {"productId": "1"}, "r1")
+    )
+
+    assert whole.calls == []
+    assert events and events[0]["volume_tool"] == "remove_by_volume"
+    assert "remove_by_volume" in _last_tool_message(llm)
+
+
+async def test_the_volume_tool_itself_goes_through(tmp_path: Path) -> None:
+    _, by_volume, events, _ = await _litres_removal_turn(
+        tmp_path, "Take 3 litres of milk off.",
+        _call("remove_by_volume", {"name": "milk", "litres": 3}, "v1"),
+    )
+
+    assert len(by_volume.calls) == 1 and events == []
+
+
+async def test_a_pack_size_in_the_product_name_is_not_an_amount(tmp_path: Path) -> None:
+    whole, _, events, _ = await _litres_removal_turn(
+        tmp_path, "Remove the 3 litre milk.", _call("remove_from_cart", {"productId": "1"}, "r1")
+    )
+
+    assert len(whole.calls) == 1 and events == []
+
+
+async def test_no_volume_tool_on_the_server_means_no_redirect(tmp_path: Path) -> None:
+    whole, _, events, _ = await _litres_removal_turn(
+        tmp_path, "Take 3 litres of milk off.",
+        _call("remove_from_cart", {"productId": "1"}, "r1"), volume_arg=None,
+    )
+
+    assert len(whole.calls) == 1 and events == []
+
+
+@pytest.mark.parametrize(
+    "utterance, named",
+    [
+        ("Take 3 litres of milk off.", True),
+        ("take a litre of milk out", True),
+        ("Take 2L off the milk.", True),
+        ("remove 1.5 liters of juice", True),
+        ("take half a litre of cream off", True),
+        ("Remove the 3 litre milk.", False),
+        ("Take the 3L milk off.", False),
+        ("Take one of the milks off.", False),
+        ("Take three milks off.", False),
+        ("take ten litres of water out", True),
+        ("take a half litre of cream off", True),
+        ("Remove all 6 litres of milk.", False),
+        ("take the whole 3 litres of milk out", False),
+        ("How much is a litre of milk?", True),
+    ],
+)
+def test_names_a_volume(utterance: str, named: bool) -> None:
+    from glados.core.utterance import names_a_volume
+
+    assert names_a_volume(utterance) is named
+
+
+def test_volume_arg_requires_removes() -> None:
+    with pytest.raises(ValueError, match="volume_arg"):
+        ToolOverlay(mutating=True, volume_arg="litres")
+
+
+async def test_a_re_sent_removal_goes_through_after_one_redirect(tmp_path: Path) -> None:
+    """Code duck, 29-09-2026: the cue reads the whole utterance, so "take 2
+    litres of milk off and remove the eggs" redirects the eggs removal too. One
+    refusal per tool per turn; the model's second send is taken at its word."""
+    whole = _RecordingTool(_remove_spec(), MCPCallResult(ok=True, content={"text": "Removed."}))
+    by_volume = _RecordingTool(_remove_by_volume_spec(), MCPCallResult(ok=True, content={"text": "Took 2L out."}))
+    mcp = MCPRegistry()
+    mcp.register(whole)
+    mcp.register(by_volume)
+    llm = _TurnScriptedLLM([[
+        _call("remove_by_volume", {"name": "milk", "litres": 2}, "v1"),
+        _call("remove_from_cart", {"productId": "eggs-1"}, "r1"),
+        _call("remove_from_cart", {"productId": "eggs-1"}, "r2"),
+    ]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "Take 2 litres of milk off and remove the eggs.")
+
+    redirects = [e for e in trace_events(tmp_path) if e.get("event") == "volume_removal_redirected"]
+    assert len(by_volume.calls) == 1
+    assert len(redirects) == 1
+    assert len(whole.calls) == 1
+
+
+async def test_an_adjust_that_adds_is_not_redirected(tmp_path: Path) -> None:
+    adjust = _RecordingTool(
+        ToolSpec(
+            server="dunnes", name="adjust_cart_quantity_by_name", description="adjust",
+            parameters={"type": "object", "properties": {"name": {"type": "string"}, "delta": {"type": "integer"}}},
+            mutating=True, removes=True, delta_arg="delta",
+        ),
+        MCPCallResult(ok=True, content={"text": "Changed."}),
+    )
+    mcp = MCPRegistry()
+    mcp.register(adjust)
+    mcp.register(_RecordingTool(_remove_by_volume_spec(), MCPCallResult(ok=True, content={"text": "ok"})))
+    llm = _TurnScriptedLLM([[_call("adjust_cart_quantity_by_name", {"name": "bread", "delta": 1}, "a1")]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "Take a litre of juice out and one more bread.")
+
+    assert len(adjust.calls) == 1
+    assert "volume_removal_redirected" not in [e.get("event") for e in trace_events(tmp_path)]

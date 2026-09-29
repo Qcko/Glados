@@ -328,6 +328,7 @@ confirm_phrase = "{repeat:again, |}change the count by {delta} for {name}"
 mutating = true
 timeout_s = 400.0
 removes = true
+volume_arg = "litres"
 confirm_phrase = "{repeat:again, |}take {litres} litres of {name} out of the cart"
 
 # --- Checkout (stops at slot selection) --------------------------------

@@ -187,6 +187,11 @@ class TurnRecord:
     quantity_nudged: dict[tuple[str, str], tuple[int, int | None]] = field(
         default_factory=dict
     )
+    # Removals redirected to the volume tool this turn, by qualified tool name.
+    # Each is refused once: the cue reads the whole utterance, not the item, so
+    # "take 2 litres of milk off and remove the eggs" redirects the eggs too,
+    # and a model that re-sends after reading the note is taken at its word.
+    volume_redirected: set[str] = field(default_factory=set)
     # Tool-call passes run so far this turn; stamps the nudges above.
     tool_passes: int = 0
     # Rooms this turn has already handed a spoken message to. One compromised

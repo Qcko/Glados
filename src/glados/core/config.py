@@ -501,6 +501,11 @@ class ToolOverlay(BaseModel):
     removes: bool = False
     count_arg: str | None = None
     delta_arg: str | None = None
+    # Name of a removal tool's litres argument: it takes out an AMOUNT, not
+    # items or a whole line. When the user names litres ("take 3 litres of
+    # milk off") any other removal on the same server is refused and pointed
+    # here (29-09-2026, bake-off T14: remove_from_cart emptied a 2 x 3L line).
+    volume_arg: str | None = None
     # A tool on the same server that must have answered ok earlier in this
     # turn, else the call is refused unsent (DESIGN-write-guards.md, guard 0).
     # 27-09-2026: "am I logged in?" became start_browser -> bootstrap_login,
@@ -533,6 +538,8 @@ class ToolOverlay(BaseModel):
             raise ValueError("a tool takes either count_arg or delta_arg, not both")
         if self.count_arg and self.quantity_arg:
             raise ValueError("count_arg (a set) and quantity_arg (an add) exclude each other")
+        if self.volume_arg and not self.removes:
+            raise ValueError("volume_arg is set but removes is false")
         # The organizer guards only mutating calls, so a lone `removes` would
         # look configured and never fire.
         if self.removes and not (self.mutating or self.requires_confirmation):
@@ -631,6 +638,7 @@ class ServerEntry(BaseModel):
                 "removes": overlay.removes,
                 "count_arg": overlay.count_arg,
                 "delta_arg": overlay.delta_arg,
+                "volume_arg": overlay.volume_arg,
                 "requires_prior": overlay.requires_prior,
             }
         )
