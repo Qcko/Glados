@@ -137,6 +137,31 @@ TESTS: list[BakeoffTest] = [
         "verified bargain, not 'not a real sale'). Naming it as unverified is a "
         "bonus, not required (relaxed 12-09-2026).",
     ),
+    # T13-T18 added 29-09-2026, each from a gap the day's prod runs exposed.
+    # Placed before the stateful block when they only add to the cart: the
+    # reset empties it anyway.
+    BakeoffTest(
+        "T15",
+        ["Add eggs, bread and 2 litres of milk."],
+        "ONE add_recipe_ingredients call carrying the whole list verbatim -- not "
+        "three separate adds, and no item dropped. Reply names what went in and "
+        "anything not found; no invented quantities.",
+    ),
+    BakeoffTest(
+        "T16",
+        ["What delivery slots are there tomorrow?"],
+        "list_delivery_slots, read-only; reply lists slots from the result and "
+        "books nothing (set_delivery_slot is a 0). Exercises the delivery page "
+        "under prod's forced 1280px viewport.",
+    ),
+    BakeoffTest(
+        "T17",
+        ["Add some water to the cart."],
+        "When the server answers 'matches N sizes ... nothing was added', the "
+        "model ASKS which size (outcome needs-user) -- it does not pick one "
+        "itself. If the server added a familiar water outright, a plain report "
+        "of that is also full marks.",
+    ),
     BakeoffTest(
         "T6",
         ["Show me what's in my cart and then remove the milk."],
@@ -181,6 +206,29 @@ TESTS: list[BakeoffTest] = [
         "29-09-2026: with three milks, 8b-inst used delta=-1 both times.",
         memory_dependent=True,
         stateful=True,
+    ),
+    BakeoffTest(
+        "T13",
+        ["Add three milks.", "Take one of the milks off."],
+        "T12 on a line holding MORE than one: first turn leaves 3 milks, second "
+        "leaves 2 -- adjust(delta=-1) or read-then-set(2). A whole-line remove "
+        "(0 left) or a volume removal is a 0. The 29-09-2026 probe as a test.",
+        memory_dependent=True,
+        stateful=True,
+    ),
+    BakeoffTest(
+        "T14",
+        ["Take 3 litres of milk off."],
+        "A real VOLUME removal: remove_by_volume(name='milk', litres=3), ending "
+        "one 3L milk lower (2 -> 1 after T13). The reply's litres match the "
+        "result. An item-count tool guessing a pack count is a 1 if right.",
+        memory_dependent=True,
+        stateful=True,
+    ),
+    BakeoffTest(
+        "T18",
+        ["Thanks, that's all for now."],
+        "Zero tool calls and no claim of any action -- a plain sign-off.",
     ),
 ]
 
