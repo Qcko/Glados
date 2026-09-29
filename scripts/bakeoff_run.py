@@ -47,6 +47,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -260,10 +261,30 @@ class TurnReport:
     route: str | None = None
     outcome: str | None = None
     ended: str = "done"
+    # A quiet spell of at least _QUIET_S passed before the turn ended.
+    late: bool = False
 
     @property
     def reply(self) -> str:
         return "".join(self.deltas).strip()
+
+
+# A quiet spell is not the end of a turn. On 29-09-2026 a Cloudflare challenge
+# held T8's add past the old 120 s receive timeout; the run moved on, T8's late
+# frames were read as T10's, and every later test was scored against the reply
+# to the prompt before it. So a quiet spell only prints a note, and a turn that
+# never ends inside the deadline stops the run: nothing after it is in step.
+_QUIET_S = 120.0
+_TURN_DEADLINE_S = 900.0
+
+
+def _abort_out_of_step(prompt: str) -> None:
+    raise SystemExit(
+        f"TURN NEVER ENDED: no terminal frame within {_TURN_DEADLINE_S:.0f}s of "
+        f"sending {prompt!r}. Stopping: its late frames would be read as the "
+        "next test's, putting every later result one prompt out of step. Check "
+        "the Dunnes window on prod (a Cloudflare challenge?) and re-run."
+    )
 
 
 async def _run_turn(ws, prompt: str) -> TurnReport:
@@ -272,12 +293,16 @@ async def _run_turn(ws, prompt: str) -> TurnReport:
     rep = TurnReport(prompt=prompt)
     names_by_call_id: dict[str, str] = {}
     await ws.send(json.dumps({"type": "user_text", "text": prompt}))
+    deadline = time.monotonic() + _TURN_DEADLINE_S
     while True:
         try:
-            raw = await asyncio.wait_for(ws.recv(), timeout=120.0)
+            raw = await asyncio.wait_for(ws.recv(), timeout=_QUIET_S)
         except asyncio.TimeoutError:
-            rep.ended = "timeout (no terminal frame in 120s)"
-            return rep
+            if time.monotonic() >= deadline:
+                _abort_out_of_step(prompt)
+            rep.late = True
+            print(f"    (no frame for {_QUIET_S:.0f}s -- still waiting for this turn to end)")
+            continue
         except websockets.ConnectionClosed:
             rep.ended = "connection closed"
             return rep
@@ -438,7 +463,8 @@ def _print_turn(rep: TurnReport) -> None:
         print(f"    <-tool : {tr}")
     print(f"    reply  : {rep.reply or '(none)'}")
     flag = "" if rep.ended == "done" else f"  [ended: {rep.ended}]"
-    print(f"    OUTCOME: {rep.outcome or '(none)'}{flag}")
+    late = f"  [late: a quiet spell of {_QUIET_S:.0f}s+]" if rep.late else ""
+    print(f"    OUTCOME: {rep.outcome or '(none)'}{flag}{late}")
 
 
 async def run(args: argparse.Namespace) -> None:
