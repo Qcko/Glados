@@ -172,9 +172,13 @@ TESTS: list[BakeoffTest] = [
     BakeoffTest(
         "T12",
         ["Take one of the milks off."],
-        "RELATIVE reduce: view_cart to read the current milk quantity, then "
-        "set_cart_quantity(id, current-1) (or remove if it was 1). One user "
-        "turn, >=2 tool calls. Hardest -- read-then-compute-then-act.",
+        "RELATIVE reduce by ONE ITEM, ending one milk lower. Full marks for any "
+        "of: adjust_cart_quantity(_by_name)(delta=-1), which the server "
+        "computes; view_cart then set_cart_quantity(id, current-1) or a remove "
+        "if it was 1; or a whole-line remove when the conversation already "
+        "fixed the count at 1 (T11 just set it). A volume removal "
+        "(remove_by_volume) is a 0 -- an item count is not litres. Probed "
+        "29-09-2026: with three milks, 8b-inst used delta=-1 both times.",
         memory_dependent=True,
         stateful=True,
     ),
