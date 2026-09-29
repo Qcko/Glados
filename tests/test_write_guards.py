@@ -1818,3 +1818,68 @@ async def test_a_positive_adjust_keeps_the_models_repeat(tmp_path: Path) -> None
     repeats, _ = await _removal_turns(tmp_path, ["And a milk."], [[call]])
 
     assert repeats == [True]
+
+
+# ---- an add without a count sends the 1 it already means ---------------------
+
+
+def _required_quantity_add_spec() -> ToolSpec:
+    spec = _add_spec()
+    return spec.model_copy(update={"parameters": {**spec.parameters, "required": ["query", "quantity"]}})
+
+
+async def test_an_add_without_a_count_is_sent_with_one(tmp_path: Path) -> None:
+    """Prod bake-off T15 (29-09-2026, four runs of four): the butter add went
+    out with no quantity and the server refused it as a missing argument."""
+    tool = _RecordingTool(_required_quantity_add_spec())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM([[_add("butter", "c1")]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "Add butter, bread and 2 litres of orange juice.")
+
+    assert tool.calls and tool.calls[0]["quantity"] == 1
+    assert "quantity_defaulted" in [e.get("event") for e in trace_events(tmp_path)]
+
+
+async def test_a_said_count_still_meets_the_mismatch_guard(tmp_path: Path) -> None:
+    tool = _RecordingTool(_required_quantity_add_spec())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM([[_add("butter", "c1")]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "add 3 butters")
+
+    events = [e.get("event") for e in trace_events(tmp_path)]
+    assert tool.calls == []
+    assert "quantity_mismatch_refused" in events
+
+
+async def test_an_optional_quantity_is_left_absent(tmp_path: Path) -> None:
+    tool = _RecordingTool(_add_spec())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM([[_add("butter", "c1")]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "Add butter.")
+
+    assert tool.calls and "quantity" not in tool.calls[0]
+
+
+async def test_a_filled_add_and_its_bare_reissue_are_one_call(tmp_path: Path) -> None:
+    """Code duck: the in-flight key keeps every argument, so the fill must
+    make add(butter) and add(butter, quantity=1) the same call, or a re-issue
+    of an indeterminate add would slip past the in-flight refusal."""
+    tool = _RecordingTool(
+        _required_quantity_add_spec(), MCPCallResult(ok=False, indeterminate=True, error="timed out")
+    )
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM([[
+        _call("add_to_cart_by_name", {"query": "butter", "quantity": 1}, "c1"),
+        _add("butter", "c2"),
+    ]])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "Add butter.")
+
+    assert len(tool.calls) == 1

@@ -792,6 +792,27 @@ def _count_asked(spec: ToolSpec, utterance: str) -> _CountAsked | None:
     return _CountAsked(target, arg, _QUANTITY_TARGET_NOTE) if arg else None
 
 
+def _default_missing_quantity(call: LLMToolCall, spec: ToolSpec | None, trace) -> None:
+    """Send the 1 an add without a count already means. Prod bake-off T15, four
+    runs of four on 29-09-2026: "add butter, bread and 2 litres of orange
+    juice" became add_to_cart_by_name(query=butter) with no quantity, which the
+    Dunnes schema requires, so the butter was refused while the bread (sent
+    with 1) went in. Every guard already reads an absent quantity as 1
+    (`_sent_count`), so filling it in changes what reaches the server and
+    nothing the guards decide: "add 3 butters" sent without a count still
+    meets guard 5. Only where the schema marks the argument required."""
+    if spec is None or not spec.additive or not spec.quantity_arg:
+        return
+    if call.args.get(spec.quantity_arg) is not None:
+        return
+    if spec.quantity_arg not in (spec.parameters.get("required") or []):
+        return
+    call.args[spec.quantity_arg] = 1
+    trace.event(
+        "quantity_defaulted", call_id=call.call_id, server=call.server, name=call.name
+    )
+
+
 def _sent_count(call: LLMToolCall, spec: ToolSpec, arg: str) -> int | None:
     """The count this write would send. An add's absent quantity is the
     server's one; a set with no count sends nothing to compare, so None."""
@@ -2776,6 +2797,7 @@ class Organizer:
             # event: the desk client's confirm dialog and `traces/` must show
             # the call that goes to the wire, not the one the model wrote.
             self._align_repeat_flag(tc, spec, utterance, session_id, trace)
+            _default_missing_quantity(tc, spec, trace)
             await self._broadcast(
                 room_id,
                 ToolCall(
