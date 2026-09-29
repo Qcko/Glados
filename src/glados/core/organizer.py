@@ -91,6 +91,7 @@ from .utterance import (
     is_add_request,
     is_time_request,
     names_a_volume,
+    spoken_removal_count,
     spoken_count,
     spoken_target_count,
 )
@@ -524,6 +525,17 @@ _VOLUME_NAMED_NOTE = (
     "Call {tool} with the litres they said; it works out which packs to take out."
 )
 
+# The user asked to take a number of items out; this call would empty the
+# whole line. Bake-off T13 (29-09-2026): three milks, "take one of the milks
+# off" became remove_from_cart, and the reply said two remained.
+_COUNT_NAMED_NOTE = (
+    "GLaDOS note, not tool output: not sent -- the user asked to take a number "
+    "of items out, and this call would remove the whole line. For the item "
+    "that count was said about, call {tool} with delta {delta}; it leaves the "
+    "rest, and takes the line out if that reaches zero. If the user asked to "
+    "remove some other item entirely, send that removal again."
+)
+
 # Upper bound on how many sessions' conversation buffers are held in RAM at
 # once. Far above any realistic concurrent-session count; exists only so a long
 # uptime accumulating dead sessions can't grow the history dict without limit.
@@ -647,6 +659,7 @@ HARNESS_REFUSAL_STATUSES = frozenset({
     "not_removed",
     "use_add_tool",
     "use_volume_tool",
+    "use_adjust_tool",
     "quantity_needed",
     "quantity_mismatch",
     "already_done",
@@ -3027,7 +3040,7 @@ class Organizer:
             )
         volume_tool = self._volume_removal_for(tc, spec, utterance, outcome)
         if volume_tool is not None:
-            outcome.volume_redirected.add(f"{tc.server}.{tc.name}")
+            outcome.removal_redirected.add(f"{tc.server}.{tc.name}")
             log.warning(
                 "refused %s.%s in session %s: the utterance named litres",
                 tc.server,
@@ -3043,6 +3056,31 @@ class Organizer:
             )
             return _WriteRefusal(
                 _local_result("use_volume_tool", _VOLUME_NAMED_NOTE.format(tool=volume_tool)),
+                satisfied=False,
+            )
+        adjust = self._count_removal_for(tc, spec, utterance, outcome)
+        if adjust is not None:
+            tool, count = adjust
+            outcome.removal_redirected.add(f"{tc.server}.{tc.name}")
+            log.warning(
+                "refused %s.%s in session %s: the utterance asked to take %d out",
+                tc.server,
+                tc.name,
+                session_id,
+                count,
+            )
+            trace.event(
+                "count_removal_redirected",
+                call_id=tc.call_id,
+                server=tc.server,
+                name=tc.name,
+                adjust_tool=tool,
+                count=count,
+            )
+            return _WriteRefusal(
+                _local_result(
+                    "use_adjust_tool", _COUNT_NAMED_NOTE.format(tool=tool, delta=-count)
+                ),
                 satisfied=False,
             )
         if _set_answers_add(spec, utterance):
@@ -3096,10 +3134,10 @@ class Organizer:
         this call would take out items or a whole line instead. None when there
         is no such tool to point at -- the guard then stands down rather than
         refuse a removal it cannot redirect -- and for a tool already redirected
-        this turn (see `TurnRecord.volume_redirected`)."""
+        this turn (see `TurnRecord.removal_redirected`)."""
         if not spec.removes or spec.volume_arg or not _removes_with(tc, spec):
             return None
-        if f"{tc.server}.{tc.name}" in outcome.volume_redirected:
+        if f"{tc.server}.{tc.name}" in outcome.removal_redirected:
             return None
         if not names_a_volume(utterance):
             return None
@@ -3111,6 +3149,30 @@ class Organizer:
             ),
             None,
         )
+
+    def _count_removal_for(
+        self, tc: LLMToolCall, spec: ToolSpec, utterance: str, outcome: TurnRecord
+    ) -> tuple[str, int] | None:
+        """The same server's relative-change tool and the count to take off,
+        when the user asked to take a number of items out and this call would
+        empty the whole line instead. Only a line removal counts: a set or an
+        adjust carries a count the model chose, and guard 7 owns litres."""
+        if not spec.removes or spec.count_arg or spec.delta_arg or spec.volume_arg:
+            return None
+        if f"{tc.server}.{tc.name}" in outcome.removal_redirected:
+            return None
+        count = spoken_removal_count(utterance)
+        if count is None or names_a_volume(utterance):
+            return None
+        tool = next(
+            (
+                s.name
+                for s in self.mcp.specs()
+                if s.server == tc.server and s.removes and s.delta_arg
+            ),
+            None,
+        )
+        return (tool, count) if tool is not None else None
 
     def _refuse_without_prior(
         self, tc: LLMToolCall, spec: ToolSpec, session_id: str, trace

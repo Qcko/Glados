@@ -39,7 +39,9 @@ flowchart TD
     G3 -- yes --> R3["refuse: not_removed<br/>ok=True, satisfied=False"]
     G3 -- no --> G7{"removes, not a volume tool,<br/>utterance names litres, and the<br/>server has a volume_arg tool?"}
     G7 -- yes --> R7["refuse: use_volume_tool<br/>ok=True, satisfied=False"]
-    G7 -- no --> G4{"count_arg (absolute set)<br/>under an add-only utterance?"}
+    G7 -- no --> G8{"line removal, utterance takes<br/>N items off, and the server<br/>has a delta_arg tool?"}
+    G8 -- yes --> R8["refuse: use_adjust_tool<br/>ok=True, satisfied=False"]
+    G8 -- no --> G4{"count_arg (absolute set)<br/>under an add-only utterance?"}
     G4 -- yes --> R4["refuse: use_add_tool<br/>ok=True, satisfied=False"]
     G4 -- no --> G5{"additive with quantity_arg,<br/>user said one count N,<br/>call sends another?"}
     G5 -- yes --> R5["refuse: quantity_mismatch<br/>ok=True, satisfied=False"]
@@ -60,6 +62,7 @@ flowchart TD
     R5 --> T
     R6 --> T
     R7 --> T
+    R8 --> T
     L --> T
     X --> T
     T["tool message to the model<br/>(refusals unwrapped: GLaDOS wrote them)"]
@@ -223,6 +226,32 @@ The in-flight ledger uses the same canonicaliser with nothing dropped.
     the eggs" redirects the eggs removal too -- accepted, because the model's
     second send goes through, and a model that ignores the note can never
     loop to the pass cap.
+
+15. **Guard 8: a count named, the line emptied** (added 29-09-2026). Prod
+    bake-off T13: three milks, "take one of the milks off" became
+    `remove_from_cart`, the cart went empty, and the reply said two remained.
+    (A probe earlier that day got the same request right twice, with
+    `adjust_cart_quantity_by_name(delta=-1)`: intermittent, not a habit.)
+    A line removal -- `removes` with no `count_arg`, `delta_arg` or
+    `volume_arg` -- answering an utterance that takes a number of items out
+    (`utterance.spoken_removal_count`: "take one of the milks off", "remove 3
+    of the yoghurts", "one fewer bread") is refused unsent with
+    `use_adjust_tool`, and the note names the server's `delta_arg` tool and
+    the delta. **The count must follow the verb directly** (only off / out
+    between). The code duck showed why: with a looser pattern "remove milk, I
+    have 2 at home" became delta -2 and left milk the user wanted gone -- a
+    wrong count here is worse than no guard. So "all three", "the six pack",
+    "the 2 for 1 offer", a pack size glued to its unit ("the 3L milk") and
+    litres (guard 7's) are not counts. Redirecting a right count is always
+    safe: an adjust that reaches zero takes the line out, so a line of
+    exactly N ends the same after one more round-trip. The note scopes the
+    delta to the counted item and tells the model to re-send any other
+    removal (a compound "take one off the milk and remove the eggs" refuses
+    the eggs once too). Shares guard 7's once-per-tool-per-turn bound
+    (`TurnRecord.removal_redirected`) and its stand-down when the server has
+    no tool to point at. Accepted: the only Dunnes delta tool is by name, so a
+    redirect from a productId removal relies on the name resolving to the same
+    line.
 
 ## Cue tables
 

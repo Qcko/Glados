@@ -352,6 +352,35 @@ def names_a_volume(text: str) -> bool:
     )
 
 
+# A count of items to take out: "take one of the milks off", "take off two
+# eggs", "remove 3 of the yoghurts", "one fewer bread". The count must follow
+# the verb directly (only "off" / "out" between): anywhere else a number is
+# something else -- "remove milk, I have 2 at home", "take off the 2 for 1
+# offer", "remove number 5 pasta", "take the six pack off" (code duck,
+# 29-09-2026) -- and a wrong count here leaves items the user wanted gone. A
+# digit glued to a unit ("the 3L milk") is a pack size; "all three" never
+# matches, since "all" sits between the verb and the count.
+_COUNT_REMOVAL_RE = re.compile(
+    r"\b(?:take|remove|drop)\s+(?:(?:off|out)\s+)?"
+    r"(?P<n>\d+|one|two|three|four|five|six)\b(?!\s*(?:l|litres?|liters?)\b)"
+    r"|\b(?P<m>\d+|one|two|three)\s+(?:fewer|less)\b",
+    re.IGNORECASE,
+)
+
+
+def spoken_removal_count(text: str) -> int | None:
+    """How many items the utterance asks to take out of a line, or None when
+    it names no count directly after the verb. Litres are not counted -- see
+    `names_a_volume`."""
+    if not text:
+        return None
+    match = _COUNT_REMOVAL_RE.search(text)
+    if match is None:
+        return None
+    token = (match.group("n") or match.group("m")).lower()
+    return int(token) if token.isdigit() else _COUNT_VALUES.get(token)
+
+
 # A spoken answer to a confirmation question (DESIGN-voice-confirm.md). Both
 # sides are whole-utterance and anchored like barge-in, so a sentence that
 # merely contains "yes" is not consent. The yes side is deliberately narrow:

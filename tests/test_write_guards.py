@@ -1587,3 +1587,106 @@ async def test_an_adjust_that_adds_is_not_redirected(tmp_path: Path) -> None:
 
     assert len(adjust.calls) == 1
     assert "volume_removal_redirected" not in [e.get("event") for e in trace_events(tmp_path)]
+
+
+# ---- a count of items named, but the removal empties the line ---------------
+
+
+def _adjust_spec() -> ToolSpec:
+    return ToolSpec(
+        server="dunnes", name="adjust_cart_quantity_by_name", description="adjust",
+        parameters={"type": "object", "properties": {"name": {"type": "string"}, "delta": {"type": "integer"}}},
+        mutating=True, removes=True, delta_arg="delta",
+    )
+
+
+async def _count_removal_turn(tmp_path: Path, utterance: str, calls: list[LLMToolCall], with_adjust=True):
+    whole = _RecordingTool(_remove_spec(), MCPCallResult(ok=True, content={"text": "Removed."}))
+    adjust = _RecordingTool(_adjust_spec(), MCPCallResult(ok=True, content={"text": "Changed."}))
+    mcp = MCPRegistry()
+    mcp.register(whole)
+    if with_adjust:
+        mcp.register(adjust)
+    llm = _TurnScriptedLLM([calls])
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, utterance)
+    events = [e for e in trace_events(tmp_path) if e.get("event") == "count_removal_redirected"]
+    return whole, adjust, events, llm
+
+
+async def test_taking_one_off_three_is_not_a_line_removal(tmp_path: Path) -> None:
+    """Bake-off T13 (29-09-2026): three milks, "take one of the milks off" ->
+    remove_from_cart emptied the line, and the reply said two remained."""
+    whole, _, events, llm = await _count_removal_turn(
+        tmp_path, "Take one of the milks off.", [_call("remove_from_cart", {"productId": "1"}, "r1")]
+    )
+
+    assert whole.calls == []
+    assert events and events[0]["adjust_tool"] == "adjust_cart_quantity_by_name"
+    assert "delta -1" in _last_tool_message(llm)
+
+
+async def test_the_adjust_itself_goes_through(tmp_path: Path) -> None:
+    _, adjust, events, _ = await _count_removal_turn(
+        tmp_path, "Take one of the milks off.",
+        [_call("adjust_cart_quantity_by_name", {"name": "milk", "delta": -1}, "a1")],
+    )
+
+    assert len(adjust.calls) == 1 and events == []
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    ["Remove the milk.", "Take all three milks off.", "Take the 3L milk off.", "Take 3 litres of milk off."],
+)
+async def test_no_count_or_the_whole_line_is_left_to_the_line_removal(tmp_path: Path, utterance: str) -> None:
+    whole, _, events, _ = await _count_removal_turn(
+        tmp_path, utterance, [_call("remove_from_cart", {"productId": "1"}, "r1")]
+    )
+
+    assert events == []
+    assert len(whole.calls) == 1
+
+
+async def test_the_count_redirect_is_once_per_tool_per_turn(tmp_path: Path) -> None:
+    whole, _, events, _ = await _count_removal_turn(
+        tmp_path, "Take one of the milks off.",
+        [_call("remove_from_cart", {"productId": "1"}, "r1"), _call("remove_from_cart", {"productId": "1"}, "r2")],
+    )
+
+    assert len(events) == 1 and len(whole.calls) == 1
+
+
+async def test_no_adjust_tool_means_no_count_redirect(tmp_path: Path) -> None:
+    whole, _, events, _ = await _count_removal_turn(
+        tmp_path, "Take one of the milks off.", [_call("remove_from_cart", {"productId": "1"}, "r1")],
+        with_adjust=False,
+    )
+
+    assert events == [] and len(whole.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "utterance, count",
+    [
+        ("Take one of the milks off.", 1),
+        ("take off two eggs", 2),
+        ("remove 3 of the yoghurts", 3),
+        ("one fewer bread please", 1),
+        ("Remove the milk.", None),
+        ("Take all three milks off.", None),
+        ("take both milks out", None),
+        ("Take the 3L milk off.", None),
+        ("Take 3 litres of milk off.", None),
+        ("remove milk, I have 2 at home", None),
+        ("drop it, one is enough", None),
+        ("take off the 2 for 1 offer", None),
+        ("remove number 5 pasta", None),
+        ("take the six pack off", None),
+        ("take one off the milk and remove the eggs", 1),
+    ],
+)
+def test_spoken_removal_count(utterance: str, count: int | None) -> None:
+    from glados.core.utterance import spoken_removal_count
+
+    assert spoken_removal_count(utterance) == count
