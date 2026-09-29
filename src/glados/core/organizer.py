@@ -2865,6 +2865,7 @@ class Organizer:
                 ok=result.ok,
                 content=result.content,
                 error=result.error,
+                structured=result.structured,
             )
             self._product_names.learn(room_id, tc.server, result.content)
             self._product_names.learn(room_id, tc.server, result.error)

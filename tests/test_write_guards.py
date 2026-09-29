@@ -1434,3 +1434,12 @@ async def test_a_true_volume_reply_is_left_alone(tmp_path: Path) -> None:
 
     assert true_reply in history
     assert "misstated_volume_corrected" not in events
+
+
+async def test_the_trace_records_the_typed_result_beside_the_text(tmp_path: Path) -> None:
+    """A correct reply never shows the check, so the trace is the only place a
+    live run can prove the typed numbers arrived."""
+    await _volume_turn(tmp_path, "Milk added: 3L + 1L for your 4 litres.")
+
+    results = [e for e in trace_events(tmp_path) if e.get("event") == "tool_result"]
+    assert results[0]["structured"] == _volume_result().structured
