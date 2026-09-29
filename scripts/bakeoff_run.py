@@ -79,11 +79,20 @@ class BakeoffTest:
 # frame, so the reset is itself LLM-mediated -- phrased to remove *every* line
 # (by product id, unambiguous) rather than a per-name op that would trip the
 # non-unique guard, then seed a single milk line the stateful tests expect.
+#
+# The seed names the exact product. A bare "milk" is resolved by the shop's
+# favourite / past-purchase flags and result order, and on 29-09-2026 the same
+# add_to_cart_by_name("milk") picked the milk at 13:42 and fresh cream at
+# 13:46, so two arms' stateful blocks ran on a cream line. The full name steers
+# the shop's match away from cream; the guarantee is the verify step, which
+# checks the productId, not just the line count.
+SEED_PRODUCT_ID = "100806893"
+SEED_PRODUCT_NAME = "Dunnes Stores Irish Low Fat Milk 3L"
 RESET_PROMPTS: list[str] = [
     "Call view_cart to list the lines, then for each line call remove_from_cart "
     "using that line's real productId value copied verbatim from the view_cart "
     "result -- never a placeholder. Repeat until view_cart shows an empty cart.",
-    "Add one carton of milk to the cart.",
+    f"Add one {SEED_PRODUCT_NAME} to the cart.",
 ]
 
 
@@ -302,8 +311,8 @@ async def _reset_cart(ws) -> None:
     _print_turn(await _run_turn(ws, seed_prompt))
     rep = await _run_turn(ws, _VERIFY_PROMPT)
     _print_turn(rep)
-    lines = _count_cart_lines(rep)
-    if lines is None:
+    ids = _cart_product_ids(rep)
+    if ids is None:
         raise SystemExit(
             "CART RESET INCONCLUSIVE: the model never called view_cart when "
             "asked to, so the starting cart is unknown. Note this is the model "
@@ -312,53 +321,57 @@ async def _reset_cart(ws) -> None:
             "to a single milk by hand and re-run WITHOUT --reset, and say so on "
             "the scorecard."
         )
-    if lines != 1:
-        empty = " (the cart is empty -- the reseed step did not land)" if lines == 0 else ""
+    if ids != [SEED_PRODUCT_ID]:
+        empty = " (the cart is empty -- the reseed step did not land)" if not ids else ""
         raise SystemExit(
-            f"CART RESET FAILED: view_cart shows {lines} line(s), expected "
-            f"exactly 1 (a single milk){empty}. The stateful tests would be "
-            "scored from an unknown starting cart, so this run would not be "
-            "comparable to any other. Fix the cart and re-run."
+            f"CART RESET FAILED: view_cart shows productIds {ids}, expected "
+            f"exactly [{SEED_PRODUCT_ID}] ({SEED_PRODUCT_NAME}){empty}. The "
+            "stateful tests would be scored from an unknown starting cart, so "
+            "this run would not be comparable to any other. Fix the cart and "
+            "re-run."
         )
-    print("=== CART RESET verified -- exactly one line ===")
+    print(f"=== CART RESET verified -- exactly one line, {SEED_PRODUCT_NAME} ===")
 
 
-def _count_cart_lines(rep: TurnReport) -> int | None:
-    """Count cart lines in the turn's last `view_cart` payload.
+def _cart_product_ids(rep: TurnReport) -> list[str] | None:
+    """The productIds in the turn's last `view_cart` payload, in order.
 
-    Walks the decoded structure counting `productId` keys rather than matching
-    substrings in serialised JSON: a payload that nests JSON inside a string
-    field escapes its quotes, and a substring count then reports zero for a
-    cart that is actually fine -- aborting a reset that worked.
+    Walks the decoded structure collecting `productId` values rather than
+    matching substrings in serialised JSON: a payload that nests JSON inside a
+    string field escapes its quotes, and a substring match then finds nothing
+    in a cart that is actually fine -- aborting a reset that worked.
 
     Returns None when no `view_cart` payload was produced at all, which is a
-    different problem from a wrong count and gets different advice.
+    different problem from a wrong cart and gets different advice.
     """
     for name, payload in reversed(rep.tool_payloads):
         if name == "view_cart":
-            return _count_keys(payload, "productid")
+            return _collect_values(payload, "productid")
     return None
 
 
-def _count_keys(node: object, wanted: str) -> int:
-    """Recursive key count, case-insensitive. Nested because the cart may be
-    wrapped (`{"cart": {"lines": [...]}}`) and the wrapper is not ours."""
+def _collect_values(node: object, wanted: str) -> list[str]:
+    """Recursive value collection by key, case-insensitive. Nested because the
+    cart may be wrapped (`{"cart": {"lines": [...]}}`) and the wrapper is not
+    ours."""
     if isinstance(node, dict):
-        return sum(
-            (1 if str(k).lower() == wanted else 0) + _count_keys(v, wanted)
-            for k, v in node.items()
-        )
+        found: list[str] = []
+        for k, v in node.items():
+            if str(k).lower() == wanted:
+                found.append(str(v))
+            found.extend(_collect_values(v, wanted))
+        return found
     if isinstance(node, list):
-        return sum(_count_keys(item, wanted) for item in node)
+        return [value for item in node for value in _collect_values(item, wanted)]
     if isinstance(node, str):
         # A payload that carries its cart as a JSON STRING rather than as
-        # structure. Walking into it is the difference between a correct count
-        # and a confident zero, which would abort a reset that had worked.
+        # structure. Walking into it is the difference between a correct read
+        # and a confident empty cart, which would abort a reset that had worked.
         try:
-            return _count_keys(json.loads(node), wanted)
+            return _collect_values(json.loads(node), wanted)
         except (ValueError, TypeError):
-            return 0
-    return 0
+            return []
+    return []
 
 
 def _print_turn(rep: TurnReport) -> None:
