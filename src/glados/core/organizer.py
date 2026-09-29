@@ -685,10 +685,14 @@ def _write_key(call: LLMToolCall, spec: ToolSpec) -> WriteKey:
     return canonical_key(call, drop)
 
 
-def _accepts_repeat(spec: ToolSpec) -> bool:
-    """Only an additive write's boolean `repeat` is the server override this
-    guard owns; a read whose `repeat` is a schedule string is left alone."""
-    if not spec.additive:
+def _accepts_repeat(spec: ToolSpec, call: LLMToolCall) -> bool:
+    """An additive or relative write's boolean `repeat` is the server override
+    this guard owns; a read whose `repeat` is a schedule string is left alone.
+    Relative REMOVALS (a negative delta, a volume) joined on 29-09-2026: until
+    then the model's own `repeat` on one went to the server untouched. A
+    positive adjust is left as it was -- no cue table here reads "and a milk"
+    as a repeat, so aligning it would newly refuse a second one."""
+    if not (spec.additive or _is_relative_removal(call, spec)):
         return False
     properties = spec.parameters.get("properties") or {}
     return (properties.get(REPEAT_ARG) or {}).get("type") == "boolean"
@@ -712,6 +716,33 @@ def _prior_missing(call: LLMToolCall, spec: ToolSpec, outcome: TurnRecord) -> bo
         return False
     wanted = f"{call.server}.{spec.requires_prior}"
     return not any(t.tool == wanted and t.ok for t in outcome.tools)
+
+
+def _is_relative_removal(call: LLMToolCall, spec: ToolSpec) -> bool:
+    """A removal by an amount -- a negative delta or a volume -- as sent. Doing
+    it twice takes twice as much out, which is why a server remembers it."""
+    return bool(spec.removes and (spec.delta_arg or spec.volume_arg) and _removes_with(call, spec))
+
+
+def _asks_for_this_removal(call: LLMToolCall, utterance: str) -> bool:
+    """The utterance asks to take an amount out (a count or litres) and names
+    something the call is about. Only then can it be a fresh request for the
+    removal, rather than a replay the model dug out of history."""
+    if spoken_removal_count(utterance) is None and not names_a_volume(utterance):
+        return False
+    said = {_singular(w) for w in re.findall(r"[a-z]+", utterance.lower())}
+    about = {
+        _singular(w)
+        for value in call.args.values()
+        if isinstance(value, str)
+        for w in re.findall(r"[a-z]+", value.lower())
+        if len(w) >= 3
+    }
+    return bool(said & about)
+
+
+def _singular(word: str) -> str:
+    return word[:-1] if len(word) > 3 and word.endswith("s") else word
 
 
 def _removal_unasked(call: LLMToolCall, spec: ToolSpec, utterance: str) -> bool:
@@ -1002,6 +1033,10 @@ class Organizer:
             if write_ledger is not None
             else WriteLedger(max_sessions=_MAX_TRACKED_SESSIONS)
         )
+        # Per-session count of user messages run, one per `_run_user_text`
+        # however many drives it takes. A repeated relative removal may carry
+        # repeat=true only when another message came between (invariant 16).
+        self._utterance_seq: dict[str, int] = {}
         # The reader call (DESIGN-reader-call.md). Its own adapter instance so
         # it can carry a small num_predict with thinking off -- the planner's
         # budget lets a reasoning model think the whole reply away. Defaults
@@ -1369,6 +1404,11 @@ class Organizer:
             trace.event("user_text", text=text, source=source)
             if await self._maybe_handle_escape(session, text, source, trace):
                 return
+            # Counted after the escape: "stop" is not a message that can sit
+            # between a removal and its double-delivered copy (invariant 16).
+            self._utterance_seq[session.session_id] = (
+                self._utterance_seq.get(session.session_id, 0) + 1
+            )
             await self._await_llm_warm(trace)
             await self._broadcast(session.room_id, Welcome(session_id=session.session_id))
             await self._broadcast(
@@ -2010,6 +2050,7 @@ class Organizer:
             self._untrusted_sessions.discard(evicted)
             self._written_sessions.discard(evicted)
             self._write_ledger.forget(evicted)
+            self._utterance_seq.pop(evicted, None)
         self._history[session_id] = self._cap_history(new_history)
         # Committed alongside the history it describes: the flag is a property
         # of the retained bytes, so it lives and dies with them.
@@ -2607,6 +2648,7 @@ class Organizer:
             self._written_sessions.discard(sid)
             self._last_turn.pop(sid, None)
             self._write_ledger.forget(sid)
+            self._utterance_seq.pop(sid, None)
             trace.event("history_cleared", reason="user start-over")
             reply = "Done -- I've cleared our conversation. Starting fresh."
         else:
@@ -2733,7 +2775,7 @@ class Organizer:
             # Rewrites the args, so it runs before the broadcast and the trace
             # event: the desk client's confirm dialog and `traces/` must show
             # the call that goes to the wire, not the one the model wrote.
-            self._align_repeat_flag(tc, spec, utterance, trace)
+            self._align_repeat_flag(tc, spec, utterance, session_id, trace)
             await self._broadcast(
                 room_id,
                 ToolCall(
@@ -2972,19 +3014,28 @@ class Organizer:
             )
 
     def _align_repeat_flag(
-        self, tc: LLMToolCall, spec: ToolSpec | None, utterance: str, trace
+        self,
+        tc: LLMToolCall,
+        spec: ToolSpec | None,
+        utterance: str,
+        session_id: str,
+        trace,
     ) -> None:
-        """The server's `repeat` override is set from the user's words alone.
+        """The server's `repeat` override is set by GLaDOS, never by the model.
 
         A model that wants past the write ledger or the server's own
         identical-write refusal only has to add `repeat: true`, so the flag is
         overwritten -- not merely set -- on every call whose schema carries it:
-        True when the utterance asked for a repeat ("another", "more"), False
-        otherwise. Fails open with the ledger on a non-English reply language,
-        where the cue table cannot read the utterance."""
-        if spec is None or not _accepts_repeat(spec) or not self._cues_readable():
+        True when the utterance asked for a repeat ("another", "more"), or when
+        GLaDOS's own record shows the identical relative removal finished
+        cleanly for an EARLIER message with another between (invariant 16);
+        False otherwise. Fails open with the ledger on a non-English reply
+        language, where the cue table cannot read the utterance."""
+        if spec is None or not _accepts_repeat(spec, tc) or not self._cues_readable():
             return
-        wanted = has_repeat_cue(utterance)
+        wanted = has_repeat_cue(utterance) or self._repeats_a_clean_removal(
+            tc, spec, utterance, session_id, trace
+        )
         from_model = tc.args.get(REPEAT_ARG)
         if from_model == wanted:
             return
@@ -3003,6 +3054,40 @@ class Organizer:
         # assistant message already appended to the turn, so history and the
         # next pass see the call as it went to the wire.
         tc.args[REPEAT_ARG] = wanted
+
+    def _repeats_a_clean_removal(
+        self, tc: LLMToolCall, spec: ToolSpec, utterance: str, session_id: str, trace
+    ) -> bool:
+        """The user asked again for a relative removal GLaDOS already saw
+        finish cleanly. 29-09-2026, bake-off T13: a second "take one of the
+        milks off" 16 s after the first was refused by the Dunnes server as a
+        duplicate, since nothing in the words said "again".
+
+        Only when another message came between the two: a re-drive of the same
+        message (escalation, finish-the-job) has the same number, and a
+        double-delivered message has no message between. The current message
+        must itself ask to take an amount of that item out. An uncertain entry
+        -- the call timed out -- never qualifies."""
+        if not _is_relative_removal(tc, spec):
+            return False
+        if not _asks_for_this_removal(tc, utterance):
+            # Code duck, 29-09-2026: without this, a model replaying an old
+            # adjust from history on "what's in my cart?" would get the grant.
+            return False
+        entry = self._write_ledger.removal(session_id, _write_key(tc, spec))
+        if entry is None or not entry.certain:
+            return False
+        if self._utterance_seq.get(session_id, 0) - entry.utterance < 2:
+            return False
+        trace.event(
+            "repeat_granted",
+            call_id=tc.call_id,
+            server=tc.server,
+            name=tc.name,
+            reason="prior_clean_removal",
+            prior_utterance=entry.utterance,
+        )
+        return True
 
     def _refuse_write(
         self,
@@ -3276,6 +3361,13 @@ class Organizer:
             return
         if result.ok and not _took_effect(tc, result):
             return
+        if _is_relative_removal(tc, spec):
+            self._write_ledger.note_removal(
+                session_id,
+                _write_key(tc, spec),
+                certain=result.ok,
+                utterance=self._utterance_seq.get(session_id, 0),
+            )
         if not spec.additive:
             self._write_ledger.clear(session_id, tc.server)
             return

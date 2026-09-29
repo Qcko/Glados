@@ -29,7 +29,7 @@ English, because the cue tables cannot read anything else.
 flowchart TD
     U["utterance<br/>(last user message)"] --> A
     M["model emits a mutating call"] --> A
-    A["align repeat flag<br/>repeat := has_repeat_cue(utterance)<br/>(overwrites whatever the model sent)"]
+    A["align repeat flag<br/>repeat := has_repeat_cue(utterance)<br/>OR a clean earlier relative removal,<br/>another message between (inv. 16)<br/>(overwrites whatever the model sent)"]
     A --> B["broadcast ToolCall + trace<br/>(args as they will go to the wire)"]
     B --> IF{"in-flight this turn?"}
     IF -- yes --> R0["_ALREADY_ATTEMPTED<br/>(existing)"]
@@ -252,6 +252,47 @@ The in-flight ledger uses the same canonicaliser with nothing dropped.
     no tool to point at. Accepted: the only Dunnes delta tool is by name, so a
     redirect from a productId removal relies on the name resolving to the same
     line.
+
+16. **A relative removal asked for again is a repeat** (added 29-09-2026).
+    **This changes the repeat rule:** `repeat` used to be set from the user's
+    words alone; it is now set from the user's words OR GLaDOS's own record of
+    a clean completion. The property that matters is unchanged -- the model
+    never sets it (`_align_repeat_flag` overwrites it, and since this change
+    that covers relative writes too: before, a model's `repeat=true` on an
+    adjust reached the server untouched). Prod bake-off T13: "take one off",
+    "add three milks", "take one off" -- the second identical
+    `adjust_cart_quantity_by_name(delta=-1)` was refused by the Dunnes server's
+    two-minute duplicate check, which exists so a re-send after a timeout
+    cannot take twice as much out, and which a new request can only pass with
+    `repeat=true`. GLaDOS can tell the two apart; the server cannot.
+    `WriteLedger.note_removal` records each relative removal (a negative delta
+    or a volume, as sent) that landed (`certain`) or may have, with the
+    per-session number of the user message that sent it. A later identical
+    call gets `repeat=true` only when that entry is certain AND at least one
+    other message came between (`Organizer._utterance_seq`, counted once per
+    `_run_user_text`). From the design panel (reliability + architect):
+    - a re-drive of the same message (escalation, finish-the-job) shares its
+      number, so it can never repeat a removal its own first drive made;
+    - nothing upstream de-duplicates a double-delivered message (ASR re-send,
+      reconnect), so a message twice in a row with nothing between is NOT a
+      repeat -- the server's refusal stands, and the user can say "another";
+    - an uncertain entry is never upgraded inside its window, even if a late
+      answer arrives;
+    - the record lives 150 s, longer than the server's 120 s, stamped at the
+      result, so it never runs out while the server still refuses; it is kept
+      apart from the additive record, which `clear` empties, and dropped with
+      the session by `forget`;
+    - per session: another room's identical removal falls back to the cue
+      rule and meets the server's refusal -- a safe false refusal, not a hole.
+    From the code duck: the CURRENT message must itself ask to take an amount
+    out (`spoken_removal_count` or `names_a_volume`) and share a word with the
+    call's arguments ("milks" ~ "Irish Low Fat Milk 3L"); otherwise a model
+    replaying an old adjust from history on "what's in my cart?" would get
+    the grant. The message count is taken after the escape check, so "stop"
+    does not sit between a removal and its double-delivered copy. Only
+    removals are aligned: a positive adjust keeps the model's `repeat` as
+    before, since no cue reads "and a milk" as a repeat.
+    Traced as `repeat_granted`, reason `prior_clean_removal`.
 
 ## Cue tables
 

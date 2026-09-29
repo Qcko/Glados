@@ -83,8 +83,33 @@ def coerce_quantity(value: object) -> int | None:
         return None
 
 
+# How long a relative removal is remembered. Deliberately LONGER than the
+# Dunnes server's own two-minute identical-write window, and stamped when the
+# result arrives: while this record lives the server's may still be refusing,
+# and only this record can say the earlier call finished cleanly.
+REMOVAL_WINDOW_S = 150.0
+
+
+@dataclass(frozen=True)
+class RemovalEntry:
+    """A relative removal (adjust down, remove by volume) that landed or may
+    have. `utterance` is the per-session number of the user message that sent
+    it, so a later identical removal can tell a new request from a re-drive or
+    a double-delivered message (DESIGN-write-guards.md, invariant 16)."""
+
+    key: WriteKey
+    at: float
+    certain: bool
+    utterance: int
+
+
 class WriteLedger:
-    """Per-session, LRU-bounded, pruned on every touch."""
+    """Per-session, LRU-bounded, pruned on every touch.
+
+    Two records, kept apart on purpose. The additive one answers "already
+    done" and is cleared by any other write to the server. The removal one
+    (`note_removal` / `removal`) is never cleared by `clear`: dropping it would
+    silently bring back the server's refusal of a request the user repeated."""
 
     def __init__(
         self,
@@ -97,6 +122,34 @@ class WriteLedger:
         self._clock = clock
         self._max_sessions = max_sessions
         self._entries: dict[str, list[WriteEntry]] = {}
+        self._removals: dict[str, dict[WriteKey, RemovalEntry]] = {}
+
+    def note_removal(
+        self, session_id: str, key: WriteKey, *, certain: bool, utterance: int
+    ) -> None:
+        """Remember a relative removal. An uncertain entry is never upgraded
+        inside its window: the user may already have been told the outcome is
+        unknown, and a late answer must not turn that into a licence to repeat."""
+        removals = self._live_removals(session_id)
+        held = removals.get(key)
+        if held is not None and not held.certain:
+            return
+        removals[key] = RemovalEntry(key=key, at=self._clock(), certain=certain, utterance=utterance)
+        self._removals.pop(session_id, None)
+        while len(self._removals) >= self._max_sessions:
+            del self._removals[next(iter(self._removals))]
+        self._removals[session_id] = removals
+
+    def removal(self, session_id: str, key: WriteKey) -> RemovalEntry | None:
+        return self._live_removals(session_id).get(key)
+
+    def _live_removals(self, session_id: str) -> dict[WriteKey, RemovalEntry]:
+        cutoff = self._clock() - REMOVAL_WINDOW_S
+        return {
+            key: entry
+            for key, entry in self._removals.get(session_id, {}).items()
+            if entry.at >= cutoff
+        }
 
     def note(
         self,
@@ -147,6 +200,7 @@ class WriteLedger:
 
     def forget(self, session_id: str) -> None:
         self._entries.pop(session_id, None)
+        self._removals.pop(session_id, None)
 
     def _live(self, session_id: str) -> list[WriteEntry]:
         cutoff = self._clock() - self._window_s

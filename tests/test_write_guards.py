@@ -1690,3 +1690,131 @@ def test_spoken_removal_count(utterance: str, count: int | None) -> None:
     from glados.core.utterance import spoken_removal_count
 
     assert spoken_removal_count(utterance) == count
+
+
+# ---- a repeated relative removal, asked for again ---------------------------
+
+
+def _adjust_with_repeat_spec() -> ToolSpec:
+    return ToolSpec(
+        server="dunnes", name="adjust_cart_quantity_by_name", description="adjust",
+        parameters={"type": "object", "properties": {
+            "name": {"type": "string"}, "delta": {"type": "integer"}, "repeat": {"type": "boolean"}}},
+        mutating=True, removes=True, delta_arg="delta",
+    )
+
+
+def _take_one(call_id: str) -> LLMToolCall:
+    return _call("adjust_cart_quantity_by_name", {"name": "milk", "delta": -1}, call_id)
+
+
+async def _removal_turns(tmp_path: Path, utterances: list[str], scripts: list[list[LLMToolCall]], result=None):
+    adjust = _RecordingTool(
+        _adjust_with_repeat_spec(), result or MCPCallResult(ok=True, content={"text": "Changed."})
+    )
+    mcp = MCPRegistry()
+    mcp.register(adjust)
+    llm = _TurnScriptedLLM(scripts)
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        for text in utterances:
+            await _say(h, llm, text)
+    granted = [e for e in trace_events(tmp_path) if e.get("event") == "repeat_granted"]
+    return [c.get("repeat") for c in adjust.calls], granted
+
+
+async def test_a_removal_asked_for_again_after_another_message_is_a_repeat(tmp_path: Path) -> None:
+    """Bake-off T13 (29-09-2026): "take one off", "add three milks", "take one
+    off" -- the second identical adjust was refused by the Dunnes server as a
+    duplicate because nothing in the words said "again"."""
+    repeats, granted = await _removal_turns(
+        tmp_path,
+        ["Take one of the milks off.", "What time is it?", "Take one of the milks off."],
+        [[_take_one("a1")], [], [_take_one("a2")]],
+    )
+
+    assert repeats == [False, True]
+    assert granted and granted[0]["reason"] == "prior_clean_removal"
+
+
+async def test_the_same_message_twice_in_a_row_is_not_a_repeat(tmp_path: Path) -> None:
+    """A double-delivered message has nothing between the two copies."""
+    repeats, granted = await _removal_turns(
+        tmp_path,
+        ["Take one of the milks off.", "Take one of the milks off."],
+        [[_take_one("a1")], [_take_one("a2")]],
+    )
+
+    assert repeats == [False, False] and granted == []
+
+
+async def test_an_uncertain_removal_never_licenses_a_repeat(tmp_path: Path) -> None:
+    repeats, granted = await _removal_turns(
+        tmp_path,
+        ["Take one of the milks off.", "What time is it?", "Take one of the milks off."],
+        [[_take_one("a1")], [], [_take_one("a2")]],
+        result=MCPCallResult(ok=False, indeterminate=True, error="timed out"),
+    )
+
+    assert granted == []
+    assert all(r is False for r in repeats)
+
+
+async def test_the_model_cannot_set_repeat_on_an_adjust(tmp_path: Path) -> None:
+    call = _call("adjust_cart_quantity_by_name", {"name": "milk", "delta": -1, "repeat": True}, "a1")
+    repeats, _ = await _removal_turns(tmp_path, ["Take one of the milks off."], [[call]])
+
+    assert repeats == [False]
+
+
+def test_an_uncertain_removal_is_not_upgraded_by_a_late_answer() -> None:
+    now = [0.0]
+    ledger = WriteLedger(clock=lambda: now[0])
+    key = ("dunnes.adjust_cart_quantity_by_name", '{"delta": -1, "name": "milk"}')
+    ledger.note_removal("s", key, certain=False, utterance=1)
+    ledger.note_removal("s", key, certain=True, utterance=3)
+
+    assert ledger.removal("s", key).certain is False
+
+
+def test_the_removal_record_outlives_the_server_window_and_survives_clear() -> None:
+    now = [0.0]
+    ledger = WriteLedger(clock=lambda: now[0])
+    key = ("dunnes.adjust_cart_quantity_by_name", '{"delta": -1, "name": "milk"}')
+    ledger.note_removal("s", key, certain=True, utterance=1)
+    ledger.clear("s", "dunnes")
+    now[0] = 140.0
+    assert ledger.removal("s", key) is not None
+    now[0] = 151.0
+    assert ledger.removal("s", key) is None
+    ledger.note_removal("s", key, certain=True, utterance=1)
+    ledger.forget("s")
+    assert ledger.removal("s", key) is None
+
+
+async def test_a_replayed_removal_on_an_unrelated_message_is_not_a_repeat(tmp_path: Path) -> None:
+    """Code duck, 29-09-2026: the grant must read the current message, or a
+    model replaying an old adjust on "what's in my cart?" gets it through."""
+    repeats, granted = await _removal_turns(
+        tmp_path,
+        ["Take one of the milks off.", "What time is it?", "What's in my cart?"],
+        [[_take_one("a1")], [], [_take_one("a2")]],
+    )
+
+    assert repeats == [False, False] and granted == []
+
+
+async def test_a_removal_of_another_item_is_not_licensed_by_this_one(tmp_path: Path) -> None:
+    repeats, granted = await _removal_turns(
+        tmp_path,
+        ["Take one of the milks off.", "What time is it?", "Take one of the eggs off."],
+        [[_take_one("a1")], [], [_take_one("a2")]],
+    )
+
+    assert repeats == [False, False] and granted == []
+
+
+async def test_a_positive_adjust_keeps_the_models_repeat(tmp_path: Path) -> None:
+    call = _call("adjust_cart_quantity_by_name", {"name": "milk", "delta": 1, "repeat": True}, "a1")
+    repeats, _ = await _removal_turns(tmp_path, ["And a milk."], [[call]])
+
+    assert repeats == [True]
