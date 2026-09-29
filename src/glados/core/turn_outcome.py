@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -88,6 +89,31 @@ class ToolRecord:
     # as sent. Lets a reply that denies the removal be checked against the
     # dispatch record without reading the server's answer.
     removes: bool = False
+    # What a volume write reported it landed, as typed numbers from the RAW
+    # result's `structuredContent` -- never from its prose, never from the
+    # reader's digest. None when the server sent no such field or it failed
+    # the bounds in `landed_volume`. Lets a reply's quantity be checked.
+    landed: LandedQuantity | None = None
+
+
+@dataclass(frozen=True)
+class LandedQuantity:
+    """A volume write's outcome, bounded and cross-checked against the call's
+    own arguments. `subject` is the call's `query` argument -- the model's word
+    from the user's request -- so a line built from this names no product."""
+
+    subject: str
+    target: Decimal
+    total: Decimal
+    packs: tuple[tuple[int, Decimal], ...]
+
+    def allowed_figures(self) -> frozenset[Decimal]:
+        """Every litre figure a true reply could name for this write."""
+        return frozenset(
+            {self.target, self.total}
+            | {litres for _, litres in self.packs}
+            | {count * litres for count, litres in self.packs}
+        )
 
 
 @dataclass
@@ -187,6 +213,7 @@ class TurnRecord:
         result_subjects: tuple[str, ...] = (),
         satisfied: bool = False,
         removes: bool = False,
+        landed: LandedQuantity | None = None,
     ) -> None:
         self.tools.append(
             ToolRecord(
@@ -197,6 +224,7 @@ class TurnRecord:
                 subjects=_subjects(args) + _head_nouns(result_subjects),
                 satisfied=satisfied,
                 removes=removes,
+                landed=landed,
             )
         )
 
@@ -474,6 +502,149 @@ def _denies_this_removal(sentence: str, removed_words: set[str]) -> bool:
         return False
     named = _without_measures(_words(sentence) - _DENIAL_WORDS)
     return not named or bool(named & removed_words)
+
+
+def misstated_landed_volume(turn: TurnRecord) -> LandedQuantity | None:
+    """The landed volume, when the reply says it added a litre amount that no
+    reading of that write supports. Prod bake-off T3 (29-09-2026, two runs of
+    three): add_by_volume(litres=4) landed 3L + 1L = 4L and the reply said
+    "Added 7 litres" / "I added 2 litres".
+
+    Returns what landed so the caller can say it instead; None wherever it
+    cannot judge. Only figures bound to "added" count -- a total ("total now
+    6L") may include an earlier turn's milk, and a form the pattern does not
+    read ("four litres", "4-litre") is silence, never an accusation."""
+    volume_calls = [t for t in turn.tools if t.tool.endswith(_VOLUME_SUFFIX)]
+    if len(volume_calls) != 1:
+        return None
+    call = volume_calls[0]
+    if any(t.mutating for t in turn.tools if t is not call):
+        # "Added a 2L cola and 4L of milk": a figure may belong to another
+        # write, and no pattern here can tell which.
+        return None
+    landed = call.landed
+    if landed is None or not call.ok or call.indeterminate or call.satisfied:
+        return None
+    allowed = landed.allowed_figures()
+    for figure in _added_litre_figures(turn.final_text):
+        if figure not in allowed:
+            return landed
+    return None
+
+
+_VOLUME_SUFFIX = "_by_volume"
+_CURLY_APOSTROPHE = chr(0x2019)
+
+_ADDED_LITRES_RE = re.compile(
+    r"\badded\b(?P<gap>[^.!?\n]{0,40}?)"
+    r"(?<![\d.,])(?P<n>\d{1,3}(?:[.,]\d{1,3})?)\s?(?:l|litres?|liters?)\b",
+    re.IGNORECASE,
+)
+_NEGATED_BEFORE_RE = re.compile(
+    r"\b(?:not|never|couldn't|didn't|wasn't|haven't|hasn't)\b[^.!?\n]{0,20}$",
+    re.IGNORECASE,
+)
+_TOTAL_WORDS_RE = re.compile(
+    r"\b(?:total|now|cart|basket|altogether|already)\b", re.IGNORECASE
+)
+
+
+def _added_litre_figures(text: str) -> list[Decimal]:
+    """The first litre figure after each "added", unless the words between
+    make it a total or the verb is negated."""
+    text = text.replace(_CURLY_APOSTROPHE, "'")
+    figures: list[Decimal] = []
+    for match in _ADDED_LITRES_RE.finditer(text):
+        if _TOTAL_WORDS_RE.search(match.group("gap")):
+            continue
+        if _NEGATED_BEFORE_RE.search(text[: match.start()]):
+            continue
+        figures.append(_normalised(Decimal(match.group("n").replace(",", "."))))
+    return figures
+
+
+def landed_volume(structured: dict | None, args: dict | None) -> LandedQuantity | None:
+    """Read a volume write's typed outcome, or None if anything about it is
+    not exactly as expected. The server is untrusted (ARCHITECTURE section 7),
+    so the numbers are bounded and cross-checked against the call's own
+    arguments before GLaDOS may ever speak one."""
+    volume = structured.get("volume") if isinstance(structured, dict) else None
+    if not isinstance(volume, dict) or not isinstance(args, dict):
+        return None
+    subject = _plain_subject(args.get("query"))
+    target = _litres(volume.get("targetLitres"))
+    total = _litres(volume.get("totalLitres"))
+    asked = _litres(_numeric(args.get("litres")))
+    packs = _packs(volume.get("packs"))
+    if subject is None or target is None or total is None or asked is None or not packs:
+        return None
+    if target != asked or sum(c * litres for c, litres in packs) != total:
+        return None
+    if not target <= total <= target + max(litres for _, litres in packs):
+        return None
+    return LandedQuantity(subject=subject, target=target, total=total, packs=packs)
+
+
+_MAX_LITRES = Decimal(100)
+_SUBJECT_RE = re.compile(r"^[a-z][a-z '-]{0,39}$")
+
+
+def _numeric(value: object) -> object:
+    """The call's own `litres` as the model sent it: a number, or a numeric
+    string ("4") read as one. The argument side only -- the server's fields
+    must already be numbers."""
+    if isinstance(value, str) and _NUMERIC_RE.match(value.strip()):
+        return float(value.strip())
+    return value
+
+
+_NUMERIC_RE = re.compile(r"^\d{1,2}(?:\.\d{1,3})?$")
+
+
+def _plain_subject(query: object) -> str | None:
+    if not isinstance(query, str):
+        return None
+    subject = " ".join(query.lower().split())
+    return subject if _SUBJECT_RE.match(subject) else None
+
+
+def _litres(value: object) -> Decimal | None:
+    """A finite, non-negative litre figure under 100 with at most three
+    decimals (a 568 ml pint is 0.568); anything else (bool, string, NaN, 1e9,
+    1.0005) is None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    if not number.is_finite() or number < 0 or number >= _MAX_LITRES:
+        return None
+    if number.as_tuple().exponent < -3:
+        return None
+    return _normalised(number)
+
+
+def _normalised(number: Decimal) -> Decimal:
+    """4, 4.0 and 4.000 as one value, so set membership compares amounts."""
+    return number.quantize(Decimal("0.001"))
+
+
+def _packs(value: object) -> tuple[tuple[int, Decimal], ...]:
+    if not isinstance(value, list) or not 0 < len(value) <= 10:
+        return ()
+    packs: list[tuple[int, Decimal]] = []
+    for pack in value:
+        if not isinstance(pack, dict):
+            return ()
+        count = pack.get("count")
+        litres = _litres(pack.get("litres"))
+        if isinstance(count, bool) or not isinstance(count, int) or not 0 < count <= 50:
+            return ()
+        if litres is None or litres == 0:
+            return ()
+        packs.append((count, litres))
+    return tuple(packs)
 
 
 def _claim_clauses(sentence: str, recap_possible: bool) -> list[str]:

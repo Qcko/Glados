@@ -93,6 +93,11 @@ the request.
    contains them — so a claim naming only those has nothing checkable in it and
    declines to judge. Without this, "Added the eggs and updated your basket."
    accuses a turn that did exactly what it said.
+   **One exception, added 29-09-2026:** a number may decide when it is compared
+   against a *typed* quantity the tool itself reported for the same call in
+   the same turn -- never against prose, and never against a number the
+   harness had to find in text. See "A reply that misstates the quantity a
+   write landed" below.
 4. **The `^` anchor on the action heuristic is the entire safety argument.**
    Whole utterances rarely *begin* with an action verb by accident. Everything
    the heuristic is allowed to do must preserve that property. The heuristic
@@ -340,3 +345,66 @@ replaced true replies:
 The replacement names no product: the only source for one would be the server's
 answer. It also drops the listing the user asked for in T6 -- acceptable there,
 since the model's listing was the false part.
+
+## A reply that misstates the quantity a write landed -- added 29-09-2026
+
+Prod bake-off T3, two runs of three on 29-09-2026: "Add 4 liters of milk to the
+cart." -> `add_by_volume(litres=4, query="milk")` landed 1 x 3L + 1 x 1L = 4L,
+and the reply said "Added 7 litres of milk ... Total now 6L" (run 1) and "I
+added 2 litres of milk ... Total milk now 4.5 litres" (run 2). The cart was
+right; the spoken quantity was invented. The claim check passed both, because
+"milk" was the subject of a landed call and invariant 3 kept numbers out of it.
+
+### The shape
+
+```mermaid
+flowchart TD
+    call["add_by_volume lands ok"] --> typed{"result carries<br/>structuredContent.volume?"}
+    typed -- no --> none["landed = None<br/>(check stands down)"]
+    typed -- yes --> bounds{"target == call's litres arg<br/>target <= total <= target + max pack<br/>at most 3 decimals?"}
+    bounds -- no --> none
+    bounds -- yes --> rec["ToolRecord.landed = LandedQuantity<br/>(unit L, target, total, pack sizes)"]
+
+    rec --> after["turn ends; earlier replacements<br/>(confabulated, unbacked claim,<br/>denied removal) have not fired"]
+    after --> one{"the volume add is the only<br/>write in the turn,<br/>reply language en?"}
+    one -- no --> keep["reply kept"]
+    one -- yes --> scan{"a litre figure bound to<br/>an ADD verb, outside<br/>{target, total, each pack,<br/>count x pack}?"}
+    scan -- no --> keep
+    scan -- yes --> fix["reply replaced, spoken + history:<br/>'Added N litres of QUERY.'<br/>outcome stays done"]
+```
+
+- **The number comes from a typed field, not prose.** DunnesStoresMCP returns
+  `structuredContent: {"volume": {"targetLitres", "totalLitres", "packs":
+  [{"count", "litres"}]}}` beside its text. `stdio_client._translate_tool_result`
+  keeps it as `MCPCallResult.structured`; the organizer reads it from the RAW
+  result in `record_tool`, before the reader call, so a model-written digest is
+  never the source of a fact. A server without the field is never checked.
+- **It is still untrusted** (same server as the text; ARCHITECTURE section 7).
+  The harness line therefore takes only a bounded number from it: finite,
+  non-negative, at most three decimals (a 568 ml pint), target equal to the call's own `litres`
+  argument, total within one largest pack of the target. Anything else is
+  `None` and the check stands down. The line names the call's `query` argument
+  (the model's word, from the user's request), never a product or pack name --
+  the 12-09-2026 "names no product" rule. Residual risk, accepted: a
+  compromised server can make GLaDOS state a wrong total, bounded to one pack
+  over the target.
+- **Only figures bound to an add verb are judged** ("added 7 litres", "I added
+  2 litres"). Totals ("total now 6L", "in the cart") are skipped: an earlier
+  turn's milk makes them true or false in ways the call cannot see.
+  "four litres", "4-litre" and other forms the extractor does not read are
+  silence, never an accusation.
+- **Stands down** on more than one volume write in the turn, any
+  `remove_by_volume`, any other write that landed ("Added a 2L cola and 4L of
+  milk" -- the 2 belongs to the cola; code duck, 29-09-2026), a failed /
+  indeterminate / ledger-satisfied call, or a
+  reply language other than English (the cue tables are English, as for the
+  write guards).
+- **Ordering.** A new branch after `denied_a_removal_that_landed` in the
+  organizer's replacement chain, so a turn is corrected at most once and the
+  lie-detectors keep precedence. The outcome keeps its classification: the
+  write is real, only the sentence was wrong.
+
+Not built: item counts ("three milks"). Mapping a spoken count onto packs vs
+units is a subject problem, not a units problem, and gets its own slice if it
+is seen. Nor a cart read to verify totals -- the cart holds names and counts,
+not litres, so it would mean parsing litres out of shop-authored product names.

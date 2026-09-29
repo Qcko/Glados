@@ -48,6 +48,10 @@ class MCPCallResult(BaseModel):
     ok: bool
     content: dict | None = None
     error: str | None = None
+    # The server's MCP `structuredContent`, verbatim and still untrusted. Only
+    # read by code that bounds what it takes (turn_outcome.landed_volume);
+    # never shown to the model -- it already has the text.
+    structured: dict | None = None
     # The call was sent and then given up on, so whether it took effect is
     # unknown -- distinct from a failure, where nothing happened. Set by the
     # dispatcher on timeout and never by a tool: it is a fact about the wait,

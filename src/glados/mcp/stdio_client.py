@@ -859,19 +859,21 @@ def _translate_tool_result(result: dict) -> MCPCallResult:
     text = "\n".join(text_parts)
     if is_error:
         return MCPCallResult(ok=False, error=text or "tool error")
+    structured = result.get("structuredContent")
+    structured = structured if isinstance(structured, dict) else None
     if text:
         try:
             parsed = json.loads(text)
         except (json.JSONDecodeError, ValueError):
             parsed = None
         if isinstance(parsed, dict):
-            return MCPCallResult(ok=True, content=parsed)
+            return MCPCallResult(ok=True, content=parsed, structured=structured)
         if parsed is not None:
             # Valid JSON but not an object -- list, scalar, bool, null.
             # MCPCallResult.content is dict-only, so wrap under "value"
             # rather than discarding the parse and re-stringifying.
-            return MCPCallResult(ok=True, content={"value": parsed})
-    return MCPCallResult(ok=True, content={"text": text})
+            return MCPCallResult(ok=True, content={"value": parsed}, structured=structured)
+    return MCPCallResult(ok=True, content={"text": text}, structured=structured)
 
 
 def _lessons_text(result: dict) -> str | None:

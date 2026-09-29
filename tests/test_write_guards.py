@@ -1371,3 +1371,66 @@ async def test_the_refusal_recovers_inside_the_same_turn(tmp_path: Path) -> None
     )
     assert len(check_tool.calls) == 1
     assert len(login_tool.calls) == 1
+
+
+# ---- a reply that misstates the litres a volume write landed ----------------
+
+
+def _volume_spec() -> ToolSpec:
+    return ToolSpec(
+        server="dunnes",
+        name="add_by_volume",
+        description="add by volume",
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "litres": {"type": "number"}},
+        },
+        mutating=True,
+    )
+
+
+def _volume_result() -> MCPCallResult:
+    return MCPCallResult(
+        ok=True,
+        content={"text": "Added 1 x Milk 3L + 1 x Milk 1L = 4L to cover a target of 4L."},
+        structured={"volume": {"targetLitres": 4, "totalLitres": 4,
+                               "packs": [{"count": 1, "litres": 3}, {"count": 1, "litres": 1}]}},
+    )
+
+
+async def _volume_turn(tmp_path: Path, reply: str):
+    tool = _RecordingTool(_volume_spec(), _volume_result())
+    mcp = MCPRegistry()
+    mcp.register(tool)
+    llm = _TurnScriptedLLM(
+        [[_call("add_by_volume", {"query": "milk", "litres": 4}, "v1")], []], reply=reply
+    )
+    async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
+        await _say(h, llm, "Add 4 liters of milk to the cart.")
+        await _say(h, llm, "thanks")
+        deltas = [m["text"] for _, m in h.sink if m.get("type") == "assistant_delta"]
+        outcomes = [m["outcome"] for _, m in h.sink if m.get("type") == "turn_outcome"]
+    history = [m.content for m in llm.passes[-1] if m.role == "assistant" and m.content]
+    events = [e.get("event") for e in trace_events(tmp_path)]
+    return tool, deltas, outcomes, history, events
+
+
+async def test_an_invented_litre_amount_is_corrected_in_speech_and_history(tmp_path: Path) -> None:
+    """Prod bake-off T3 (29-09-2026): 3L + 1L landed and the reply said "Added 7
+    litres". The write stays `done` and is not re-sent; only the sentence goes."""
+    lie = "Added 7 litres of milk. Total now 6L."
+    tool, deltas, outcomes, history, events = await _volume_turn(tmp_path, lie)
+
+    assert len(tool.calls) == 1
+    assert any("(Correction) Added 4 litres of milk." in d for d in deltas)
+    assert outcomes[0] == "done"
+    assert "Added 4 litres of milk." in history and lie not in history
+    assert "misstated_volume_corrected" in events
+
+
+async def test_a_true_volume_reply_is_left_alone(tmp_path: Path) -> None:
+    true_reply = "Milk added: 3L + 1L for your 4 litres."
+    _, _, _, history, events = await _volume_turn(tmp_path, true_reply)
+
+    assert true_reply in history
+    assert "misstated_volume_corrected" not in events

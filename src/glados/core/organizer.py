@@ -21,6 +21,7 @@ import uuid
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Awaitable, Callable, Literal
 
 from pydantic import BaseModel
@@ -69,11 +70,14 @@ from .prompt_pressure import SessionPressureMonitors, StreakAlarm, log_alarms
 from .tool_payload_cap import PayloadCap, cap_tool_payload, clamp_result_bytes
 from .traces import TraceStore
 from .turn_outcome import (
+    LandedQuantity,
     TurnRecord,
     asserts_a_change,
     claimed_a_change_it_did_not_make,
     classify,
     denied_a_removal_that_landed,
+    landed_volume,
+    misstated_landed_volume,
     said_nothing,
 )
 from ..servers.room_intercom import MAX_MESSAGE_CHARS, SPEAK_INTO
@@ -241,6 +245,22 @@ _UNBACKED_CLAIM_REPLIES = (
 _DENIED_REMOVAL_REPLY = (
     "Done -- I took that out of your cart. Ask me what's in it if you want the list."
 )
+
+def _misstated_volume_reply(landed: LandedQuantity) -> str:
+    """What landed, in GLaDOS's words: the bounded total, the target when the
+    cheapest mix went over it, and the call's own query word. No product or
+    pack name -- those are the shop's text."""
+    total = _spoken_litres(landed.total)
+    if landed.total == landed.target:
+        return f"Added {total} of {landed.subject}."
+    target = _spoken_litres(landed.target)
+    return f"Added {total} of {landed.subject} to cover the {target} you asked for."
+
+
+def _spoken_litres(value: Decimal) -> str:
+    unit = "litre" if value == 1 else "litres"
+    return f"{value.normalize():f} {unit}"
+
 
 # Spoken when a turn produced no reply at all (classified `failed` via
 # `said_nothing`). The cause is usually the model spending its whole
@@ -1467,6 +1487,15 @@ class Organizer:
                 final_text = await self._handle_denied_removal(
                     session.session_id, session.room_id, new_history, trace
                 )
+            elif self._cues_readable() and (
+                misstated := misstated_landed_volume(outcome)
+            ) is not None:
+                # The write is real and right; only the quantity in the reply
+                # is invented. Say what landed, from the typed result.
+                final_text = await self._handle_misstated_volume(
+                    session.session_id, session.room_id, new_history, misstated,
+                    trace,
+                )
             elif said_nothing(outcome) and text.strip():
                 # The turn is already classified `failed`; this only decides
                 # what the user HEARS. Without it the failure is visible in the
@@ -2385,6 +2414,27 @@ class Organizer:
         )
         return reply
 
+    async def _handle_misstated_volume(
+        self,
+        session_id: str,
+        room_id: str,
+        history: list[LLMMessage],
+        landed: LandedQuantity,
+        trace,
+    ) -> str:
+        """Replace a reply that states a litre amount the volume write did not
+        land. Same two egress paths as `_handle_denied_removal`; the line is
+        built only from bounded numbers and the call's own query word."""
+        reply = _misstated_volume_reply(landed)
+        if history and history[-1].role == "assistant":
+            history[-1] = LLMMessage(role="assistant", content=reply)
+        trace.event("misstated_volume_corrected", replacement=reply)
+        await self._broadcast(
+            room_id,
+            AssistantDelta(session_id=session_id, text=" (Correction) " + reply),
+        )
+        return reply
+
     async def _handle_silent_turn(
         self,
         session_id: str,
@@ -2838,6 +2888,9 @@ class Organizer:
                     and spec is not None
                     and spec.removes
                     and _removes_for_certain(tc, spec),
+                    landed=landed_volume(result.structured, tc.args)
+                    if landed_write
+                    else None,
                 )
             # Cap AFTER the broadcast and the trace event above, so the desk
             # client and `traces/` keep the whole result and only the SPOKEN
