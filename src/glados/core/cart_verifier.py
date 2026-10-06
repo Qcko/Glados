@@ -21,6 +21,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 
+from glados.core.cart_review import CartReview
 from glados.core.cart_verify import CartSnapshot, LineChange, diff
 from glados.mcp.registry import CallEnvelope, MCPCallResult
 
@@ -43,6 +44,8 @@ class TurnCart:
     # A write whose outcome is unknown, writes to two carts, or no BEFORE:
     # no diff this turn can be trusted.
     unsafe: bool = False
+    # A money step was already put to the user this turn (one per turn).
+    money_step_asked: bool = False
 
     @property
     def wrote(self) -> bool:
@@ -76,6 +79,7 @@ class CartVerifier:
         self._epochs: dict[str, int] = {}
         self._in_flight: dict[str, int] = {}
         self._cache: dict[str, _Cached] = {}
+        self._checkout_holders: dict[str, TurnCart] = {}
 
     def serves(self, server: str) -> bool:
         return server in self._cart_reads
@@ -85,6 +89,33 @@ class CartVerifier:
 
     def epoch(self, server: str) -> int:
         return self._epochs.get(server, 0)
+
+    def drop_cache(self, server: str) -> None:
+        self._cache.pop(server, None)
+
+    def begin_checkout(self, server: str, holder: TurnCart) -> bool:
+        """Hold the cart for a money step: until `end_checkout`, every other
+        turn's write to it is refused before dispatch."""
+        if server in self._checkout_holders:
+            return False
+        self._checkout_holders[server] = holder
+        return True
+
+    def end_checkout(self, server: str, holder: TurnCart) -> None:
+        if self._checkout_holders.get(server) is holder:
+            del self._checkout_holders[server]
+
+    def checkout_blocks(self, server: str, turn: TurnCart | None) -> bool:
+        holder = self._checkout_holders.get(server)
+        return holder is not None and holder is not turn
+
+    async def review(self, server: str, envelope: CallEnvelope) -> CartReview | None:
+        """A fresh, settled read for the checkout review, never the cache."""
+        content = await self._settled_content(server, envelope, "REVIEW")
+        review = CartReview.from_content(content) if content is not None else None
+        if review is None:
+            self._cache.pop(server, None)
+        return review
 
     def quiet(self, server: str) -> bool:
         """No write to this cart is in flight, so a read now sees settled state."""
@@ -185,8 +216,22 @@ class CartVerifier:
     async def _read(
         self, server: str, envelope: CallEnvelope, label: str
     ) -> CartSnapshot | None:
-        """One harness cart read, or None unless the cart was settled for the
-        whole read: no write in flight at either end, none sent during it."""
+        """One harness cart read, cached, or None unless it was settled."""
+        epoch = self.epoch(server)
+        content = await self._settled_content(server, envelope, label)
+        snapshot = CartSnapshot.from_content(content) if content is not None else None
+        if snapshot is None:
+            self._cache.pop(server, None)
+            return None
+        self._cache[server] = _Cached(snapshot, epoch, self._clock())
+        return snapshot
+
+    async def _settled_content(
+        self, server: str, envelope: CallEnvelope, label: str
+    ) -> object | None:
+        """The raw result of one harness cart read, or None unless the cart
+        was settled for the whole read: no write in flight at either end,
+        none sent during it."""
         epoch = self.epoch(server)
         quiet_at_start = self.quiet(server)
         tool = self._cart_reads[server]
@@ -204,16 +249,14 @@ class CartVerifier:
         except asyncio.CancelledError:
             self._cache.pop(server, None)
             raise
-        snapshot = CartSnapshot.from_content(result.content) if result.ok else None
         elapsed_ms = int((self._clock() - started) * 1000)
         settled = quiet_at_start and self.quiet(server) and self.epoch(server) == epoch
-        if snapshot is None or not settled:
+        if not result.ok or not settled:
             log.info("cart %s read for %s unusable (ok=%s, %d ms)", label, server, result.ok, elapsed_ms)
             self._cache.pop(server, None)
             return None
-        log.info("cart %s read for %s: %d lines, %d ms", label, server, len(snapshot.lines), elapsed_ms)
-        self._cache[server] = _Cached(snapshot, epoch, self._clock())
-        return snapshot
+        log.info("cart %s read for %s settled, %d ms", label, server, elapsed_ms)
+        return result.content
 
 
 def _word_of(args: dict) -> str | None:

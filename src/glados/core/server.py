@@ -45,6 +45,7 @@ from .adapters import LLM, STT, TTS, VAD
 from .audio_sink import AudioSink, FrameTooShort
 from .config import (
     local_config_dir,
+    ClientBinding,
     GladosConfig,
     HandshakeConfig,
     LLMConfig,
@@ -556,6 +557,9 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     stt = _build_stt(glados_cfg.stt)
     tts = _build_tts(glados_cfg.tts)
     connections: dict[str, WebSocket] = {}
+    # Effective capabilities per connected client: granted in rooms.toml AND
+    # declared in its hello (DESIGN-checkout-reconcile.md).
+    client_capabilities: dict[str, frozenset[str]] = {}
 
     async def send(client_id: str, msg: BaseModel) -> None:
         ws = connections.get(client_id)
@@ -568,6 +572,15 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             # fan-outs skip it, and never let one dead client take the turn down.
             if connections.get(client_id) is ws:
                 del connections[client_id]
+
+    def clients_with_capability(capability: str) -> list[ClientBinding]:
+        return [
+            c
+            for c in rooms_cfg.clients
+            if c.role == "ui"
+            and c.client_id in connections
+            and capability in client_capabilities.get(c.client_id, frozenset())
+        ]
 
     def clients_in_room(room_id: str) -> list[str]:
         return [
@@ -596,6 +609,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         send=send,
         binding_for_client=rooms_cfg.find,
         clients_in_room=clients_in_room,
+        clients_with_capability=clients_with_capability,
         room_policy=rooms_cfg.policy_for,
         notify_observers=notify_observers,
         tts_cooldown_s=glados_cfg.tts.gate_cooldown_s,
@@ -909,6 +923,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     app.state.servers_cfg = servers_cfg
     app.state.organizer = organizer
     app.state.connections = connections
+    app.state.client_capabilities = client_capabilities
     # Shared with build_admin_app + the notify_observers closure above (same
     # dict objects, so an observe registered on the admin app is seen by the
     # broadcast tap running under the main app -- one process, one Organizer).
@@ -1212,6 +1227,7 @@ def _register_routes(app: FastAPI) -> None:
                 return
             client_id = binding.client_id
             await _replace_connection(state.connections, client_id, ws)
+            state.client_capabilities[client_id] = frozenset(binding.capabilities)
             # Surface any load-time memory BLOCKs to operator UIs the moment
             # they connect -- the notices are emitted at startup, before any
             # client exists, so a connecting `ui` client would otherwise never
@@ -1233,6 +1249,8 @@ def _register_routes(app: FastAPI) -> None:
                 await pipeline.close()
             if client_id is not None and state.connections.get(client_id) is ws:
                 del state.connections[client_id]
+                state.client_capabilities.pop(client_id, None)
+                await state.organizer.client_disconnected(client_id)
             # In-flight turns continue on their room worker even after this
             # WS goes away -- other room members still see Done/Cancelled,
             # and the closure-bound `send` no-ops harmlessly for the now-
@@ -1319,7 +1337,9 @@ async def _handshake(
         await ws.close()
         return None
 
-    return binding
+    # The operator grants, the client declares; only both together count.
+    granted = [c for c in binding.capabilities if c in msg.capabilities]
+    return binding.model_copy(update={"capabilities": granted})
 
 
 async def _serve(

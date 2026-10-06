@@ -527,6 +527,10 @@ class ToolOverlay(BaseModel):
     # 27-09-2026: "am I logged in?" became start_browser -> bootstrap_login,
     # a confirm prompt for a login nobody needed, with no status check between.
     requires_prior: str | None = None
+    # The last automated step before money: confirmed on a cart_view screen
+    # showing the real cart (DESIGN-checkout-reconcile.md). Implies
+    # requires_confirmation; the server must declare cart_read.
+    money_step: bool = False
     # The spoken confirmation question as a sentence (core/confirm_phrase.py,
     # DESIGN-voice-confirm.md "The spoken question"): `{arg}` speaks a value,
     # `{arg:A|B}` speaks A when a boolean is true and B when false, `[ ... ]`
@@ -647,7 +651,7 @@ class ServerEntry(BaseModel):
             update={
                 "confirm_phrase": _phrase_fitting(overlay, spec),
                 "untrusted": self.untrusted or overlay.untrusted,
-                "requires_confirmation": overlay.requires_confirmation,
+                "requires_confirmation": overlay.requires_confirmation or overlay.money_step,
                 "mutating": overlay.mutating,
                 "timeout_s": overlay.timeout_s,
                 "max_items": overlay.max_items,
@@ -661,6 +665,7 @@ class ServerEntry(BaseModel):
                 "delta_arg": overlay.delta_arg,
                 "volume_arg": overlay.volume_arg,
                 "requires_prior": overlay.requires_prior,
+                "money_step": overlay.money_step,
             }
         )
 
@@ -708,6 +713,9 @@ class ClientBinding(BaseModel):
     room_id: str
     role: Role
     default_user: str = "default"
+    # Capabilities the operator grants this client (ARCH section 13, v7). A
+    # capability counts only when the client's hello also declares it.
+    capabilities: list[str] = []
 
 
 class QuietHours(BaseModel):

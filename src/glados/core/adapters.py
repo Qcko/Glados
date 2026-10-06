@@ -70,6 +70,9 @@ class ToolSpec(BaseModel):
     delta_arg: str | None = None
     volume_arg: str | None = None
     requires_prior: str | None = None
+    # The last automated step before money (DESIGN-checkout-reconcile.md):
+    # confirmed only on a screen showing the real cart, bound to it.
+    money_step: bool = False
     # Spoken confirmation template, set via the overlay after it has been
     # checked against `parameters`; see ToolOverlay.confirm_phrase.
     confirm_phrase: str | None = None

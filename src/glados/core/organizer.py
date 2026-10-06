@@ -177,6 +177,9 @@ class _PendingConfirm:
     voice_armed: bool = False
     asked_at: float = 0.0
     answers_after: float = 0.0
+    # A money step's confirm is shown on ONE chosen cart_view client, possibly
+    # in another room; only that client's answer counts.
+    only_client: str | None = None
 
 
 # How many turns may queue behind a room whose worker is held on a
@@ -250,6 +253,37 @@ _UNBACKED_CLAIM_REPLIES = (
 _DENIED_REMOVAL_REPLY = (
     "Done -- I took that out of your cart. Ask me what's in it if you want the list."
 )
+
+CART_VIEW = "cart_view"
+
+# What the model is told when a money step is refused. Fixed text, no shop
+# strings; each ends by forbidding a retry, which would only ask again.
+_DO_NOT_RETRY = " Tell the user; do not call it again this turn."
+_MONEY_UNVERIFIABLE = (
+    "Checkout is blocked: the cart cannot be checked for this shop." + _DO_NOT_RETRY
+)
+_MONEY_ONCE = "Checkout was already put to the user this turn." + _DO_NOT_RETRY
+_MONEY_NO_SCREEN = (
+    "Checkout needs the desk screen, and no desk screen is connected." + _DO_NOT_RETRY
+)
+_MONEY_NO_READ = "The cart could not be read, so no slot was booked." + _DO_NOT_RETRY
+_CHECKOUT_IN_PROGRESS = (
+    "A checkout is in progress, so the cart cannot be changed right now."
+    + _DO_NOT_RETRY
+)
+_APPROVE_ON_SCREEN = "Approve it on the desk screen."
+
+
+def _cart_changed_note(review) -> str:
+    """Counts and the total only -- from typed fields, never shop text."""
+    if review is None:
+        return "The cart could not be read again, so no slot was booked." + _DO_NOT_RETRY
+    total = f", total EUR {review.payload.order_value}" if review.payload.order_value else ""
+    return (
+        "The cart changed while the user was reviewing it: it now has "
+        f"{review.payload.line_count} lines{total}. No slot was booked." + _DO_NOT_RETRY
+    )
+
 
 # The cart record of the user turn running in THIS task. A context variable,
 # not a dict keyed by session: a superseded turn still finishing its last
@@ -1074,12 +1108,15 @@ class Organizer:
         max_reader_bytes: int = MAX_READER_BYTES,
         write_ledger: WriteLedger | None = None,
         cart_verifier: CartVerifier | None = None,
+        clients_with_capability: "Callable[[str], list[ClientBinding]] | None" = None,
     ) -> None:
         self._max_result_bytes = max_result_bytes
         # Reads the real cart around a turn's writes (DESIGN-cart-verify.md).
         # One TurnCart per USER turn (`_TURN_CART`), so every retry drive of
         # that turn shares one BEFORE and one AFTER.
         self._cart_verifier = cart_verifier
+        self._clients_with_capability = clients_with_capability or (lambda _cap: [])
+        self._money_pending: _PendingConfirm | None = None
         # Cross-turn memory of additive writes that landed, per session and
         # bounded like `_history`. Injectable so the window is testable.
         self._write_ledger = (
@@ -2555,6 +2592,157 @@ class Organizer:
         )
         return reply
 
+    async def _run_money_step(
+        self,
+        tc: LLMToolCall,
+        spec: "ToolSpec",
+        envelope: CallEnvelope,
+        session_id: str,
+        room_id: str,
+        trace,
+    ) -> tuple[bool, MCPCallResult, LLMToolCall]:
+        """The last automated step before money (DESIGN-checkout-reconcile.md):
+        shown with the real cart on one cart_view screen, approved there, and
+        dispatched only if the cart is unchanged, under the checkout lock.
+        Fails closed: anything it cannot establish refuses the call."""
+        verifier = self._cart_verifier
+        turn = _TURN_CART.get()
+        if verifier is None or turn is None or not verifier.serves(tc.server):
+            return self._money_refused(tc, _MONEY_UNVERIFIABLE, "unverifiable", trace)
+        if turn.money_step_asked:
+            return self._money_refused(tc, _MONEY_ONCE, "already_asked", trace)
+        turn.money_step_asked = True
+        screen = self._cart_view_client(room_id)
+        if screen is None:
+            return self._money_refused(tc, _MONEY_NO_SCREEN, "no_screen", trace)
+        review = await verifier.review(tc.server, envelope)
+        if review is None:
+            return self._money_refused(tc, _MONEY_NO_READ, "unreadable", trace)
+        approved = copy.deepcopy(tc.args)
+        granted = await self._await_money_confirmation(
+            session_id, room_id, screen, spec, approved, review, trace
+        )
+        if not granted:
+            verifier.drop_cache(tc.server)
+            return False, MCPCallResult(ok=False, error="user denied"), tc
+        return await self._dispatch_money_step(
+            tc.model_copy(update={"args": approved}), turn, review, envelope,
+            session_id, room_id, trace,
+        )
+
+    async def _dispatch_money_step(
+        self, tc: LLMToolCall, turn: TurnCart, review, envelope, session_id, room_id, trace
+    ) -> tuple[bool, MCPCallResult, LLMToolCall]:
+        """Re-read and dispatch under the checkout lock, so nothing GLaDOS
+        sends can land between the check and the booking."""
+        verifier = self._cart_verifier
+        if not verifier.begin_checkout(tc.server, turn):
+            return self._money_refused(tc, _CHECKOUT_IN_PROGRESS, "lock_held", trace)
+        try:
+            again = await verifier.review(tc.server, envelope)
+            if again is None or again.digest != review.digest:
+                verifier.drop_cache(tc.server)
+                return self._money_refused(tc, _cart_changed_note(again), "cart_changed", trace)
+            trace.event("money_step_dispatched", call_id=tc.call_id, tool=f"{tc.server}.{tc.name}")
+            result = await self._dispatch_or_answer(
+                tc, envelope, session_id, room_id, trace, None
+            )
+            return True, result, tc
+        finally:
+            verifier.end_checkout(tc.server, turn)
+
+    def _money_refused(
+        self, tc: LLMToolCall, note: str, reason: str, trace
+    ) -> tuple[bool, MCPCallResult, LLMToolCall]:
+        trace.event("money_step_refused", call_id=tc.call_id, reason=reason)
+        return False, MCPCallResult(ok=False, error=note), tc
+
+    def _cart_view_client(self, room_id: str) -> "ClientBinding | None":
+        """The screen a money step is shown on: a cart_view client in the
+        asking room, else any connected one (by client id, so the choice is
+        stable)."""
+        screens = sorted(
+            self._clients_with_capability(CART_VIEW), key=lambda b: b.client_id
+        )
+        here = [b for b in screens if b.room_id == room_id]
+        return (here or screens or [None])[0]
+
+    async def _await_money_confirmation(
+        self,
+        session_id: str,
+        room_id: str,
+        screen: "ClientBinding",
+        spec: "ToolSpec",
+        args: dict,
+        review,
+        trace,
+    ) -> bool:
+        """Ask ONE cart_view client, with the cart attached. No voice arm:
+        nobody can consent by ear to a total they never saw. The deadline
+        starts now, after the review read. A newer money step supersedes
+        this one, and the screen disconnecting denies it."""
+        loop = asyncio.get_running_loop()
+        pending = _PendingConfirm(
+            request_id=uuid.uuid4().hex,
+            room_id=screen.room_id,
+            session_id=session_id,
+            fut=loop.create_future(),
+            only_client=screen.client_id,
+        )
+        previous, self._money_pending = self._money_pending, pending
+        if previous is not None and not previous.fut.done():
+            previous.fut.set_result(False)
+        self._pending_confirms[pending.request_id] = pending
+        try:
+            trace.event(
+                "tool_confirm_request",
+                request_id=pending.request_id,
+                tool=spec.qualified,
+                ttl_s=self._confirm_timeout_s,
+                screen=screen.client_id,
+                cart_lines=review.payload.line_count,
+            )
+            await self.send(
+                screen.client_id,
+                ToolConfirmRequest(
+                    session_id=session_id,
+                    request_id=pending.request_id,
+                    tool=spec.qualified,
+                    args_summary=args,
+                    ttl_s=self._confirm_timeout_s,
+                    cart=review.payload,
+                ),
+            )
+            if screen.room_id != room_id and self._room_can_hear(room_id):
+                await self._speak(session_id, room_id, _APPROVE_ON_SCREEN, trace)
+            try:
+                granted = bool(await asyncio.wait_for(pending.fut, self._confirm_timeout_s))
+                via = "ui"
+            except asyncio.TimeoutError:
+                granted, via = False, "timeout"
+            trace.event("tool_confirm_response", request_id=pending.request_id, granted=granted)
+            await self.send(
+                screen.client_id,
+                ToolConfirmResolved(
+                    session_id=session_id,
+                    request_id=pending.request_id,
+                    granted=granted,
+                    via=via,
+                ),
+            )
+            return granted
+        finally:
+            self._pending_confirms.pop(pending.request_id, None)
+            if self._money_pending is pending:
+                self._money_pending = None
+
+    async def client_disconnected(self, client_id: str) -> None:
+        """A money step shown on this client cannot be answered any more:
+        deny it now rather than wait out the deadline."""
+        for pending in list(self._pending_confirms.values()):
+            if pending.only_client == client_id and not pending.fut.done():
+                pending.fut.set_result(False)
+
     async def _verified_cart_line(
         self, session_id: str, envelope: CallEnvelope, outcome: TurnRecord, trace
     ) -> _VerifiedCart | None:
@@ -3010,6 +3198,13 @@ class Organizer:
                 )
             elif refusal is not None:
                 result = refusal.result
+            elif spec is not None and spec.money_step:
+                granted, result, tc = await self._run_money_step(
+                    tc, spec, envelope, session_id, room_id, trace
+                )
+                if not granted:
+                    denied = True
+                    outcome.confirm_refused = True
             elif needs_confirm:
                 # The room approves a copy, and that copy is what is sent. The
                 # call object stays reachable (history, the model's stream)
@@ -3630,6 +3825,8 @@ class Organizer:
         spec = self.mcp.spec_for(tc.server, tc.name)
         if spec is None or not (spec.mutating or spec.requires_confirmation):
             return await self.mcp.dispatch(tc.server, tc.name, tc.args, envelope)
+        if verifier.checkout_blocks(tc.server, turn):
+            return MCPCallResult(ok=False, error=_CHECKOUT_IN_PROGRESS)
         if turn is not None:
             await verifier.before_write(turn, tc.server, envelope)
         verifier.note_write(turn, tc.server, tc.args)
@@ -4179,7 +4376,15 @@ class Organizer:
                 client_id,
             )
             return
-        if binding.room_id != pending.room_id:
+        if pending.only_client is not None:
+            if client_id != pending.only_client:
+                log.debug(
+                    "drop tool_confirm_response: %s is not the cart_view client %s",
+                    client_id,
+                    pending.only_client,
+                )
+                return
+        elif binding.room_id != pending.room_id:
             log.debug(
                 "drop tool_confirm_response: client %s in room %s, expected %s",
                 client_id,

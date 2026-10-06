@@ -21,6 +21,10 @@ class Hello(BaseModel):
     room_id: str
     role: Role
     token: str
+    # What this client build can do beyond its role (ARCH section 13, v7).
+    # Honoured only where rooms.toml grants the same capability to this
+    # client: the client says it CAN render it, the operator says it MAY.
+    capabilities: list[str] = []
 
 
 class UserText(BaseModel):
@@ -165,6 +169,28 @@ class RouteNotice(BaseModel):
     escalated: bool = False
 
 
+class CartReviewLine(BaseModel):
+    """One cart line on the checkout review. `name` is the shop's text,
+    clipped; everything else is a validated number."""
+
+    product_id: str
+    name: str
+    quantity: int
+    pack_of: int | None = None
+
+
+class CartReviewPayload(BaseModel):
+    """The real cart, read by the harness for a money step
+    (DESIGN-checkout-reconcile.md). Totals travel as decimal STRINGS so no
+    client float arithmetic ever touches them."""
+
+    lines: list[CartReviewLine]
+    line_count: int
+    item_count: int | None = None
+    order_value: str | None = None
+    estimated_total: str | None = None
+
+
 class ToolConfirmRequest(BaseModel):
     """Sent to clients in the originating room when the LLM tries to
     call a tool whose ToolSpec.requires_confirmation is True. Any client
@@ -183,6 +209,9 @@ class ToolConfirmRequest(BaseModel):
     # this server's own earlier results in this room (core/product_names.py).
     # Shown beside the id, never in its place: the id is what is approved.
     arg_names: dict[str, str] = {}
+    # Set only for a money step, and then sent only to the one client chosen
+    # to show it; that client's answer is the only one accepted.
+    cart: CartReviewPayload | None = None
 
 
 class ToolConfirmResolved(BaseModel):
