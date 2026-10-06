@@ -89,6 +89,9 @@ class ToolRecord:
     # as sent. Lets a reply that denies the removal be checked against the
     # dispatch record without reading the server's answer.
     removes: bool = False
+    # The call sets an absolute count. Unless it sets zero it may move the
+    # line either way, so its direction is unknown rather than "adds".
+    sets_count: bool = False
     # What a volume write reported it landed, as typed numbers from the RAW
     # result's `structuredContent` -- never from its prose, never from the
     # reader's digest. None when the server sent no such field or it failed
@@ -219,6 +222,7 @@ class TurnRecord:
         result_subjects: tuple[str, ...] = (),
         satisfied: bool = False,
         removes: bool = False,
+        sets_count: bool = False,
         landed: LandedQuantity | None = None,
     ) -> None:
         self.tools.append(
@@ -230,6 +234,7 @@ class TurnRecord:
                 subjects=_subjects(args) + _head_nouns(result_subjects),
                 satisfied=satisfied,
                 removes=removes,
+                sets_count=sets_count,
                 landed=landed,
             )
         )
@@ -917,10 +922,16 @@ def _rerouted(tools: list[ToolRecord], failed: ToolRecord) -> bool:
     The later write must share a subject word with the failed one; a failed
     call aimed only at an id has no words to compare, so any later write of the
     same kind on that server stands in for it. That is fail-open by design, and still asks
-    for a landed write: a failure followed by reads alone stays `failed`."""
+    for a landed write: a failure followed by reads alone stays `failed`.
+
+    A set to a non-zero count stands in for a failure of either kind (bake-off
+    T13, 29-09-2026: a refused adjust(delta=-1) recovered by set_cart_quantity(2)).
+    Without the cart's prior count its direction is unknown, so a set that
+    RAISES a line after a failed decrement also reads as recovered, and an
+    id-only failure is recovered by any non-zero set on the server. Fail-open
+    again, accepted: the cart check reads the real cart on such turns."""
     if not failed.mutating or failed.indeterminate:
         return False
-    # Same kind of change only: an add cannot stand in for a failed removal.
     server = _server(failed.tool)
     failed_words = _word_forms(_subject_words(failed))
     position = next(i for i, t in enumerate(tools) if t is failed)
@@ -928,11 +939,16 @@ def _rerouted(tools: list[ToolRecord], failed: ToolRecord) -> bool:
     return any(
         t.ok
         and t.mutating
-        and t.removes == failed.removes
+        and _same_kind_of_change(t, failed)
         and _server(t.tool) == server
         and (not failed_words or bool(failed_words & _word_forms(_subject_words(t))))
         for t in after
     )
+
+
+def _same_kind_of_change(later: ToolRecord, failed: ToolRecord) -> bool:
+    either_way = later.sets_count and not later.removes
+    return either_way or later.removes == failed.removes
 
 
 def _subject_words(tool: ToolRecord) -> set[str]:

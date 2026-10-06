@@ -3328,6 +3328,7 @@ class Organizer:
                     and spec is not None
                     and spec.removes
                     and _removes_for_certain(tc, spec),
+                    sets_count=spec is not None and bool(spec.count_arg),
                     landed=landed_volume(result.structured, tc.args)
                     if landed_write
                     else None,

@@ -793,6 +793,75 @@ def test_a_failed_removal_is_not_recovered_by_an_add() -> None:
     assert classify(turn) == "failed"
 
 
+def test_a_refused_decrement_recovered_by_an_absolute_set_is_done() -> None:
+    # Bake-off T13, 29-09-2026: Dunnes refused adjust(delta=-1) as a duplicate,
+    # the model set the milk line to 2 instead, and the cart went 3 -> 2.
+    turn = _turn(final_text="Two milks left.")
+    turn.record_tool("dunnes.adjust_cart_quantity_by_name", False, mutating=True,
+                     args={"name": "milk", "delta": -1}, removes=True)
+    turn.record_tool("dunnes.set_cart_quantity", True, mutating=True,
+                     args={"productId": "100806893", "quantity": 2},
+                     result_subjects=("Dunnes Stores Irish Low Fat Milk 3L",),
+                     sets_count=True)
+    assert classify(turn) == "done"
+
+
+def test_an_absolute_set_recovers_a_failed_add() -> None:
+    turn = _turn(final_text="Three milks in the cart.")
+    turn.record_tool("dunnes.add_to_cart_by_name", False, mutating=True,
+                     args={"query": "milk"})
+    turn.record_tool("dunnes.set_cart_quantity", True, mutating=True,
+                     args={"productId": "100806893", "quantity": 3},
+                     result_subjects=("Dunnes Stores Irish Low Fat Milk 3L",),
+                     sets_count=True)
+    assert classify(turn) == "done"
+
+
+def test_a_set_to_zero_does_not_recover_a_failed_add() -> None:
+    turn = _turn(final_text="Done.")
+    turn.record_tool("dunnes.add_to_cart_by_name", False, mutating=True,
+                     args={"query": "milk"})
+    turn.record_tool("dunnes.set_cart_quantity", True, mutating=True,
+                     args={"productId": "100806893", "quantity": 0},
+                     result_subjects=("Dunnes Stores Irish Low Fat Milk 3L",),
+                     removes=True, sets_count=True)
+    assert classify(turn) == "failed"
+
+
+def test_a_raising_set_after_a_failed_decrement_reads_as_recovered() -> None:
+    # Accepted fail-open: the prior count is unknown, so direction is too.
+    turn = _turn(final_text="Done.")
+    turn.record_tool("dunnes.adjust_cart_quantity_by_name", False, mutating=True,
+                     args={"name": "milk", "delta": -1}, removes=True)
+    turn.record_tool("dunnes.set_cart_quantity", True, mutating=True,
+                     args={"productId": "100806893", "quantity": 5},
+                     result_subjects=("Dunnes Stores Irish Low Fat Milk 3L",),
+                     sets_count=True)
+    assert classify(turn) == "done"
+
+
+def test_a_set_to_zero_recovers_a_failed_removal() -> None:
+    turn = _turn(final_text="Milk removed.")
+    turn.record_tool("dunnes.remove_from_cart_by_name", False, mutating=True,
+                     args={"name": "milk"}, removes=True)
+    turn.record_tool("dunnes.set_cart_quantity", True, mutating=True,
+                     args={"productId": "100806893", "quantity": 0},
+                     result_subjects=("Dunnes Stores Irish Low Fat Milk 3L",),
+                     removes=True, sets_count=True)
+    assert classify(turn) == "done"
+
+
+def test_an_absolute_set_on_another_item_does_not_recover_a_decrement() -> None:
+    turn = _turn(final_text="Done.")
+    turn.record_tool("dunnes.adjust_cart_quantity_by_name", False, mutating=True,
+                     args={"name": "milk", "delta": -1}, removes=True)
+    turn.record_tool("dunnes.set_cart_quantity", True, mutating=True,
+                     args={"productId": "100806924", "quantity": 2},
+                     result_subjects=("Dunnes Stores 6 Irish Eggs Medium",),
+                     sets_count=True)
+    assert classify(turn) == "failed"
+
+
 def test_failed_writes_then_reads_and_a_cheerful_question_stay_failed() -> None:
     # T6-shaped, with the errors on writes: a reroute needs a landed write.
     turn = _turn(final_text="Anything else I can help with?")
