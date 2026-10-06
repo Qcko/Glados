@@ -29,6 +29,26 @@ _SENTENCE_RE = re.compile(r"(?:\d\.\d|[^.!?])+(?:[.!?]+|$)")
 
 NOTHING_CHANGED = "Nothing in your cart changed."
 
+# GLaDOS-voiced tails for the cart line, behind `[cart_verify] persona`. Dry,
+# not insulting -- one plays on every cart write. Harness-authored and free of
+# numbers, product words and claims, so a tail can never make a line untrue.
+_QUIPS = {
+    "added": (
+        "Noted. For science.",
+        "The cart obliges.",
+        "Another entry in the record.",
+    ),
+    "removed": (
+        "Restraint. How refreshing.",
+        "Gone. The cart is lighter for it.",
+        "Duly subtracted.",
+    ),
+    "mixed": (
+        "Rearranged.",
+        "The cart adapts.",
+    ),
+}
+
 
 @dataclass(frozen=True)
 class CartLine:
@@ -120,6 +140,29 @@ def cart_line(
     ]
     sentences += _unnamed_sentences(unnamed, other=bool(named))
     return " ".join(sentences)
+
+
+def with_quip(line: str, changes: tuple[LineChange, ...], turn_no: int) -> str:
+    """The cart line with a persona tail, rotated by `turn_no`. A line that
+    ends on the model's kept question is returned as is: the question must
+    stay last, or the user is not sure what to answer. Nothing changed gets
+    no tail either: the line already says so, and a wry aside there can
+    sound like a joke about a failed request."""
+    kind = _change_kind(changes)
+    if kind is None or line.rstrip().endswith("?"):
+        return line
+    quips = _QUIPS[kind]
+    return f"{line} {quips[turn_no % len(quips)]}"
+
+
+def _change_kind(changes: tuple[LineChange, ...]) -> str | None:
+    raised = any(c.delta > 0 for c in changes)
+    lowered = any(c.delta < 0 for c in changes)
+    if raised and lowered:
+        return "mixed"
+    if raised:
+        return "added"
+    return "removed" if lowered else None
 
 
 def trailing_question(reply: str) -> str | None:

@@ -65,7 +65,9 @@ class CartVerifier:
         read_timeout_s: float = 5.0,
         max_age_s: float = 600.0,
         clock: Callable[[], float] = time.monotonic,
+        persona: bool = False,
     ) -> None:
+        self.persona = persona
         self._dispatch = dispatch
         self._cart_reads = dict(cart_reads)
         self._read_timeout_s = read_timeout_s

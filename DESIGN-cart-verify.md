@@ -200,8 +200,13 @@ so it is bounded like everything else spoken. Never a shop product name.
     appended (at most 160 characters, else dropped -- it is model text) -- a clarifying question ("which milk did you mean?") must
     survive; the rest of the reply, which is where "two remain" lives, does
     not.
-- Persona: the templates are the first draft; a GLaDOS-voiced variant set is
-  part of the bake-off (below).
+- Persona: `[cart_verify] persona` (default off, 06-10-2026) appends one dry
+  GLaDOS tail to the SPOKEN line, keyed by added / removed / mixed and
+  rotated per turn. Tails are harness-authored with no digits, product words
+  or claims, so they cannot make a line untrue; none is added when nothing
+  changed or when the line ends on the model's kept question. History gets
+  the plain line only, so the small model never sees quips as precedents
+  (code duck). Milder tone chosen over insults: it plays on every cart write.
 - Outcome classification is untouched: the line only changes what is said and
   committed.
 

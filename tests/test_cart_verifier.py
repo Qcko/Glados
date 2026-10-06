@@ -329,7 +329,10 @@ def _remove(call_id: str = "r1") -> LLMToolCall:
     return LLMToolCall(call_id=call_id, server="dunnes", name="remove_from_cart", args={"productId": MILK})
 
 
-async def _cart_turn(tmp_path: Path, reply: str, *, remove_ok: bool = True, read_ok: bool = True, call: LLMToolCall | None = None):
+async def _cart_turn(
+    tmp_path: Path, reply: str, *, remove_ok: bool = True, read_ok: bool = True,
+    call: LLMToolCall | None = None, persona: bool = False,
+):
     server = _CartServer({MILK: 3}, remove_ok=remove_ok)
     mcp = MCPRegistry()
     for tool in server.tools():
@@ -340,7 +343,7 @@ async def _cart_turn(tmp_path: Path, reply: str, *, remove_ok: bool = True, read
             return MCPCallResult(ok=False, error="browser not started")
         return await mcp.dispatch(srv, name, args, envelope)
 
-    verifier = CartVerifier(dispatch, {"dunnes": "view_cart"})
+    verifier = CartVerifier(dispatch, {"dunnes": "view_cart"}, persona=persona)
     llm = _ScriptedLLM([call or _remove()], reply)
     async with desk_organizer(
         tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False, cart_verifier=verifier
@@ -428,3 +431,18 @@ async def test_17_the_harness_reads_never_reach_the_model_or_traces(tmp_path: Pa
     assert SHOP_NAME not in traced
     tool_results = [e for e in events if e.get("event") == "tool_result"]
     assert len(tool_results) == 1
+
+
+async def test_persona_tail_is_spoken_but_never_enters_history(tmp_path: Path) -> None:
+    deltas, _, history, _ = await _cart_turn(tmp_path, "Done.", persona=True)
+
+    plain = "Took 3 of one item out of your cart."
+    assert any(f"(Cart) {plain} Restraint. How refreshing." in d for d in deltas)
+    assert plain in history
+    assert not any("Restraint" in h for h in history)
+
+
+async def test_persona_off_keeps_the_plain_line(tmp_path: Path) -> None:
+    _, _, history, _ = await _cart_turn(tmp_path, "Done.")
+
+    assert "Took 3 of one item out of your cart." in history

@@ -132,6 +132,7 @@ def _build_cart_verifier(
         cart_reads,
         read_timeout_s=glados_cfg.cart_verify.read_timeout_s,
         max_age_s=glados_cfg.cart_verify.cache_max_age_s,
+        persona=glados_cfg.cart_verify.persona,
     )
 
 

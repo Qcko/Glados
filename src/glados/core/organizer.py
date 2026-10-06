@@ -69,7 +69,7 @@ from .sessions import SessionRegistry
 from .prompt_pressure import SessionPressureMonitors, StreakAlarm, log_alarms
 from .tool_payload_cap import PayloadCap, cap_tool_payload, clamp_result_bytes
 from .traces import TraceStore
-from .cart_verify import cart_line, trailing_question
+from .cart_verify import cart_line, trailing_question, with_quip
 from .cart_verifier import CartVerifier, TurnCart
 from contextvars import ContextVar
 from .turn_outcome import (
@@ -261,6 +261,9 @@ _TURN_CART: ContextVar[TurnCart | None] = ContextVar("turn_cart", default=None)
 class _VerifiedCart:
     line: str
     changed: bool
+    # `line` plus any persona tail. Only `line` enters history: a small model
+    # copies phrases it sees there, and a quip is not a fact.
+    spoken: str
 
 
 def _landed_volume_lines(outcome: TurnRecord) -> dict[str, str]:
@@ -1154,6 +1157,7 @@ class Organizer:
         # Rotates the honest-failure line spoken on a `confabulated` turn so a
         # cascade of fabricated turns doesn't repeat one phrase verbatim.
         self._confab_reply_idx = 0
+        self._cart_quip_idx = 0
         self._silent_reply_idx = 0
         self._unbacked_reply_idx = 0
         # session_id -> dispatch-grounded summary of its last real turn, for the
@@ -1596,7 +1600,7 @@ class Organizer:
                 # shows also clears a word-matching "no such change" verdict;
                 # an unchanged cart leaves a claimed change to the line below.
                 final_text = await self._replace_with_cart_line(
-                    session.session_id, session.room_id, new_history, verified.line,
+                    session.session_id, session.room_id, new_history, verified,
                     trace,
                 )
             elif kind == "confabulated":
@@ -2574,31 +2578,35 @@ class Organizer:
             question=trailing_question(outcome.final_text),
             overrides=_landed_volume_lines(outcome),
         )
+        spoken = line
+        if self._cart_verifier.persona:
+            spoken = with_quip(line, changes, self._cart_quip_idx)
+            self._cart_quip_idx += 1
         trace.event(
             "cart_verified",
             changes=[[c.product_id, c.before, c.after] for c in changes],
-            line=line,
+            line=spoken,
             elapsed_ms=elapsed_ms,
         )
-        return _VerifiedCart(line=line, changed=bool(changes))
+        return _VerifiedCart(line=line, changed=bool(changes), spoken=spoken)
 
     async def _replace_with_cart_line(
         self,
         session_id: str,
         room_id: str,
         history: list[LLMMessage],
-        line: str,
+        verified: _VerifiedCart,
         trace,
     ) -> str:
         """Speak and commit the cart line in place of the model's reply, on
         the same two egress paths as the other replacements."""
         if history and history[-1].role == "assistant":
-            history[-1] = LLMMessage(role="assistant", content=line)
+            history[-1] = LLMMessage(role="assistant", content=verified.line)
         await self._broadcast(
             room_id,
-            AssistantDelta(session_id=session_id, text=" (Cart) " + line),
+            AssistantDelta(session_id=session_id, text=" (Cart) " + verified.spoken),
         )
-        return line
+        return verified.spoken
 
     async def _handle_misstated_volume(
         self,

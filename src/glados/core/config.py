@@ -362,6 +362,8 @@ class CartVerifyConfig(BaseModel):
     # A guess, not a measurement: how long a cached cart may stand in for a
     # fresh BEFORE read when no write has gone to that server since.
     cache_max_age_s: float = Field(default=600.0, gt=0)
+    # Add a short GLaDOS-voiced tail to the spoken cart line.
+    persona: bool = False
 
 
 class AudioConfig(BaseModel):

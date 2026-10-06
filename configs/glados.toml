@@ -212,6 +212,8 @@ max_words_local = 30
 enabled = true
 read_timeout_s = 5.0
 cache_max_age_s = 600.0
+# Add a short GLaDOS-voiced tail ("Noted. For science.") to the cart line.
+persona = false
 
 [session]
 # Conversation continuity (ARCH section 3 idle-window, section 8 hot buffer). A follow-up in

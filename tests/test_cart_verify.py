@@ -18,6 +18,7 @@ from glados.core.cart_verify import (
     cart_line,
     diff,
     trailing_question,
+    with_quip,
 )
 
 MILK = "100806893"
@@ -256,3 +257,44 @@ def test_units_differing_from_lines_are_spoken_across_lines():
 def test_one_unit_per_line_keeps_the_plain_item_count():
     changes = diff(_snap(), _snap(milk=1, eggs=1))
     assert cart_line(changes, {}) == "Added 2 items to your cart."
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "kind"),
+    [
+        ({}, {"milk": 1}, "added"),
+        ({"milk": 2}, {"milk": 1}, "removed"),
+        ({"milk": 1}, {"eggs": 1}, "mixed"),
+    ],
+)
+def test_the_quip_matches_what_the_cart_did(before, after, kind):
+    from glados.core.cart_verify import _QUIPS
+
+    changes = diff(_snap(**before), _snap(**after))
+    line = cart_line(changes, {})
+    voiced = with_quip(line, changes, 0)
+    assert voiced == f"{line} {_QUIPS[kind][0]}"
+
+
+def test_quips_rotate_with_the_turn_number():
+    changes = diff(_snap(), _snap(milk=1))
+    line = cart_line(changes, {})
+    assert with_quip(line, changes, 0) != with_quip(line, changes, 1)
+    assert with_quip(line, changes, 0) == with_quip(line, changes, 3)
+
+
+def test_nothing_changed_gets_no_tail():
+    assert with_quip(NOTHING_CHANGED, (), 0) == NOTHING_CHANGED
+
+
+def test_a_kept_question_stays_last():
+    line = cart_line((), {}, question="Which milk did you mean?")
+    assert with_quip(line, (), 0) == line
+
+
+def test_no_quip_carries_a_digit_or_a_question():
+    from glados.core.cart_verify import _QUIPS
+
+    for quip in (q for group in _QUIPS.values() for q in group):
+        assert not any(ch.isdigit() for ch in quip) and "?" not in quip
+        assert quip.isascii()
