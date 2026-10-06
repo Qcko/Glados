@@ -356,7 +356,7 @@ class CartVerifyConfig(BaseModel):
     what changed instead of the model's reply (DESIGN-cart-verify.md). Only
     servers that declare `cart_read` in servers.toml are verified."""
 
-    enabled: bool = False
+    enabled: bool = True
     # ~2.5x the prod view_cart p90 (2.0 s, 06-10-2026).
     read_timeout_s: float = Field(default=5.0, gt=0)
     # A guess, not a measurement: how long a cached cart may stand in for a

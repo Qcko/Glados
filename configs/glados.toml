@@ -207,9 +207,9 @@ max_words_local = 30
 
 [cart_verify]
 # Read the real cart before and after a turn's cart writes and speak what it
-# shows instead of the model's reply (DESIGN-cart-verify.md). Off until the
-# prod bake-off has scored it; the server must also declare cart_read.
-enabled = false
+# shows instead of the model's reply (DESIGN-cart-verify.md). On since the
+# 06-10-2026 prod bake-off; only servers declaring cart_read are checked.
+enabled = true
 read_timeout_s = 5.0
 cache_max_age_s = 600.0
 
