@@ -69,6 +69,9 @@ from .sessions import SessionRegistry
 from .prompt_pressure import SessionPressureMonitors, StreakAlarm, log_alarms
 from .tool_payload_cap import PayloadCap, cap_tool_payload, clamp_result_bytes
 from .traces import TraceStore
+from .cart_verify import cart_line, trailing_question
+from .cart_verifier import CartVerifier, TurnCart
+from contextvars import ContextVar
 from .turn_outcome import (
     LandedQuantity,
     TurnRecord,
@@ -247,6 +250,22 @@ _UNBACKED_CLAIM_REPLIES = (
 _DENIED_REMOVAL_REPLY = (
     "Done -- I took that out of your cart. Ask me what's in it if you want the list."
 )
+
+# The cart record of the user turn running in THIS task. A context variable,
+# not a dict keyed by session: a superseded turn still finishing its last
+# write must not count it into its successor's record.
+_TURN_CART: ContextVar[TurnCart | None] = ContextVar("turn_cart", default=None)
+
+
+def _landed_volume_lines(outcome: TurnRecord) -> dict[str, str]:
+    """A typed volume write's litres line, keyed by its query word, so the
+    cart line says "4 litres of milk" rather than a pack count."""
+    return {
+        t.landed.subject: _misstated_volume_reply(t.landed)
+        for t in outcome.tools
+        if t.landed is not None and t.ok and not t.indeterminate
+    }
+
 
 def _misstated_volume_reply(landed: LandedQuantity) -> str:
     """What landed, in GLaDOS's words: the bounded total, the target when the
@@ -1045,8 +1064,13 @@ class Organizer:
         reader_timeout_s: float = READER_TIMEOUT_S,
         max_reader_bytes: int = MAX_READER_BYTES,
         write_ledger: WriteLedger | None = None,
+        cart_verifier: CartVerifier | None = None,
     ) -> None:
         self._max_result_bytes = max_result_bytes
+        # Reads the real cart around a turn's writes (DESIGN-cart-verify.md).
+        # One TurnCart per USER turn (`_TURN_CART`), so every retry drive of
+        # that turn shares one BEFORE and one AFTER.
+        self._cart_verifier = cart_verifier
         # Cross-turn memory of additive writes that landed, per session and
         # bounded like `_history`. Injectable so the window is testable.
         self._write_ledger = (
@@ -1430,6 +1454,7 @@ class Organizer:
             self._utterance_seq[session.session_id] = (
                 self._utterance_seq.get(session.session_id, 0) + 1
             )
+            _TURN_CART.set(TurnCart())
             await self._await_llm_warm(trace)
             await self._broadcast(session.room_id, Welcome(session_id=session.session_id))
             await self._broadcast(
@@ -1556,6 +1581,17 @@ class Organizer:
                 final_text = await self._handle_confabulation(
                     session.session_id, session.room_id, new_history, trace
                 )
+            elif (
+                cart_text := await self._verified_cart_line(
+                    session.session_id, envelope, outcome, trace
+                )
+            ) is not None:
+                # The real cart was read before and after this turn's writes:
+                # say what it shows, not what the model narrated. Outcome kept.
+                final_text = await self._replace_with_cart_line(
+                    session.session_id, session.room_id, new_history, cart_text,
+                    trace,
+                )
             elif claimed_a_change_it_did_not_make(outcome):
                 # Reached when the turn classified as something else -- almost
                 # always `failed`, because an unrecovered tool error outranks
@@ -1613,6 +1649,7 @@ class Organizer:
             cancelled = True
             trace.event("cancelled")
         finally:
+            _TURN_CART.set(None)
             entry = self._inflight.get(session.session_id)
             if entry is not None and entry[0] is task:
                 del self._inflight[session.session_id]
@@ -2499,6 +2536,55 @@ class Organizer:
             AssistantDelta(session_id=session_id, text=" (Correction) " + reply),
         )
         return reply
+
+    async def _verified_cart_line(
+        self, session_id: str, envelope: CallEnvelope, outcome: TurnRecord, trace
+    ) -> str | None:
+        """The line to speak from this turn's verified cart change, or None
+        to leave the reply to the existing guards."""
+        turn = _TURN_CART.get()
+        if self._cart_verifier is None or turn is None or not turn.wrote:
+            return None
+        if not self._cues_readable():
+            return None
+        started = time.monotonic()
+        changes = await self._cart_verifier.after(turn, envelope)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        if changes is None:
+            trace.event("cart_verify_skipped", unsafe=turn.unsafe, elapsed_ms=elapsed_ms)
+            return None
+        words = self._cart_verifier.attribution(turn, changes)
+        line = cart_line(
+            changes,
+            words,
+            question=trailing_question(outcome.final_text),
+            overrides=_landed_volume_lines(outcome),
+        )
+        trace.event(
+            "cart_verified",
+            changes=[[c.product_id, c.before, c.after] for c in changes],
+            line=line,
+            elapsed_ms=elapsed_ms,
+        )
+        return line
+
+    async def _replace_with_cart_line(
+        self,
+        session_id: str,
+        room_id: str,
+        history: list[LLMMessage],
+        line: str,
+        trace,
+    ) -> str:
+        """Speak and commit the cart line in place of the model's reply, on
+        the same two egress paths as the other replacements."""
+        if history and history[-1].role == "assistant":
+            history[-1] = LLMMessage(role="assistant", content=line)
+        await self._broadcast(
+            room_id,
+            AssistantDelta(session_id=session_id, text=" (Cart) " + line),
+        )
+        return line
 
     async def _handle_misstated_volume(
         self,
@@ -3501,9 +3587,36 @@ class Organizer:
         this turn -- so it is answered here and never dispatched. Intercepting
         BEFORE `mcp.dispatch` is what keeps it out of the registry's timeout:
         an announcement must never come back `indeterminate`."""
-        if f"{tc.server}.{tc.name}" != SPEAK_INTO:
+        if f"{tc.server}.{tc.name}" == SPEAK_INTO:
+            return await self._speak_into_room(tc, session_id, room_id, trace, outcome)
+        if self._cart_verifier is None or not self._cart_verifier.serves(tc.server):
             return await self.mcp.dispatch(tc.server, tc.name, tc.args, envelope)
-        return await self._speak_into_room(tc, session_id, room_id, trace, outcome)
+        return await self._dispatch_watching_cart(tc, envelope, session_id)
+
+    async def _dispatch_watching_cart(
+        self, tc: LLMToolCall, envelope: CallEnvelope, session_id: str
+    ) -> MCPCallResult:
+        """Dispatch to a cart server, keeping the CartVerifier's epoch and
+        this turn's BEFORE in step with the call (DESIGN-cart-verify.md)."""
+        verifier = self._cart_verifier
+        turn = _TURN_CART.get()
+        if verifier.is_cart_read(tc.server, tc.name):
+            epoch, quiet = verifier.epoch(tc.server), verifier.quiet(tc.server)
+            result = await self.mcp.dispatch(tc.server, tc.name, tc.args, envelope)
+            verifier.note_model_read(tc.server, epoch, quiet, result)
+            return result
+        spec = self.mcp.spec_for(tc.server, tc.name)
+        if spec is None or not (spec.mutating or spec.requires_confirmation):
+            return await self.mcp.dispatch(tc.server, tc.name, tc.args, envelope)
+        if turn is not None:
+            await verifier.before_write(turn, tc.server, envelope)
+        verifier.note_write(turn, tc.server, tc.args)
+        result = None
+        try:
+            result = await self.mcp.dispatch(tc.server, tc.name, tc.args, envelope)
+            return result
+        finally:
+            verifier.note_write_done(turn, tc.server, result)
 
     async def _speak_into_room(
         self,

@@ -63,6 +63,7 @@ from .logging_setup import setup_logging
 from .reader import READER_NUM_PREDICT, READER_NUM_PREDICT_THINKING
 from . import memory_gate
 from .ollama_lifecycle import OllamaLifecycle
+from .cart_verifier import CartVerifier
 from .organizer import Organizer
 from .prompt_budget import measure_boot_budget
 from .release import describe_release
@@ -116,6 +117,22 @@ async def _lazy_reaper(lazy_servers: list[tuple["StdioServer", float]]) -> None:
         now = asyncio.get_running_loop().time()
         for coro in _reap_idle_servers(lazy_servers, now):
             await coro
+
+
+def _build_cart_verifier(
+    glados_cfg: GladosConfig, servers_cfg: ServersConfig, mcp: MCPRegistry
+) -> CartVerifier | None:
+    """The cart check (DESIGN-cart-verify.md), or None when it is off or no
+    server declares a cart read."""
+    cart_reads = {e.id: e.cart_read for e in servers_cfg.server if e.cart_read}
+    if not glados_cfg.cart_verify.enabled or not cart_reads:
+        return None
+    return CartVerifier(
+        mcp.dispatch,
+        cart_reads,
+        read_timeout_s=glados_cfg.cart_verify.read_timeout_s,
+        max_age_s=glados_cfg.cart_verify.cache_max_age_s,
+    )
 
 
 def _build_tool_router(servers_cfg: ServersConfig) -> "ToolRouter | None":
@@ -591,6 +608,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         reply_language=glados_cfg.llm.reply_language,
         tool_router=tool_router,
         reader_llm=reader_llm,
+        cart_verifier=_build_cart_verifier(glados_cfg, servers_cfg, mcp),
     )
 
     async def _assert_prompt_budget(_app: FastAPI, cfg) -> None:

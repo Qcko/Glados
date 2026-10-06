@@ -205,6 +205,14 @@ escalate_on_failed = true
 # multi-clause reasoning the primary fumbles).
 max_words_local = 30
 
+[cart_verify]
+# Read the real cart before and after a turn's cart writes and speak what it
+# shows instead of the model's reply (DESIGN-cart-verify.md). Off until the
+# prod bake-off has scored it; the server must also declare cart_read.
+enabled = false
+read_timeout_s = 5.0
+cache_max_age_s = 600.0
+
 [session]
 # Conversation continuity (ARCH section 3 idle-window, section 8 hot buffer). A follow-up in
 # the same room/speaker reuses the live session -- replaying its history so

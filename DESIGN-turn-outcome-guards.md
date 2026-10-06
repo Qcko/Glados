@@ -98,6 +98,10 @@ the request.
    the same turn -- never against prose, and never against a number the
    harness had to find in text. See "A reply that misstates the quantity a
    write landed" below.
+   **Second exception, added 06-10-2026:** the harness may SPEAK a number
+   taken from a typed field of its own cart read in the same turn, bound to
+   exactly the lines that changed (DESIGN-cart-verify.md). Nothing there
+   judges the model's numbers; it replaces the model's cart narration.
 4. **The `^` anchor on the action heuristic is the entire safety argument.**
    Whole utterances rarely *begin* with an action verb by accident. Everything
    the heuristic is allowed to do must preserve that property. The heuristic

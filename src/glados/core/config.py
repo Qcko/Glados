@@ -351,6 +351,19 @@ class SessionConfig(BaseModel):
     history_max_turns: int = 8
 
 
+class CartVerifyConfig(BaseModel):
+    """Read the real cart before and after a turn's cart writes and speak
+    what changed instead of the model's reply (DESIGN-cart-verify.md). Only
+    servers that declare `cart_read` in servers.toml are verified."""
+
+    enabled: bool = False
+    # ~2.5x the prod view_cart p90 (2.0 s, 06-10-2026).
+    read_timeout_s: float = Field(default=5.0, gt=0)
+    # A guess, not a measurement: how long a cached cart may stand in for a
+    # fresh BEFORE read when no write has gone to that server since.
+    cache_max_age_s: float = Field(default=600.0, gt=0)
+
+
 class AudioConfig(BaseModel):
     # Per-connection WAV trace of inbound mic audio. Useful for offline
     # replay against the STT; flip to false in production to stop
@@ -442,6 +455,7 @@ class GladosConfig(BaseModel):
     llm: LLMConfig = LLMConfig()
     router: RouterConfig = RouterConfig()
     session: SessionConfig = SessionConfig()
+    cart_verify: CartVerifyConfig = CartVerifyConfig()
     audio: AudioConfig = AudioConfig()
     vad: VADConfig = VADConfig()
     stt: STTConfig = STTConfig()
@@ -607,6 +621,11 @@ class ServerEntry(BaseModel):
     # Always offer this server's tools regardless of intent (the "core tools
     # always on" allowlist, e.g. a time server). Overrides intent_keywords.
     core: bool = False
+    # The tool that reads this server's cart, for the cart check
+    # (DESIGN-cart-verify.md). Its result must be the contract
+    # {"lines": [{"productId": str, "quantity": int units, "packOf"?: int}]};
+    # anything else fails parse and the server is simply never verified.
+    cart_read: str | None = None
 
     def apply_flags(self, spec: "ToolSpec") -> "ToolSpec":
         """Return `spec` with the GLaDOS-only flags this config declares.

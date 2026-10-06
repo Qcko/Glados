@@ -123,6 +123,10 @@ env.DUNNES_EDGE_PROFILE = "<your-secrets-dir>/dunnes-edge-profile"
 # of `untrusted = true` that used to sit in the overlays below, and unlike them
 # it also covers any tool a future build of the server adds.
 untrusted = true
+# The cart check reads this tool before and after a turn's cart writes and
+# speaks what changed (DESIGN-cart-verify.md; on only when glados.toml sets
+# [cart_verify] enabled = true).
+cart_read = "view_cart"
 
 # NOTE: tool keys here are snake_case -- the .NET MCP SDK auto-converts
 # C# PascalCase method names (`AddToCart`) to snake_case (`add_to_cart`)
