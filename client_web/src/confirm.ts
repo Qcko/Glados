@@ -377,6 +377,7 @@ function toolLabel(live: LiveRequest): string {
 function resolvedNote(live: LiveRequest, msg: ToolConfirmResolved): string {
   const tool = toolLabel(live);
   if (msg.via === "timeout") return `confirmation for ${tool} timed out -- not sent`;
+  if (msg.via === "cancelled") return `confirmation for ${tool} cancelled -- not sent`;
   const verdict = msg.granted ? "allowed" : "denied";
   const by = msg.via === "voice" ? "by voice" : "on screen";
   return `${tool} ${verdict} ${by}`;

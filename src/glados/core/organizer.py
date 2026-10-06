@@ -272,13 +272,33 @@ _CHECKOUT_IN_PROGRESS = (
     + _DO_NOT_RETRY
 )
 _APPROVE_ON_SCREEN = "Approve it on the desk screen."
+_MONEY_NO_TOTAL = (
+    "The shop did not report a cart total, so no slot was booked." + _DO_NOT_RETRY
+)
+
+# How a money step's on-screen confirmation ended, as the future's result.
+_GRANTED, _DENIED, _TIMED_OUT, _SUPERSEDED, _SCREEN_GONE = (
+    "granted", "denied", "timeout", "superseded", "screen_gone",
+)
+_MONEY_VERDICT_NOTES = {
+    _DENIED: "user denied" + _DO_NOT_RETRY,
+    _TIMED_OUT: "Nobody approved it on the desk screen in time." + _DO_NOT_RETRY,
+    _SUPERSEDED: "A newer checkout request replaced this one on the desk screen."
+    + _DO_NOT_RETRY,
+    _SCREEN_GONE: "The desk screen disconnected before it was approved." + _DO_NOT_RETRY,
+}
+
+
+def _review_total(review) -> str | None:
+    """The total the screen shows: the shop's estimate, else its order value."""
+    return review.payload.estimated_total or review.payload.order_value
 
 
 def _cart_changed_note(review) -> str:
     """Counts and the total only -- from typed fields, never shop text."""
     if review is None:
         return "The cart could not be read again, so no slot was booked." + _DO_NOT_RETRY
-    total = f", total EUR {review.payload.order_value}" if review.payload.order_value else ""
+    total = f", total EUR {_review_total(review)}" if _review_total(review) else ""
     return (
         "The cart changed while the user was reviewing it: it now has "
         f"{review.payload.line_count} lines{total}. No slot was booked." + _DO_NOT_RETRY
@@ -2618,13 +2638,15 @@ class Organizer:
         review = await verifier.review(tc.server, envelope)
         if review is None:
             return self._money_refused(tc, _MONEY_NO_READ, "unreadable", trace)
+        if _review_total(review) is None:
+            return self._money_refused(tc, _MONEY_NO_TOTAL, "no_total", trace)
         approved = copy.deepcopy(tc.args)
-        granted = await self._await_money_confirmation(
+        verdict = await self._await_money_confirmation(
             session_id, room_id, screen, spec, approved, review, trace
         )
-        if not granted:
+        if verdict != _GRANTED:
             verifier.drop_cache(tc.server)
-            return False, MCPCallResult(ok=False, error="user denied"), tc
+            return False, MCPCallResult(ok=False, error=_MONEY_VERDICT_NOTES[verdict]), tc
         return await self._dispatch_money_step(
             tc.model_copy(update={"args": approved}), turn, review, envelope,
             session_id, room_id, trace,
@@ -2676,11 +2698,12 @@ class Organizer:
         args: dict,
         review,
         trace,
-    ) -> bool:
-        """Ask ONE cart_view client, with the cart attached. No voice arm:
-        nobody can consent by ear to a total they never saw. The deadline
-        starts now, after the review read. A newer money step supersedes
-        this one, and the screen disconnecting denies it."""
+    ) -> str:
+        """Ask ONE cart_view client, with the cart attached; returns how it
+        ended (`_GRANTED` or why not). No voice arm: nobody can consent by
+        ear to a total they never saw. The deadline starts now, after the
+        review read. A newer money step supersedes this one, the screen
+        disconnecting ends it, and a cancelled turn closes the modal."""
         loop = asyncio.get_running_loop()
         pending = _PendingConfirm(
             request_id=uuid.uuid4().hex,
@@ -2691,8 +2714,9 @@ class Organizer:
         )
         previous, self._money_pending = self._money_pending, pending
         if previous is not None and not previous.fut.done():
-            previous.fut.set_result(False)
+            previous.fut.set_result(_SUPERSEDED)
         self._pending_confirms[pending.request_id] = pending
+        resolved = False
         try:
             trace.event(
                 "tool_confirm_request",
@@ -2715,33 +2739,57 @@ class Organizer:
             )
             if screen.room_id != room_id and self._room_can_hear(room_id):
                 await self._speak(session_id, room_id, _APPROVE_ON_SCREEN, trace)
-            try:
-                granted = bool(await asyncio.wait_for(pending.fut, self._confirm_timeout_s))
-                via = "ui"
-            except asyncio.TimeoutError:
-                granted, via = False, "timeout"
-            trace.event("tool_confirm_response", request_id=pending.request_id, granted=granted)
-            await self.send(
-                screen.client_id,
-                ToolConfirmResolved(
-                    session_id=session_id,
-                    request_id=pending.request_id,
-                    granted=granted,
-                    via=via,
-                ),
+            verdict = await self._money_verdict(pending)
+            trace.event(
+                "tool_confirm_response", request_id=pending.request_id, verdict=verdict
             )
-            return granted
+            resolved = True
+            await self._close_money_modal(
+                screen, pending, verdict, "timeout" if verdict == _TIMED_OUT else "ui"
+            )
+            return verdict
         finally:
             self._pending_confirms.pop(pending.request_id, None)
             if self._money_pending is pending:
                 self._money_pending = None
+            if not resolved:
+                await asyncio.shield(
+                    self._close_money_modal(screen, pending, _DENIED, "cancelled")
+                )
+
+    async def _money_verdict(self, pending: _PendingConfirm) -> str:
+        try:
+            answer = await asyncio.wait_for(pending.fut, self._confirm_timeout_s)
+        except asyncio.TimeoutError:
+            return _TIMED_OUT
+        if isinstance(answer, str):
+            return answer
+        return _GRANTED if answer else _DENIED
+
+    async def _close_money_modal(
+        self, screen: "ClientBinding", pending: _PendingConfirm, verdict: str, via: str
+    ) -> None:
+        """Tell the screen the request is over, so no live Allow button is
+        left behind. Best effort: the screen may already be gone."""
+        try:
+            await self.send(
+                screen.client_id,
+                ToolConfirmResolved(
+                    session_id=pending.session_id,
+                    request_id=pending.request_id,
+                    granted=verdict == _GRANTED,
+                    via=via,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("money confirm close not delivered to %s", screen.client_id)
 
     async def client_disconnected(self, client_id: str) -> None:
         """A money step shown on this client cannot be answered any more:
-        deny it now rather than wait out the deadline."""
+        end it now rather than wait out the deadline."""
         for pending in list(self._pending_confirms.values()):
             if pending.only_client == client_id and not pending.fut.done():
-                pending.fut.set_result(False)
+                pending.fut.set_result(_SCREEN_GONE)
 
     async def _verified_cart_line(
         self, session_id: str, envelope: CallEnvelope, outcome: TurnRecord, trace

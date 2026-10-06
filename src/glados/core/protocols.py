@@ -225,7 +225,7 @@ class ToolConfirmResolved(BaseModel):
     session_id: str
     request_id: str
     granted: bool
-    via: Literal["ui", "voice", "timeout"]
+    via: Literal["ui", "voice", "timeout", "cancelled"]
 
 
 class MemoryBlockNotice(BaseModel):

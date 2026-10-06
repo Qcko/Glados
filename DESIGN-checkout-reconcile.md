@@ -1,9 +1,30 @@
 # DESIGN - show the real cart before checkout
 
-Status: PLAN, reviewed by the design panel 06-10-2026 (architect, security,
-concurrency/UX), findings folded in; voice rooms route to the desk screen
-(user, 06-10-2026). Awaiting sign-off. Nothing here is built. Follows
-DESIGN-cart-verify.md and reuses its `CartVerifier`.
+Status: BUILT 06-10-2026 (signed off the same day after a 3-seat design
+panel; code duck passed, findings below). Follows DESIGN-cart-verify.md and
+reuses its `CartVerifier`.
+
+Deviations decided while building:
+- `cart_view` counts only when rooms.toml grants it AND the hello declares
+  it; granting a capability to a non-ui client fails config load.
+- "Desk room" is any room with a connected cart_view client -- no rooms.toml
+  desk marker.
+- `totals_consistent` (test 14) omitted: view_cart lines carry no prices.
+- Refusals reach the user through the model, as fixed tool-result text ending
+  "do not call it again this turn", not as harness-spoken lines. Each refusal
+  says why (denied, timed out, superseded, screen disconnected, no total).
+- A cart whose read reports neither `orderValue` nor `estimatedTotal` is
+  refused before any modal: the digest would bind quantities only.
+- The startup check covers every server, not only cart_read ones.
+- A cancelled turn sends `tool_confirm_resolved` with `via = "cancelled"`, so
+  no live Allow button is left on the screen.
+
+Known follow-ups (code duck, not fixed in v1):
+- `KNOWN_MONEY_TOOLS` matches the exact name `set_delivery_slot`; a renamed or
+  new money tool on the Dunnes server passes the startup check ungated.
+- If `set_delivery_slot` itself times out (indeterminate), the checkout lock
+  is released while the booking may still land.
+- A money step in room B silently supersedes room A's; room A is not told.
 
 ## The problem
 

@@ -435,3 +435,51 @@ def test_12_the_shipped_example_config_passes_the_check() -> None:
     raw = tomllib.loads(Path("configs/servers.example.toml").read_text(encoding="utf-8"))
     dunnes = next(e for e in ServersConfig(**raw).server if e.id == "dunnes")
     assert dunnes.ungated_money_tools(["set_delivery_slot"]) == []
+
+
+def test_12_a_money_tool_on_a_server_without_a_cart_read_is_refused() -> None:
+    assert _entry().ungated_money_tools(["set_delivery_slot"]) == ["set_delivery_slot"]
+
+
+async def test_a_cart_with_no_total_is_not_put_to_the_user(tmp_path: Path) -> None:
+    shop = _Shop()
+    view = shop._view
+
+    async def no_total() -> MCPCallResult:
+        result = await view()
+        result.content.pop("orderValue")
+        return result
+
+    shop._view = no_total
+    async with _harness(tmp_path, shop, _ByPromptLLM({BOOK: [_book()]})) as h:
+        await _book_from(h, granted=None)
+
+    assert shop.booked == [] and not h.messages("tool_confirm_request")
+    assert any("did not report a cart total" in (e or "") for e in _tool_errors(h.sink))
+
+
+async def test_a_superseded_request_tells_the_model_why(tmp_path: Path) -> None:
+    shop = _Shop()
+    async with _harness(tmp_path, shop, _ByPromptLLM({BOOK: [_book()]}), ttl=5.0) as h:
+        await h.org.handle_user_text("desk-ui", BOOK)
+        await _confirm_request(h.sink)
+        await h.org.handle_user_text("kitchen-mic", BOOK)
+        await asyncio.sleep(0.3)
+        await h.org.client_disconnected("desk-ui")
+        await h.org.flush()
+
+    errors = " ".join(e or "" for e in _tool_errors(h.sink))
+    assert "newer checkout request" in errors and "disconnected" in errors
+
+
+async def test_a_cancelled_turn_closes_the_modal(tmp_path: Path) -> None:
+    shop = _Shop()
+    async with _harness(tmp_path, shop, _ByPromptLLM({BOOK: [_book()]}), ttl=5.0) as h:
+        await h.org.handle_user_text("desk-ui", BOOK)
+        _, req = await _confirm_request(h.sink)
+        await h.org.handle_audio_text("desk-ui", "stop")
+        await h.org.flush()
+
+    closed = [m for m in h.messages("tool_confirm_resolved") if m["request_id"] == req["request_id"]]
+    assert closed and closed[0]["via"] == "cancelled" and not closed[0]["granted"]
+    assert shop.booked == []

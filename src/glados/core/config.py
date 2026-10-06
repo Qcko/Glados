@@ -651,10 +651,10 @@ class ServerEntry(BaseModel):
         return self
 
     def ungated_money_tools(self, tool_names: list[str]) -> list[str]:
-        """Known money tools this cart server exposes without `money_step` --
-        a missing overlay line must not silently un-gate the booking."""
-        if not self.cart_read:
-            return []
+        """Known money tools this server exposes without `money_step` -- a
+        missing overlay line must not silently un-gate the booking. Applies
+        to every server: one with no `cart_read` cannot carry `money_step`
+        (validator above), so a money tool there is refused outright."""
         return sorted(
             name
             for name in tool_names

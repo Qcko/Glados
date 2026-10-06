@@ -142,7 +142,7 @@ export interface ToolConfirmResolved {
   session_id: string;
   request_id: string;
   granted: boolean;
-  via: "ui" | "voice" | "timeout";
+  via: "ui" | "voice" | "timeout" | "cancelled";
 }
 
 export type ServerMessage =
