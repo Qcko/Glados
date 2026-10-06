@@ -347,6 +347,9 @@ mutating = true
 # on a cart_read server -- without it the server is refused at startup.
 money_step = true
 timeout_s = 400.0
+# No confirm_phrase: date, time and slotId are three free-text arguments, which
+# a phrase cannot carry, so the generic form speaks them. The server books only
+# when slotId sits on that date with that time and fee (DESIGN-delivery-days.md).
 
 # --- Local catalog (no network -- cached JSON) --------------------------
 # The catalog tools (catalog_search, get_catalog_product, list_catalog,
