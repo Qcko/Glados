@@ -257,17 +257,22 @@ class TurnRecord:
         return any(t.mutating and (t.ok or t.indeterminate) for t in self.tools)
 
 
-def classify(turn: TurnRecord) -> TurnOutcomeKind:
+def classify(turn: TurnRecord, *, cart_verified: bool = False) -> TurnOutcomeKind:
     """Reduce a finished turn to a single typed outcome.
 
     Priority order matters: an unrecovered tool error is ``failed`` even when
     the turn ends on a question (T6 ended on a cheerful question *after* two
-    errors -- that is a failure, not a clarification request)."""
+    errors -- that is a failure, not a clarification request).
+
+    `cart_verified` means the real cart was read before and after this turn's
+    writes and DID change: that read outranks the word-matching claim check,
+    which cannot tell "Added three items" from an invented add (prod bake-off
+    T13, 06-10-2026: a landed add of 3 milks was called `confabulated`)."""
     if turn.loop_exhausted or turn.budget_exceeded:
         return "failed"
     if _has_unrecovered_error(turn.tools):
         return "failed"
-    if turn.confirm_refused and not claimed_a_change_it_did_not_make(turn):
+    if turn.confirm_refused and not _unbacked_claim(turn, cart_verified):
         # The user stopped it. Checked ahead of the zero-tool and drift checks
         # because both would otherwise read a refused write as the model's
         # failure; a reply that still claims the change went through is not
@@ -275,7 +280,7 @@ def classify(turn: TurnRecord) -> TurnOutcomeKind:
         return "needs-user"
     if said_nothing(turn):
         return "failed"
-    if _confabulated(turn) or claimed_a_change_it_did_not_make(turn):
+    if _confabulated(turn) or _unbacked_claim(turn, cart_verified):
         # Ahead of the drift check on purpose. A turn can be both drifted AND
         # making a false claim, and only `confabulated` gets the reply replaced
         # and kept out of history (see Organizer._handle_confabulation);
@@ -294,6 +299,10 @@ def classify(turn: TurnRecord) -> TurnOutcomeKind:
     if _ends_on_question(turn.final_text) and not _has_successful_call(turn.tools):
         return "needs-user"
     return "done"
+
+
+def _unbacked_claim(turn: TurnRecord, cart_verified: bool) -> bool:
+    return not cart_verified and claimed_a_change_it_did_not_make(turn)
 
 
 def said_nothing(turn: TurnRecord) -> bool:

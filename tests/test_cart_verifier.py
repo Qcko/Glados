@@ -329,7 +329,7 @@ def _remove(call_id: str = "r1") -> LLMToolCall:
     return LLMToolCall(call_id=call_id, server="dunnes", name="remove_from_cart", args={"productId": MILK})
 
 
-async def _cart_turn(tmp_path: Path, reply: str, *, remove_ok: bool = True, read_ok: bool = True):
+async def _cart_turn(tmp_path: Path, reply: str, *, remove_ok: bool = True, read_ok: bool = True, call: LLMToolCall | None = None):
     server = _CartServer({MILK: 3}, remove_ok=remove_ok)
     mcp = MCPRegistry()
     for tool in server.tools():
@@ -341,7 +341,7 @@ async def _cart_turn(tmp_path: Path, reply: str, *, remove_ok: bool = True, read
         return await mcp.dispatch(srv, name, args, envelope)
 
     verifier = CartVerifier(dispatch, {"dunnes": "view_cart"})
-    llm = _ScriptedLLM([_remove()], reply)
+    llm = _ScriptedLLM([call or _remove()], reply)
     async with desk_organizer(
         tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False, cart_verifier=verifier
     ) as h:
@@ -361,10 +361,41 @@ async def test_10_t13_a_removed_line_and_two_remain_is_replaced(tmp_path: Path) 
     lie = "Two 3-litre milks remain."
     deltas, outcomes, history, events = await _cart_turn(tmp_path, lie)
 
-    assert any("(Cart) Took one item out of your cart." in d for d in deltas)
-    assert "Took one item out of your cart." in history and lie not in history
+    assert any("(Cart) Took 3 of one item out of your cart." in d for d in deltas)
+    assert "Took 3 of one item out of your cart." in history and lie not in history
     assert outcomes[0] == "done"
     assert "cart_verified" in [e.get("event") for e in events]
+
+
+async def test_t13_a_landed_change_is_not_called_confabulated_over_a_generic_noun(
+    tmp_path: Path,
+) -> None:
+    named = LLMToolCall(
+        call_id="r1", server="dunnes", name="remove_from_cart",
+        args={"productId": MILK, "name": "milk"},
+    )
+    reply = "Removed three items from your cart."
+    deltas, outcomes, history, events = await _cart_turn(tmp_path, reply, call=named)
+
+    assert outcomes[0] == "done"
+    assert "Took the milk out." in history
+    assert not any("say it again" in d for d in deltas)
+    assert {"event": "cart_verdict_override", "was": "confabulated", "now": "done"}.items() <= next(
+        e for e in events if e.get("event") == "cart_verdict_override"
+    ).items()
+
+
+async def test_t13_a_claimed_change_with_an_unchanged_cart_stays_confabulated(
+    tmp_path: Path,
+) -> None:
+    named = LLMToolCall(
+        call_id="r1", server="dunnes", name="remove_from_cart",
+        args={"productId": MILK, "name": "milk"},
+    )
+    reply = "Removed three items from your cart."
+    _, outcomes, _, _ = await _cart_turn(tmp_path, reply, remove_ok=False, call=named)
+
+    assert outcomes[0] != "done"
 
 
 async def test_11_a_refused_removal_and_two_remain_says_nothing_changed(tmp_path: Path) -> None:

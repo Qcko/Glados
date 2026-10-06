@@ -212,17 +212,31 @@ def _count(units: int, group: list[LineChange]) -> str:
 
 def _unnamed_sentences(changes: list[LineChange], *, other: bool) -> list[str]:
     """Lines no call's word names, by direction and count only."""
-    gone = sum(1 for c in changes if c.before and not c.after)
-    lowered = sum(1 for c in changes if c.after and c.delta < 0)
-    raised = sum(1 for c in changes if c.delta > 0)
+    gone = [c for c in changes if c.before and not c.after]
+    lowered = [c for c in changes if c.after and c.delta < 0]
+    raised = [c for c in changes if c.delta > 0]
     sentences = []
     if raised:
-        sentences.append(f"Added {_items(raised, other)} to your cart.")
+        sentences.append(f"Added {_units_of(raised, other)} to your cart.")
     if lowered:
-        sentences.append(f"Took some of {_items(lowered, other)} off.")
+        units_off = -sum(c.delta for c in lowered)
+        sentences.append(f"Took {units_off} off {_items(len(lowered), other)}.")
     if gone:
-        sentences.append(f"Took {_items(gone, other)} out of your cart.")
+        sentences.append(f"Took {_units_of(gone, other)} out of your cart.")
     return sentences
+
+
+def _units_of(group: list[LineChange], other: bool) -> str:
+    """How many units moved on how many lines. The line count alone said
+    "Added one item" for one line going 1 -> 3 (prod bake-off T10,
+    06-10-2026), so units are spoken whenever they differ from it."""
+    units = sum(abs(c.delta) for c in group)
+    items = _items(len(group), other)
+    if units == len(group):
+        return items
+    if len(group) == 1:
+        return f"{_count(units, group)} of {items}"
+    return f"{units} units of {items}"
 
 
 def _items(count: int, other: bool) -> str:

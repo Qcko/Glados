@@ -152,7 +152,7 @@ def test_nothing_changed_keeps_the_models_closing_question():
 def test_an_unattributed_change_is_described_by_direction():
     changes = diff(_snap(milk=3, eggs=6), _snap(milk=2))
     assert cart_line(changes, {MILK: "milk"}) == (
-        "Took 1 milk off. Took one other item out of your cart."
+        "Took 1 milk off. Took 6 of one other item out of your cart."
     )
 
 
@@ -161,7 +161,7 @@ def test_an_unattributed_change_is_described_by_direction():
 )
 def test_a_word_that_is_not_a_plain_subject_is_never_spoken(word):
     changes = diff(_snap(milk=3), _snap())
-    assert cart_line(changes, {MILK: word}) == "Took one item out of your cart."
+    assert cart_line(changes, {MILK: word}) == "Took 3 of one item out of your cart."
 
 
 def test_pack_count_shown_only_when_it_divides_exactly():
@@ -221,12 +221,12 @@ def test_trailing_question_edges(reply, expected):
 
 def test_t13_a_productid_only_removal_says_an_item_went():
     changes = diff(_snap(milk=3), _snap())
-    assert cart_line(changes, {}) == "Took one item out of your cart."
+    assert cart_line(changes, {}) == "Took 3 of one item out of your cart."
 
 
-def test_unattributed_lowering_says_some_came_off():
+def test_unattributed_lowering_says_how_many_came_off():
     changes = diff(_snap(milk=3, eggs=6), _snap(milk=2, eggs=6))
-    assert cart_line(changes, {}) == "Took some of one item off."
+    assert cart_line(changes, {}) == "Took 1 off one item."
 
 
 def test_an_override_replaces_that_subjects_sentence():
@@ -241,3 +241,18 @@ def test_from_content_applies_the_same_contract():
     )
     assert CartSnapshot.from_content({"lines": [_line(MILK, float("nan"))]}) is None
     assert CartSnapshot.from_content(None) is None
+
+
+def test_t10_an_unattributed_raise_says_the_units_not_the_line_count():
+    changes = diff(_snap(milk=1), _snap(milk=3))
+    assert cart_line(changes, {}) == "Added 2 of one item to your cart."
+
+
+def test_units_differing_from_lines_are_spoken_across_lines():
+    changes = diff(_snap(), _snap(milk=2, eggs=1))
+    assert cart_line(changes, {}) == "Added 3 units of 2 items to your cart."
+
+
+def test_one_unit_per_line_keeps_the_plain_item_count():
+    changes = diff(_snap(), _snap(milk=1, eggs=1))
+    assert cart_line(changes, {}) == "Added 2 items to your cart."

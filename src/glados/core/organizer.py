@@ -257,6 +257,12 @@ _DENIED_REMOVAL_REPLY = (
 _TURN_CART: ContextVar[TurnCart | None] = ContextVar("turn_cart", default=None)
 
 
+@dataclass(frozen=True)
+class _VerifiedCart:
+    line: str
+    changed: bool
+
+
 def _landed_volume_lines(outcome: TurnRecord) -> dict[str, str]:
     """A typed volume write's litres line, keyed by its query word, so the
     cart line says "4 litres of milk" rather than a pack count."""
@@ -1574,23 +1580,31 @@ class Organizer:
             # of our lines match _CLAIM_RE -- logging after them would harvest
             # our own vocabulary as evidence of the model's.
             self._log_unmatched_claim_phrasing(outcome, final_text)
-            if kind == "confabulated":
+            verified = await self._verified_cart_line(
+                session.session_id, envelope, outcome, trace
+            )
+            if verified is not None and verified.changed:
+                word_verdict = kind
+                kind = classify(outcome, cart_verified=True)
+                if kind != word_verdict:
+                    trace.event(
+                        "cart_verdict_override", was=word_verdict, now=kind
+                    )
+            if verified is not None and kind != "confabulated":
+                # The real cart was read before and after this turn's writes:
+                # say what it shows, not what the model narrated. A change it
+                # shows also clears a word-matching "no such change" verdict;
+                # an unchanged cart leaves a claimed change to the line below.
+                final_text = await self._replace_with_cart_line(
+                    session.session_id, session.room_id, new_history, verified.line,
+                    trace,
+                )
+            elif kind == "confabulated":
                 # Confabulation wins and short-circuits: the fabricated reply is
                 # replaced by a canned in-language line, so a language check on
                 # it would be moot (and would re-rewrite the same slot).
                 final_text = await self._handle_confabulation(
                     session.session_id, session.room_id, new_history, trace
-                )
-            elif (
-                cart_text := await self._verified_cart_line(
-                    session.session_id, envelope, outcome, trace
-                )
-            ) is not None:
-                # The real cart was read before and after this turn's writes:
-                # say what it shows, not what the model narrated. Outcome kept.
-                final_text = await self._replace_with_cart_line(
-                    session.session_id, session.room_id, new_history, cart_text,
-                    trace,
                 )
             elif claimed_a_change_it_did_not_make(outcome):
                 # Reached when the turn classified as something else -- almost
@@ -2539,7 +2553,7 @@ class Organizer:
 
     async def _verified_cart_line(
         self, session_id: str, envelope: CallEnvelope, outcome: TurnRecord, trace
-    ) -> str | None:
+    ) -> _VerifiedCart | None:
         """The line to speak from this turn's verified cart change, or None
         to leave the reply to the existing guards."""
         turn = _TURN_CART.get()
@@ -2566,7 +2580,7 @@ class Organizer:
             line=line,
             elapsed_ms=elapsed_ms,
         )
-        return line
+        return _VerifiedCart(line=line, changed=bool(changes))
 
     async def _replace_with_cart_line(
         self,
