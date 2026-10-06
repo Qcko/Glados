@@ -394,12 +394,20 @@ function cartHeader(): HTMLElement {
 
 function cartRow(line: CartReviewLine): HTMLElement {
   const row = element("div", "confirm-cart-row");
-  const pack = line.pack_of && line.pack_of > 1 ? ` (packs of ${line.pack_of})` : "";
   const name = element("span", "confirm-cart-name confirm-shop-text", visible(line.name));
   name.dir = "ltr";
   name.title = "from the shop";
-  row.append(element("span", "confirm-cart-qty", `${line.quantity}${pack}`), name);
+  row.append(element("span", "confirm-cart-qty", cartQuantity(line)), name);
   return row;
+}
+
+// Quantity is units. The pack count goes beside it only when the pack size
+// divides exactly -- never a rounded pack figure (same rule as cart_verify).
+function cartQuantity(line: CartReviewLine): string {
+  const pack = line.pack_of ?? 1;
+  if (pack <= 1 || line.quantity % pack !== 0) return `${line.quantity}`;
+  const packs = line.quantity / pack;
+  return `${line.quantity} (${packs} ${packs === 1 ? "pack" : "packs"} of ${pack})`;
 }
 
 function cartTotal(cart: CartReviewPayload): HTMLElement {
