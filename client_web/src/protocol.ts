@@ -8,6 +8,7 @@ export interface Hello {
   room_id: string;
   role: Role;
   token: string;
+  capabilities?: string[];
 }
 
 export interface UserText {
@@ -116,6 +117,24 @@ export interface ToolConfirmRequest {
   args_summary: Record<string, unknown>;
   ttl_s: number;
   arg_names?: Record<string, string>;
+  cart?: CartReviewPayload | null;
+}
+
+// The real cart read by the harness for a money step
+// (DESIGN-checkout-reconcile.md). Totals are decimal STRINGS, never parsed.
+export interface CartReviewLine {
+  product_id: string;
+  name: string;
+  quantity: number;
+  pack_of?: number | null;
+}
+
+export interface CartReviewPayload {
+  lines: CartReviewLine[];
+  line_count: number;
+  item_count?: number | null;
+  order_value?: string | null;
+  estimated_total?: string | null;
 }
 
 export interface ToolConfirmResolved {

@@ -3,12 +3,16 @@ client_id = "desk-ui"
 room_id = "desk"
 role = "ui"
 default_user = "qcko"
+# May show the checkout cart review (DESIGN-checkout-reconcile.md); counts
+# only when the client's hello also declares it.
+capabilities = ["cart_view"]
 
 [[clients]]
 client_id = "desk2-ui"
 room_id = "desk2"
 role = "ui"
 default_user = "qcko"
+capabilities = ["cart_view"]
 
 [[clients]]
 client_id = "livingroom-mic"

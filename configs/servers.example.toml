@@ -342,8 +342,10 @@ timeout_s = 400.0
 
 [server.tool_overlays.set_delivery_slot]
 mutating = true
-# Last automated step before payment; ungated for the same reason as the
-# cart writes -- manual payment is the safety boundary.
+# Last automated step before payment: confirmed on a cart_view desk screen
+# showing the real cart, bound to it (DESIGN-checkout-reconcile.md). Required
+# on a cart_read server -- without it the server is refused at startup.
+money_step = true
 timeout_s = 400.0
 
 # --- Local catalog (no network -- cached JSON) --------------------------

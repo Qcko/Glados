@@ -170,6 +170,26 @@ dialog.confirm:focus { outline: none; }
   font-family: ui-monospace, monospace; font-size: .8rem;
 }
 .confirm-arg { display: grid; grid-template-columns: max-content 1fr; gap: .75rem; padding: .15rem 0; }
+.confirm-cart {
+  margin: 0 1rem .6rem; display: flex; flex-direction: column; min-height: 0;
+  border: 1px solid var(--line); border-radius: 4px; font-size: .8rem;
+}
+.confirm-cart[hidden] { display: none; }
+.confirm-cart-heading { margin: 0; padding: .4rem .5rem 0; font-size: .85rem; }
+.confirm-cart-count { padding: 0 .5rem .3rem; color: var(--muted); font-size: .7rem; }
+.confirm-cart-lines { max-height: 30vh; overflow: auto; }
+.confirm-cart-row {
+  display: grid; grid-template-columns: 6rem 1fr; gap: .75rem;
+  min-height: 1.6rem; max-height: 3.2rem; overflow: hidden; align-items: start;
+  padding: .15rem .5rem; border-top: 1px solid var(--line);
+}
+.confirm-cart-head { color: var(--muted); font-size: .65rem; text-transform: uppercase; letter-spacing: .06em; }
+.confirm-cart-qty { font-variant-numeric: tabular-nums; }
+.confirm-shop-text { unicode-bidi: isolate; overflow-wrap: anywhere; color: var(--muted); font-style: italic; }
+.confirm-cart-total {
+  flex: none; padding: .4rem .5rem; border-top: 2px solid var(--line);
+  font-weight: 600; font-variant-numeric: tabular-nums;
+}
 .confirm-key, .confirm-value { unicode-bidi: isolate; overflow-wrap: anywhere; }
 .confirm-key { color: var(--muted); }
 .confirm-value { color: var(--tool); }

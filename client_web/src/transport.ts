@@ -78,6 +78,7 @@ export class Transport {
         room_id: s.roomId,
         role: "ui",
         token: s.token,
+        capabilities: ["cart_view"],
       }));
       this.attempt = 0;
       this.state.set({ kind: "ready", clientId: s.clientId, roomId: s.roomId });

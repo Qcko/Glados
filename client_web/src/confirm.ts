@@ -4,7 +4,13 @@
 // escaped so it cannot fake a row, a button or a reordering.
 
 import { ConfirmState, DEADLINE_MARGIN_MS, type LiveRequest } from "./confirm_state";
-import type { ServerMessage, ToolConfirmRequest, ToolConfirmResolved } from "./protocol";
+import type {
+  CartReviewLine,
+  CartReviewPayload,
+  ServerMessage,
+  ToolConfirmRequest,
+  ToolConfirmResolved,
+} from "./protocol";
 
 const CLIP_CHARS = 300;
 const HIDDEN_TITLE = "(!) Confirmation needed";
@@ -57,6 +63,7 @@ export class ConfirmDialog {
   private readonly dialog = element("dialog", "confirm") as HTMLDialogElement;
   private readonly heading = element("h2", "confirm-heading");
   private readonly args = element("div", "confirm-args");
+  private readonly cart = element("section", "confirm-cart");
   private readonly bar = element("div", "confirm-bar");
   private readonly status = element("p", "confirm-status");
   private readonly stopButton = button("confirm-stop", "stop turn");
@@ -104,7 +111,8 @@ export class ConfirmDialog {
     this.heading.id = "confirm-heading";
     this.dialog.setAttribute("aria-labelledby", this.heading.id);
     this.dialog.tabIndex = -1;
-    this.dialog.append(this.heading, lede, argsLabel, this.args, countdown, this.status, footer);
+    this.cart.hidden = true;
+    this.dialog.append(this.heading, lede, this.cart, argsLabel, this.args, countdown, this.status, footer);
     document.body.append(this.dialog);
   }
 
@@ -142,6 +150,7 @@ export class ConfirmDialog {
 
   private fill(request: ToolConfirmRequest): void {
     this.heading.textContent = `Allow ${visible(request.tool)}?`;
+    this.fillCart(request.cart ?? null);
     this.args.replaceChildren();
     const entries = Object.entries(request.args_summary ?? {});
     if (entries.length === 0) this.args.append(element("div", "confirm-arg", "(no arguments)"));
@@ -150,6 +159,26 @@ export class ConfirmDialog {
       this.appendArgument(key, value, names[key]),
     ).length;
     this.state.setUnexpanded(clipped);
+  }
+
+  // The cart at checkout (DESIGN-checkout-reconcile.md "The modal"). Every
+  // label is this template's own; the shop's product name is the only free
+  // text, one isolated cell per line. The total sits in a footer outside the
+  // scrolling body, so no name can ever render beside it.
+  private fillCart(cart: CartReviewPayload | null): void {
+    this.cart.replaceChildren();
+    this.cart.hidden = cart === null;
+    if (cart === null) return;
+    const count = cart.lines.length;
+    const lines = element("div", "confirm-cart-lines");
+    for (const line of cart.lines) lines.append(cartRow(line));
+    this.cart.append(
+      element("h3", "confirm-cart-heading", "Cart at checkout"),
+      element("div", "confirm-cart-count", `${count} ${count === 1 ? "line" : "lines"}`),
+      cartHeader(),
+      lines,
+      cartTotal(cart),
+    );
   }
 
   private appendArgument(key: string, value: unknown, name?: string): boolean {
@@ -300,6 +329,7 @@ export class ConfirmDialog {
     if (!this.state.end()) return;
     this.clearTimers();
     if (this.dialog.open) this.dialog.close();
+    this.fillCart(null);
     this.clearSignal();
     this.hooks.note(note);
     this.hooks.restoreFocus();
@@ -350,6 +380,33 @@ function resolvedNote(live: LiveRequest, msg: ToolConfirmResolved): string {
   const verdict = msg.granted ? "allowed" : "denied";
   const by = msg.via === "voice" ? "by voice" : "on screen";
   return `${tool} ${verdict} ${by}`;
+}
+
+function cartHeader(): HTMLElement {
+  const row = element("div", "confirm-cart-row confirm-cart-head");
+  row.append(
+    element("span", "confirm-cart-qty", "qty"),
+    element("span", "confirm-cart-name", "product (from the shop)"),
+  );
+  return row;
+}
+
+function cartRow(line: CartReviewLine): HTMLElement {
+  const row = element("div", "confirm-cart-row");
+  const pack = line.pack_of && line.pack_of > 1 ? ` (packs of ${line.pack_of})` : "";
+  const name = element("span", "confirm-cart-name confirm-shop-text", visible(line.name));
+  name.dir = "ltr";
+  name.title = "from the shop";
+  row.append(element("span", "confirm-cart-qty", `${line.quantity}${pack}`), name);
+  return row;
+}
+
+function cartTotal(cart: CartReviewPayload): HTMLElement {
+  const footer = element("div", "confirm-cart-total");
+  const total = cart.estimated_total ?? cart.order_value;
+  const items = typeof cart.item_count === "number" ? `${cart.item_count} items, ` : "";
+  footer.textContent = total ? `${items}total EUR ${total}` : `${items}total not reported by the shop`;
+  return footer;
 }
 
 function visible(text: string): string {

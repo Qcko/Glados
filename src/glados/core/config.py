@@ -464,6 +464,11 @@ class GladosConfig(BaseModel):
     tts: TTSConfig = TTSConfig()
 
 
+# Tools that book or move money. On a cart_read server each must carry
+# `money_step`, or the server is refused at startup.
+KNOWN_MONEY_TOOLS = frozenset({"set_delivery_slot"})
+
+
 class ToolOverlay(BaseModel):
     """GLaDOS-only flags applied on top of a tool spec fetched via real
     MCP `tools/list`. The MCP wire schema has no slot for trust/confirm
@@ -633,6 +638,30 @@ class ServerEntry(BaseModel):
     # anything else fails parse and the server is simply never verified.
     cart_read: str | None = None
 
+    @model_validator(mode="after")
+    def _money_step_needs_cart_read(self) -> "ServerEntry":
+        """A money step is confirmed against the cart this server reads; with
+        no cart read it could never be confirmed, so refuse the config."""
+        money = [n for n, o in self.tool_overlays.items() if o.money_step]
+        if money and not self.cart_read:
+            raise ValueError(
+                f"server {self.id!r}: money_step on {money} needs cart_read "
+                "(DESIGN-checkout-reconcile.md)"
+            )
+        return self
+
+    def ungated_money_tools(self, tool_names: list[str]) -> list[str]:
+        """Known money tools this cart server exposes without `money_step` --
+        a missing overlay line must not silently un-gate the booking."""
+        if not self.cart_read:
+            return []
+        return sorted(
+            name
+            for name in tool_names
+            if name in KNOWN_MONEY_TOOLS
+            and not (self.tool_overlays.get(name) or ToolOverlay()).money_step
+        )
+
     def apply_flags(self, spec: "ToolSpec") -> "ToolSpec":
         """Return `spec` with the GLaDOS-only flags this config declares.
 
@@ -716,6 +745,17 @@ class ClientBinding(BaseModel):
     # Capabilities the operator grants this client (ARCH section 13, v7). A
     # capability counts only when the client's hello also declares it.
     capabilities: list[str] = []
+
+    @model_validator(mode="after")
+    def _screens_only(self) -> "ClientBinding":
+        """Every capability today is something shown on a screen; granting
+        one to a mic or speaker is a config mistake, so refuse it loudly."""
+        if self.capabilities and self.role != "ui":
+            raise ValueError(
+                f"client {self.client_id!r}: capabilities {self.capabilities} "
+                f"need role 'ui', not {self.role!r}"
+            )
+        return self
 
 
 class QuietHours(BaseModel):

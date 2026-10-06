@@ -47,18 +47,22 @@ class Harness:
 
 @asynccontextmanager
 async def desk_organizer(
-    tmp: Path, *, llm: Any, mcp: MCPRegistry | None = None, **kwargs: Any
+    tmp: Path,
+    *,
+    llm: Any,
+    mcp: MCPRegistry | None = None,
+    bindings: tuple[ClientBinding, ...] = (DESK_BINDING,),
+    **kwargs: Any,
 ) -> AsyncIterator[Harness]:
     """An Organizer bound to the single desk client, closed on the way out.
 
-    Single-binding by construction: tests needing several clients or rooms
-    build their own, and this grows a `bindings` parameter the day one of
-    them is migrated rather than in advance of it.
+    The single desk client unless `bindings` names several clients or rooms.
 
     `kwargs` goes straight to the constructor, so a test needing a
     `tool_router` or a `specialist_llm` names just that.
     """
     sink: list[tuple[str, dict]] = []
+    by_id = {b.client_id: b for b in bindings}
 
     async def send(client_id: str, msg: BaseModel) -> None:
         sink.append((client_id, msg.model_dump()))
@@ -69,8 +73,8 @@ async def desk_organizer(
         traces=TraceStore(tmp),
         sessions=SessionRegistry(),
         send=send,
-        binding_for_client=lambda cid: DESK_BINDING if cid == CLIENT_ID else None,
-        clients_in_room=lambda rid: [CLIENT_ID] if rid == ROOM_ID else [],
+        binding_for_client=lambda cid: by_id.get(cid),
+        clients_in_room=lambda rid: [b.client_id for b in bindings if b.room_id == rid],
         **kwargs,
     )
     try:

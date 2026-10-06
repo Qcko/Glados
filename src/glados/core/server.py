@@ -793,6 +793,16 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
                 )
                 await server.aclose()
                 continue
+            ungated = entry.ungated_money_tools([s.name for s in specs])
+            if ungated:
+                log.error(
+                    "stdio server %s REFUSED: %s books money but lacks money_step "
+                    "in servers.toml (DESIGN-checkout-reconcile.md)",
+                    entry.id,
+                    ", ".join(ungated),
+                )
+                await server.aclose()
+                continue
             for spec in specs:
                 # Real MCP can't carry GLaDOS-only flags; they are merged from
                 # servers.toml here. Applied to EVERY tool, not only those with
