@@ -53,6 +53,7 @@ from .protocols import (
     AssistantDelta,
     Cancelled,
     Done,
+    ReplyRetracted,
     RouteNotice,
     ToolCall,
     ToolConfirmRequest,
@@ -1198,6 +1199,7 @@ class Organizer:
         # `_history_max_turns`; the dict itself is bounded by
         # `_MAX_TRACKED_SESSIONS` so dead sessions can't grow it without limit.
         self._history: dict[str, list[LLMMessage]] = {}
+        self._streamed_reply: set[str] = set()
         self._history_max_turns = history_max_turns
         # Sessions whose retained history contains `<external>` bytes. The
         # untrusted-content confirmation gate has to outlive the turn that read
@@ -1522,6 +1524,7 @@ class Organizer:
                 self._utterance_seq.get(session.session_id, 0) + 1
             )
             _TURN_CART.set(TurnCart())
+            self._streamed_reply.discard(session.session_id)
             await self._await_llm_warm(trace)
             await self._broadcast(session.room_id, Welcome(session_id=session.session_id))
             await self._broadcast(
@@ -1591,6 +1594,9 @@ class Organizer:
                 # burned two dead passes before this guard. Escalation still
                 # runs, because that swaps the model rather than repeating it.
                 trace.event("tool_scope_fallback_full")
+                await self._retract_streamed_reply(
+                    session.session_id, session.room_id, "retrying with every tool"
+                )
                 final_text, outcome, new_history = await self._drive(
                     llm, session.session_id, session.room_id, envelope, text,
                     trace, history, all_specs, outcome.failures_to_carry(),
@@ -1623,19 +1629,6 @@ class Organizer:
                     text, trace, history, specs, outcome.failures_to_carry(),
                 )
                 kind = classify(outcome)
-                if kind != "confabulated":
-                    # The claim already streamed to the chat surface before the
-                    # retry ran, and a successful retry takes no scrub branch --
-                    # so without this the transcript shows the false line and
-                    # then a true one, with nothing marking the first as dead.
-                    # Voice is unaffected; only `final_text` is spoken.
-                    await self._broadcast(
-                        session.room_id,
-                        AssistantDelta(
-                            session_id=session.session_id,
-                            text=" (Correction -- that had not happened when I said it.) ",
-                        ),
-                    )
             # BEFORE the scrub chain below, so this sees the MODEL's reply.
             # Three of those branches replace it with a line of ours, and none
             # of our lines match _CLAIM_RE -- logging after them would harvest
@@ -2081,11 +2074,17 @@ class Organizer:
 
         A turn the user refused at the confirmation gate never escalates
         either, whatever else went wrong in it: the specialist would re-issue
-        the refused call and ask the same question again."""
+        the refused call and ask the same question again.
+
+        A specialist that aliases the primary never escalates: the server hands
+        over the SAME instance when the tags match, and re-driving the same
+        model from the same history only rerolls the sampling. Prod 07-10-2026
+        repeated a false "Slot booked" that way."""
         return (
             target == "primary"
             and self._escalate_on_failed
             and self._specialist_llm is not None
+            and self._specialist_llm is not self.llm
             and not outcome.may_have_mutated()
             and not outcome.budget_exceeded
             and not outcome.confirm_refused
@@ -2127,6 +2126,9 @@ class Organizer:
         would classify under different rules on the retry than on the first
         attempt."""
         trace.event("confabulation_retry")
+        await self._retract_streamed_reply(
+            session_id, room_id, "that had not happened when I said it"
+        )
         nudge = LLMMessage(role="system", content=_UNFINISHED_TURN_NUDGE)
         final_text, outcome, new_history = await self._drive(
             llm, session_id, room_id, envelope, text, trace,
@@ -2146,6 +2148,9 @@ class Organizer:
         earlier_failures: dict[WriteKey, MCPCallResult],
     ) -> tuple[str, TurnRecord, list[LLMMessage]]:
         trace.event("escalate", reason="primary outcome failed")
+        await self._retract_streamed_reply(
+            session_id, room_id, "primary turn failed"
+        )
         await self._broadcast(
             room_id,
             RouteNotice(
@@ -2529,8 +2534,9 @@ class Organizer:
         if history and history[-1].role == "assistant":
             history[-1] = LLMMessage(role="assistant", content=reply)
         trace.event("confabulation_suppressed", replacement=reply)
+        await self._retract_streamed_reply(session_id, room_id, "claimed undone work")
         await self._broadcast(
-            room_id, AssistantDelta(session_id=session_id, text=" " + reply)
+            room_id, AssistantDelta(session_id=session_id, text=reply)
         )
         return reply
 
@@ -2589,8 +2595,9 @@ class Organizer:
         if history and history[-1].role == "assistant":
             history[-1] = LLMMessage(role="assistant", content=reply)
         trace.event("unbacked_claim_suppressed", replacement=reply)
+        await self._retract_streamed_reply(session_id, room_id, "claim not backed")
         await self._broadcast(
-            room_id, AssistantDelta(session_id=session_id, text=" " + reply)
+            room_id, AssistantDelta(session_id=session_id, text=reply)
         )
         return reply
 
@@ -4153,7 +4160,24 @@ class Organizer:
             )
         return capped.content
 
+    async def _retract_streamed_reply(
+        self, session_id: str, room_id: str, reason: str
+    ) -> None:
+        if session_id not in self._streamed_reply:
+            return
+        self._streamed_reply.discard(session_id)
+        await self._broadcast(
+            room_id, ReplyRetracted(session_id=session_id, reason=reason)
+        )
+
+    def _note_streamed_reply(self, msg: BaseModel) -> None:
+        if isinstance(msg, AssistantDelta) and msg.text.strip():
+            self._streamed_reply.add(msg.session_id)
+        elif isinstance(msg, (Done, Cancelled)):
+            self._streamed_reply.discard(msg.session_id)
+
     async def _broadcast(self, room_id: str, msg: BaseModel) -> None:
+        self._note_streamed_reply(msg)
         for cid in self.clients_in_room(room_id):
             await self.send(cid, msg)
         # Read-only admin tap, AFTER room members so a slow/dead admin socket

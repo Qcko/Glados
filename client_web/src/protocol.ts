@@ -53,6 +53,12 @@ export interface AssistantDelta {
   text: string;
 }
 
+export interface ReplyRetracted {
+  type: "reply_retracted";
+  session_id: string;
+  reason: string;
+}
+
 export interface ToolCall {
   type: "tool_call";
   session_id: string;
@@ -149,6 +155,7 @@ export type ServerMessage =
   | Welcome
   | UserTranscript
   | AssistantDelta
+  | ReplyRetracted
   | ToolCall
   | ToolResult
   | TtsChunk

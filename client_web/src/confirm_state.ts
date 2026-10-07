@@ -26,6 +26,7 @@ const SESSION_FRAMES: ReadonlySet<string> = new Set([
   "tool_call",
   "tool_result",
   "assistant_delta",
+  "reply_retracted",
   "route_notice",
   "turn_outcome",
   "done",

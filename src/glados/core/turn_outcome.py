@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal
 
+from .config import KNOWN_MONEY_TOOLS
+
 if TYPE_CHECKING:
     from ..mcp.registry import MCPCallResult
 
@@ -307,7 +309,61 @@ def classify(turn: TurnRecord, *, cart_verified: bool = False) -> TurnOutcomeKin
 
 
 def _unbacked_claim(turn: TurnRecord, cart_verified: bool) -> bool:
+    if claimed_a_booking_it_did_not_make(turn):
+        return True
     return not cart_verified and claimed_a_change_it_did_not_make(turn)
+
+
+def claimed_a_booking_it_did_not_make(turn: TurnRecord) -> bool:
+    """The reply says a slot was booked, and no booking tool landed this turn.
+
+    Prod 07-10-2026: "book some slot for Sunday" -> list_delivery_slots only,
+    then "Slot booked: Sunday 12:00-14:00 for EUR 9." The cart claim check
+    never saw it ("booked" is not a cart verb), so the turn read as `failed`
+    and was escalated into the same lie a second time.
+
+    Backed only by a booking tool, never by any landed write: in "add milk and
+    book Sunday" the milk add must not vouch for an invented booking. No
+    subject matching -- a booking's arguments are a GUID, a date, a time and
+    a fee, none of which a spoken reply repeats as words."""
+    text = _plain(turn.final_text)
+    if not any(_booking_claim(s) for s in _sentences_with_endings(text)):
+        return False
+    return not any(_landed(t) and _is_booking_tool(t) for t in turn.tools)
+
+
+def _plain(text: str) -> str:
+    return re.sub(r"[*_]", "", text.replace("\u2019", "'"))
+
+
+# Completion frames only: "I booked", "slot booked", "that's booked in", "is
+# booked for you". A slot listing ("Saturday is fully booked", "booked up",
+# "1 left, reserved for members") reports no work of this turn's and matches
+# none of them. `scheduled` and `confirmed` count only with a delivery noun:
+# "I've scheduled a reminder" is another tool's honest report.
+_BOOKING_CLAIM_RE = re.compile(
+    r"\b(?:i|we)(?:'ve|\s+have)?\s+(?:\w+\s+){0,3}?(?:booked|reserved)\b"
+    r"|\b(?:slot|delivery|booking|it|it's|that|that's)\s+"
+    r"(?:is\s+|has\s+been\s+|was\s+|now\s+)*(?:booked|reserved)\b(?!\s+up)"
+    r"|\b(?:slot|delivery|booking)\s+(?:is\s+|has\s+been\s+|was\s+|now\s+)*"
+    r"(?:confirmed|scheduled)\b"
+    r"|\bis\s+(?:now\s+)?booked\b(?!\s+up)"
+    r"|\bbooked\s+(?:in\s+)?for\s+you\b"
+    r"|^\s*(?:booked|reserved)\b",
+    re.IGNORECASE,
+)
+
+
+def _booking_claim(sentence: str) -> bool:
+    return bool(
+        not _ends_on_question(sentence)
+        and _BOOKING_CLAIM_RE.search(sentence)
+        and not _NOT_THIS_TURNS_DOING.search(sentence)
+    )
+
+
+def _is_booking_tool(tool: ToolRecord) -> bool:
+    return tool.tool.rsplit(".", 1)[-1] in KNOWN_MONEY_TOOLS
 
 
 def said_nothing(turn: TurnRecord) -> bool:

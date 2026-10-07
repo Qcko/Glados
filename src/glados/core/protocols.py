@@ -100,6 +100,17 @@ class AssistantDelta(BaseModel):
     text: str
 
 
+class ReplyRetracted(BaseModel):
+    """The reply text streamed so far this turn is withdrawn: the harness is
+    about to re-drive the turn, or is replacing a reply it found false. Chat
+    surfaces mark the live bubble dead and open a fresh one for what follows.
+    Voice is unaffected -- only the final text is ever spoken."""
+
+    type: Literal["reply_retracted"] = "reply_retracted"
+    session_id: str
+    reason: str
+
+
 class ToolCall(BaseModel):
     type: Literal["tool_call"] = "tool_call"
     session_id: str
@@ -311,6 +322,7 @@ ServerMessage = Annotated[
     Welcome
     | UserTranscript
     | AssistantDelta
+    | ReplyRetracted
     | ToolCall
     | ToolResult
     | TtsChunk

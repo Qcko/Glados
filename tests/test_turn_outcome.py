@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from glados.core.turn_outcome import (
     TurnRecord,
+    claimed_a_booking_it_did_not_make,
     claimed_a_change_it_did_not_make,
     classify,
     denied_a_removal_that_landed,
@@ -880,3 +881,72 @@ def test_a_denial_of_the_reported_removed_item_is_caught() -> None:
                      args={"productId": "100806893"}, removes=True,
                      result_subjects=("Dunnes Stores Irish Low Fat Milk 3L",))
     assert denied_a_removal_that_landed(turn)
+
+
+# ---- Booking claims (prod 07-10-2026: "Slot booked" after a listing only) ----
+
+
+def _listed_slots(final_text: str) -> TurnRecord:
+    turn = _turn(final_text=final_text, action_intent=True)
+    turn.record_tool("dunnes.list_delivery_slots", ok=True)
+    return turn
+
+
+def test_a_booking_claim_after_only_a_listing_is_confabulated() -> None:
+    turn = _listed_slots("Slot booked: **Sunday 12:00-14:00 for EUR 9**.")
+    assert claimed_a_booking_it_did_not_make(turn)
+    assert classify(turn) == "confabulated"
+
+
+def test_first_person_booking_claim_is_caught() -> None:
+    assert classify(_listed_slots("I've booked the 12:00 slot for you.")) == "confabulated"
+
+
+def test_a_booking_claim_is_backed_by_a_landed_booking() -> None:
+    turn = _listed_slots("Slot booked: Sunday 12:00-14:00 for EUR 9.")
+    turn.record_tool("dunnes.set_delivery_slot", ok=True, mutating=True)
+    assert not claimed_a_booking_it_did_not_make(turn)
+    assert classify(turn) == "done"
+
+
+def test_a_cart_write_does_not_vouch_for_an_invented_booking() -> None:
+    turn = _turn(final_text="Milk added. Slot booked for Sunday.", action_intent=True)
+    turn.record_tool("dunnes.add_to_cart_by_name", ok=True, mutating=True, args={"query": "milk"})
+    assert claimed_a_booking_it_did_not_make(turn)
+    assert classify(turn) == "confabulated"
+
+
+def test_slot_listings_are_not_booking_claims() -> None:
+    for honest in (
+        "Saturday is fully booked, Sunday has 12:00-14:00.",
+        "Sunday is booked up.",
+        "08:00-10:00 has 1 left.",
+        "Nothing is booked yet.",
+        "Shall I book the 12:00 slot?",
+        "Want me to reserve it?",
+        "The 12:00 slot is available for EUR 9.",
+    ):
+        assert not claimed_a_booking_it_did_not_make(_listed_slots(honest)), honest
+
+
+def test_booking_claims_in_every_completion_frame_are_caught() -> None:
+    for claim in (
+        "I booked the earliest available slot for Sunday.",
+        "Booked Sunday, only 2 left.",
+        "That's booked in for Sunday.",
+        "It\u2019s booked.",
+        "**Booked** for Sunday 12:00.",
+        "Sunday 12:00 is booked for you.",
+        "I've gone ahead and booked the 12:00 slot.",
+        "Your delivery is confirmed for Sunday.",
+    ):
+        assert claimed_a_booking_it_did_not_make(_listed_slots(claim)), claim
+
+
+def test_other_tools_scheduling_or_confirming_is_not_a_booking_claim() -> None:
+    for honest in (
+        "I've scheduled a reminder for 5.",
+        "It's confirmed: the lights are off.",
+    ):
+        turn = _turn(final_text=honest)
+        assert not claimed_a_booking_it_did_not_make(turn), honest

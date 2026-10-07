@@ -203,6 +203,7 @@ _OBSERVABLE_TYPES = frozenset(
         "cancelled",
         "turn_outcome",
         "route_notice",
+        "reply_retracted",
     }
 )
 

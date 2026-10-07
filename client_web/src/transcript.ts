@@ -77,6 +77,9 @@ export class Transcript {
         this.scroll();
         break;
       }
+      case "reply_retracted":
+        this.retractLiveBubble(msg.session_id, msg.reason);
+        break;
       case "tool_call":
         this.toolRow(
           `-> ${msg.server}.${msg.name}(${summariseArgs(msg.args)})`,
@@ -135,6 +138,15 @@ export class Transcript {
 
   systemNote(text: string): void {
     this.row("system", text);
+  }
+
+  private retractLiveBubble(sessionId: string, reason: string): void {
+    const bubble = this.liveBubbles.get(sessionId);
+    if (!bubble) return;
+    bubble.classList.add("retracted");
+    bubble.title = `retracted: ${reason}`;
+    bubble.setAttribute("aria-label", `retracted reply: ${bubble.textContent ?? ""}`);
+    this.liveBubbles.delete(sessionId);
   }
 
   private outcomeBadge(sessionId: string, outcome: BadgedOutcome): void {
