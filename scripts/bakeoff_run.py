@@ -429,6 +429,111 @@ def _cart_product_ids(rep: TurnReport) -> list[str] | None:
     return None
 
 
+@dataclass(frozen=True)
+class CartLine:
+    product_id: str
+    name: str
+    quantity: int
+
+
+async def _snapshot_cart(ws, moment: str) -> list[CartLine] | None:
+    print(f"=== CART SNAPSHOT ({moment}) ===")
+    rep = await _run_turn(ws, _VERIFY_PROMPT)
+    _print_turn(rep)
+    print()
+    return _cart_lines(rep)
+
+
+def _cart_lines(rep: TurnReport) -> list[CartLine] | None:
+    """The lines of the turn's last `view_cart` payload. None when the model
+    never called it OR the payload holds no `lines` list -- an error or a
+    logged-out page must never read as an empty cart. Read from the tool's
+    own payload, never the reply."""
+    for name, payload in reversed(rep.tool_payloads):
+        if name == "view_cart":
+            lines = _find_lines_list(payload)
+            return None if lines is None else [_as_cart_line(line) for line in lines if isinstance(line, dict)]
+    return None
+
+
+def _find_lines_list(node: object) -> list | None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if str(key).lower() == "lines" and isinstance(value, list):
+                return value
+        return next((found for v in node.values() if (found := _find_lines_list(v)) is not None), None)
+    if isinstance(node, list):
+        return next((found for item in node if (found := _find_lines_list(item)) is not None), None)
+    if isinstance(node, str):
+        try:
+            return _find_lines_list(json.loads(node))
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _as_cart_line(line: dict) -> CartLine:
+    lowered = {str(k).lower(): v for k, v in line.items()}
+    return CartLine(
+        product_id=str(lowered.get("productid")),
+        name=str(lowered.get("name", "?")),
+        quantity=_as_quantity(lowered.get("quantity")),
+    )
+
+
+def _as_quantity(value: object) -> int:
+    try:
+        return round(float(value or 0))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _cart_diff(before: list[CartLine], after: list[CartLine]) -> list[str]:
+    """What a person must change to put `after` back to `before`, one line per
+    product, by productId; quantities are summed across duplicate lines."""
+    start, end = _units_by_product(before), _units_by_product(after)
+    names = {line.product_id: line.name for line in before + after}
+    changes: list[str] = []
+    for product_id in sorted(start.keys() | end.keys(), key=lambda p: (names[p], p)):
+        was, now = start.get(product_id, 0), end.get(product_id, 0)
+        if was != now:
+            changes.append(f"{names[product_id]} ({product_id}): {was} at start, {now} now")
+    return changes
+
+
+def _units_by_product(lines: list[CartLine]) -> dict[str, int]:
+    units: dict[str, int] = {}
+    for line in lines:
+        units[line.product_id] = units.get(line.product_id, 0) + line.quantity
+    return units
+
+
+def _listed(lines: list[CartLine]) -> str:
+    return "\n".join(f"      {line.name} ({line.product_id}) x{line.quantity}" for line in lines)
+
+
+def _refuse_dirty_cart(lines: list[CartLine]) -> None:
+    raise SystemExit(
+        "CART NOT EMPTY: the suite writes to this real cart and nothing puts it "
+        f"back, so it refuses to start on one that holds:\n{_listed(lines)}\n"
+        "Empty it first, or pass --allow-dirty-cart and restore it by hand from "
+        "the diff printed at the end."
+    )
+
+
+def _report_cart_changes(before: list[CartLine], after: list[CartLine] | None) -> None:
+    if after is None:
+        print("=== CART vs START: UNKNOWN -- the model never called view_cart; check the cart by hand ===")
+        return
+    changes = _cart_diff(before, after)
+    if not changes:
+        print("=== CART vs START: unchanged ===")
+        return
+    print("=== CART vs START: restore these by hand ===")
+    for change in changes:
+        print(f"    {change}")
+
+
 def _collect_values(node: object, wanted: str) -> list[str]:
     """Recursive value collection by key, case-insensitive. Nested because the
     cart may be wrapped (`{"cart": {"lines": [...]}}`) and the wrapper is not
@@ -506,24 +611,44 @@ async def run(args: argparse.Namespace) -> None:
             "role": "ui",
             "token": token,
         }))
-        only = {t.strip().upper() for t in args.only.split(",")} if args.only else None
-        reset_pending = args.reset
-        for test in TESTS:
-            if only is not None and test.id not in only:
-                continue
-            if reset_pending and test.stateful:
-                await _reset_cart(ws)
-                reset_pending = False
-            if test.after_duplicate_window:
-                await _outlast_duplicate_window()
-            note = "  (memory-dependent -- v0 single-turn may not honour this)" if test.memory_dependent else ""
-            print(f"--- {test.id}{note}")
-            print(f"    pass if: {test.criterion}")
-            for prompt in test.prompts:
-                rep = await _run_turn(ws, prompt)
-                _print_turn(rep)
-            print()
+        before = await _snapshot_cart(ws, "before the tests")
+        if before is None:
+            raise SystemExit(
+                "CART SNAPSHOT INCONCLUSIVE: the model never called view_cart, so "
+                "the starting cart is unknown and could not be reported at the end. "
+                "Check the browser session and re-run."
+            )
+        if before and not args.allow_dirty_cart:
+            _refuse_dirty_cart(before)
+        if before:
+            print(f"=== CART AT START (restore to this) ===\n{_listed(before)}\n")
+        try:
+            await _run_tests(ws, args)
+        finally:
+            if before:
+                print(f"=== CART AT START was ===\n{_listed(before)}\n")
+        _report_cart_changes(before, await _snapshot_cart(ws, "after the tests"))
     print("Done. Fill in the 0/1/2 scorecard in MODEL_BAKE_OFF.md from the above.")
+
+
+async def _run_tests(ws, args: argparse.Namespace) -> None:
+    only = {t.strip().upper() for t in args.only.split(",")} if args.only else None
+    reset_pending = args.reset
+    for test in TESTS:
+        if only is not None and test.id not in only:
+            continue
+        if reset_pending and test.stateful:
+            await _reset_cart(ws)
+            reset_pending = False
+        if test.after_duplicate_window:
+            await _outlast_duplicate_window()
+        note = "  (memory-dependent -- v0 single-turn may not honour this)" if test.memory_dependent else ""
+        print(f"--- {test.id}{note}")
+        print(f"    pass if: {test.criterion}")
+        for prompt in test.prompts:
+            rep = await _run_turn(ws, prompt)
+            _print_turn(rep)
+        print()
 
 
 def main() -> None:
@@ -542,7 +667,11 @@ def main() -> None:
     p.add_argument("--token", default=None, help="override the keyring token (dev fixture)")
     p.add_argument("--only", default=None, help="comma-separated test ids to run (e.g. T9,T1) -- runs one at a time")
     p.add_argument("--reset", action="store_true", help="empty + reseed a single-milk cart before the stateful block (LLM-mediated via user_text; clears the persisted server-side cart)")
-    asyncio.run(run(p.parse_args()))
+    p.add_argument("--allow-dirty-cart", action="store_true", help="run even though the cart is not empty at the start; restore it by hand from the end-of-run diff")
+    args = p.parse_args()
+    if args.reset and args.allow_dirty_cart:
+        p.error("--reset empties the cart, which destroys the state --allow-dirty-cart exists to keep")
+    asyncio.run(run(args))
 
 
 if __name__ == "__main__":
