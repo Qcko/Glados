@@ -310,6 +310,8 @@ async def _run_turn(ws, prompt: str) -> TurnReport:
         kind = msg.get("type")
         if kind == "assistant_delta":
             rep.deltas.append(msg["text"])
+        elif kind == "reply_retracted":
+            rep.deltas.append(" [retracted] ")
         elif kind == "tool_call":
             args = json.dumps(msg.get("args", {}), ensure_ascii=False)
             rep.tool_calls.append(f"{msg['server']}.{msg['name']}({args})")
