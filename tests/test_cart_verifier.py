@@ -14,6 +14,8 @@ from glados.core.cart_verifier import CartVerifier, TurnCart
 from glados.mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
 from tests.organizer_harness import CLIENT_ID, desk_organizer, trace_events
 
+RETRACTED = "<retracted>"
+
 MILK = "100806893"
 EGGS = "100806924"
 SHOP_NAME = "Dunnes Stores Irish Low Fat Milk 3L"
@@ -353,7 +355,11 @@ async def _cart_turn(
         llm._reply = "ok"
         await h.org.handle_user_text(CLIENT_ID, "thanks")
         await h.org.flush()
-        deltas = [m["text"] for _, m in h.sink if m.get("type") == "assistant_delta"]
+        deltas = [
+            m.get("text", RETRACTED)
+            for _, m in h.sink
+            if m.get("type") in ("assistant_delta", "reply_retracted")
+        ]
         outcomes = [m["outcome"] for _, m in h.sink if m.get("type") == "turn_outcome"]
     history = [m.content for m in llm.passes[-1] if m.role == "assistant" and m.content]
     events = trace_events(tmp_path)
@@ -364,7 +370,7 @@ async def test_10_t13_a_removed_line_and_two_remain_is_replaced(tmp_path: Path) 
     lie = "Two 3-litre milks remain."
     deltas, outcomes, history, events = await _cart_turn(tmp_path, lie)
 
-    assert any("(Cart) Took 3 of one item out of your cart." in d for d in deltas)
+    assert deltas[-3:-1] == [RETRACTED, "Took 3 of one item out of your cart."]
     assert "Took 3 of one item out of your cart." in history and lie not in history
     assert outcomes[0] == "done"
     assert "cart_verified" in [e.get("event") for e in events]
@@ -420,7 +426,7 @@ async def test_9_a_failed_read_leaves_the_reply_to_the_existing_chain(tmp_path: 
     deltas, _, history, events = await _cart_turn(tmp_path, reply, read_ok=False)
 
     assert reply in history
-    assert not any("(Cart)" in d for d in deltas)
+    assert RETRACTED not in deltas
     assert "cart_verify_skipped" in [e.get("event") for e in events]
 
 
@@ -437,7 +443,7 @@ async def test_persona_tail_is_spoken_but_never_enters_history(tmp_path: Path) -
     deltas, _, history, _ = await _cart_turn(tmp_path, "Done.", persona=True)
 
     plain = "Took 3 of one item out of your cart."
-    assert any(f"(Cart) {plain} Restraint. How refreshing." in d for d in deltas)
+    assert f"{plain} Restraint. How refreshing." in deltas and RETRACTED in deltas
     assert plain in history
     assert not any("Restraint" in h for h in history)
 

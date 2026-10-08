@@ -2613,9 +2613,9 @@ class Organizer:
         if history and history[-1].role == "assistant":
             history[-1] = LLMMessage(role="assistant", content=reply)
         trace.event("denied_removal_corrected", replacement=reply)
+        await self._retract_streamed_reply(session_id, room_id, "removal denied")
         await self._broadcast(
-            room_id,
-            AssistantDelta(session_id=session_id, text=" (Correction) " + reply),
+            room_id, AssistantDelta(session_id=session_id, text=reply)
         )
         return reply
 
@@ -2845,9 +2845,9 @@ class Organizer:
         the same two egress paths as the other replacements."""
         if history and history[-1].role == "assistant":
             history[-1] = LLMMessage(role="assistant", content=verified.line)
+        await self._retract_streamed_reply(session_id, room_id, "cart verified")
         await self._broadcast(
-            room_id,
-            AssistantDelta(session_id=session_id, text=" (Cart) " + verified.spoken),
+            room_id, AssistantDelta(session_id=session_id, text=verified.spoken)
         )
         return verified.spoken
 
@@ -2866,9 +2866,9 @@ class Organizer:
         if history and history[-1].role == "assistant":
             history[-1] = LLMMessage(role="assistant", content=reply)
         trace.event("misstated_volume_corrected", replacement=reply)
+        await self._retract_streamed_reply(session_id, room_id, "volume misstated")
         await self._broadcast(
-            room_id,
-            AssistantDelta(session_id=session_id, text=" (Correction) " + reply),
+            room_id, AssistantDelta(session_id=session_id, text=reply)
         )
         return reply
 

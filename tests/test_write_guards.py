@@ -34,6 +34,8 @@ from glados.core.write_ledger import WriteLedger, canonical_key, coerce_quantity
 from glados.mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
 from tests.organizer_harness import CLIENT_ID, desk_organizer, trace_events
 
+RETRACTED = "<retracted>"
+
 # ---- utterance cues ---------------------------------------------------------
 
 
@@ -1067,11 +1069,15 @@ async def test_a_false_empty_cart_reply_after_a_real_removal_is_corrected(tmp_pa
     async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
         await _say(h, llm, "Show me what's in my cart and then remove the milk.")
         await _say(h, llm, "thanks")
-        deltas = [m["text"] for _, m in h.sink if m.get("type") == "assistant_delta"]
+        deltas = [
+            m.get("text", RETRACTED)
+            for _, m in h.sink
+            if m.get("type") in ("assistant_delta", "reply_retracted")
+        ]
         outcomes = [m["outcome"] for _, m in h.sink if m.get("type") == "turn_outcome"]
 
     assert len(remove.calls) == 1
-    assert any(_DENIED_REMOVAL_REPLY in d for d in deltas)
+    assert deltas[deltas.index(_DENIED_REMOVAL_REPLY) - 1] == RETRACTED
     assert outcomes[0] == "done"
     history = [m.content for m in llm.passes[-1] if m.role == "assistant" and m.content]
     assert _DENIED_REMOVAL_REPLY in history and "Cart was empty." not in history
@@ -1408,7 +1414,11 @@ async def _volume_turn(tmp_path: Path, reply: str):
     async with desk_organizer(tmp_path, llm=llm, mcp=mcp, escalate_on_failed=False) as h:
         await _say(h, llm, "Add 4 liters of milk to the cart.")
         await _say(h, llm, "thanks")
-        deltas = [m["text"] for _, m in h.sink if m.get("type") == "assistant_delta"]
+        deltas = [
+            m.get("text", RETRACTED)
+            for _, m in h.sink
+            if m.get("type") in ("assistant_delta", "reply_retracted")
+        ]
         outcomes = [m["outcome"] for _, m in h.sink if m.get("type") == "turn_outcome"]
     history = [m.content for m in llm.passes[-1] if m.role == "assistant" and m.content]
     events = [e.get("event") for e in trace_events(tmp_path)]
@@ -1422,7 +1432,8 @@ async def test_an_invented_litre_amount_is_corrected_in_speech_and_history(tmp_p
     tool, deltas, outcomes, history, events = await _volume_turn(tmp_path, lie)
 
     assert len(tool.calls) == 1
-    assert any("(Correction) Added 4 litres of milk." in d for d in deltas)
+    assert RETRACTED in deltas
+    assert deltas[deltas.index(RETRACTED) + 1] == "Added 4 litres of milk."
     assert outcomes[0] == "done"
     assert "Added 4 litres of milk." in history and lie not in history
     assert "misstated_volume_corrected" in events
