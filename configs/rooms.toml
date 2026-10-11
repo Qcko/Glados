@@ -26,6 +26,18 @@ room_id = "livingroom"
 role = "speaker"
 default_user = "qcko"
 
+[[clients]]
+client_id = "kitchen-mic"
+room_id = "kitchen"
+role = "mic"
+default_user = "qcko"
+
+[[clients]]
+client_id = "kitchen-speaker"
+room_id = "kitchen"
+role = "speaker"
+default_user = "qcko"
+
 # Optional per-room intercom policy (DESIGN-cross-room-delivery.md, slice 2).
 # Receiver-side: each row says what that room will accept being spoken INTO
 # it. A room with no row here accepts an announcement from any other room at
