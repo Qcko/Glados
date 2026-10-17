@@ -78,7 +78,7 @@ function Grant-BatchLogon {
 
 function New-Layout {
     foreach ($dir in 'bin', 'releases', 'local', 'tls', 'state\traces', 'logs', 'cache\hf',
-                     'cache\piper\voices', 'cache\uv', 'cache\uv-python', 'dunnes', 'secrets') {
+                     'cache\piper\voices', 'cache\uv', 'cache\uv-python', 'dunnes', 'secrets', 'secrets\inbox') {
         New-Item -ItemType Directory -Force -Path (Join-Path $Root $dir) | Out-Null
     }
 }
@@ -102,6 +102,14 @@ function Grant-Access {
         Invoke-Icacls (Join-Path $Root $dir) @('/grant', "${ServiceUser}:(OI)(CI)M")
     }
     Invoke-Icacls (Join-Path $Root 'secrets') @('/grant', "${ServiceUser}:(OI)(CI)M")
+    Grant-InboxAccess
+}
+
+function Grant-InboxAccess {
+    # Admins drop client tokens here; the service only reads and deletes them.
+    # run-glados.ps1 refuses to ingest unless this ACL is exactly what it is.
+    Invoke-Icacls (Join-Path $Root 'secrets\inbox') @('/inheritance:r', '/grant:r', 'Administrators:(OI)(CI)F',
+                          'SYSTEM:(OI)(CI)F', "${ServiceUser}:(OI)(CI)(RX,D)")
 }
 
 function Invoke-Icacls([string]$path, [string[]]$icaclsArgs) {

@@ -113,3 +113,84 @@ worker per room, so "yes" would buy 35 seconds of dead air and block every later
 utterance in that room), key it by session, bound its lifetime to the same
 commit decision as the conversation history, and drop it on barge-in — GLaDOS
 cannot know which items were actually heard before an interruption.
+
+---
+
+# DESIGN - registering client tokens without the service password
+
+## The problem
+
+A client token must land in **glados-svc's** keyring (Windows Credential
+Manager, DPAPI-protected by that account's password). Today that means RDP plus
+`runas /user:glados-svc` with a password nobody remembers, and an admin reset of
+that password destroys every stored secret. The one thing on the box that
+already runs as glados-svc, with no password typed, is the `GLaDOS` scheduled
+task. So the task's own launcher does the registering.
+
+## The flow
+
+```mermaid
+flowchart TD
+    mint["devbox: mint token<br/>(out-of-repo secrets dir)"] --> scp["scp as janam to<br/>secrets\inbox\&lt;id&gt;.token.part"]
+    scp --> mv["rename .part -> .token<br/>(atomic, over SSH)"]
+    mv --> restart["deploy-prod.ps1 -Restart<br/>(or any deploy / boot)"]
+    restart --> task["GLaDOS task starts<br/>as glados-svc (stored logon)"]
+    task --> launcher["run-glados.ps1"]
+    launcher --> any{"any inbox\*.token?"}
+    any -- no --> server["exec glados.exe"]
+    any -- yes --> acl{"inbox ACL + owner ok,<br/>not a reparse point?"}
+    acl -- no --> refuse["ingest nothing,<br/>log refusal"] --> server
+    acl -- yes --> each["per file: name pattern, id in<br/>merged [auth].clients, nlink=1,<br/>value charset + length"]
+    each -- bad --> keep["leave file, log name + reason"]
+    each -- ok --> store["keyring set, get, compare"]
+    store -- mismatch / error --> keep
+    store -- match --> del["delete file;<br/>log registered / rotated"]
+    keep --> summary["state\secrets-ingest.json<br/>(names + outcomes, no values)"]
+    del --> summary
+    summary --> server
+    server --> ready["restart verb waits for healthz,<br/>prints the ingest summary"]
+```
+
+## Decisions
+
+- **Where it runs: a pre-step in `run-glados.ps1`** calling
+  `python -m glados.secrets ingest <inbox>`. It inherits the task's logon, so
+  it writes the vault the server reads. The server process gains no code.
+- **Bounded and fail-open.** Started as its own process with a 30 s timeout,
+  killed on expiry, wrapped so any failure (crash, older release without the
+  subcommand after a rollback, nonzero exit) falls through to starting the
+  server. Skipped entirely when the inbox holds no `*.token`.
+- **Fail closed on the inbox, not the boot.** Inbox DACL must be exactly
+  Administrators F, SYSTEM F, glados-svc read + delete (set explicitly by
+  bootstrap, no inheritance); owner Administrators/SYSTEM/an admin; dir and
+  files not reparse points; files with link count 1. Any mismatch ingests
+  nothing. glados-svc cannot create files there.
+- **Allowlist from the merged config** (`load_glados_config` with the local
+  overlay, same as the server). Unknown ids stay in place and are logged.
+  Overwriting an existing id is rotation: allowed, logged as `rotated`.
+- **Value checks:** one trailing newline stripped, then a fixed charset and
+  length bound; never echoed, not even a prefix.
+- **Write order:** set, get, constant-time compare, then delete. A failed delete
+  after a good store is a WARN (a token left at rest); the next run is
+  idempotent.
+- **Scope:** `client-tokens` only. The ingest logic is a small generic function
+  (dir, allowlist, store) so another service account's launcher (calendar-svc)
+  can reuse the pattern; GLaDOS does not take more scopes until one needs it.
+- **Trigger:** the existing `restart` verb; no new verb. `status` and `restart`
+  print the last ingest summary.
+- **Recovery after a forced password reset:** drop every token in the inbox,
+  restart. Same path.
+- **`set-client-auth.ps1`** is kept as a documented fallback (needs the
+  password), not the primary path.
+
+## Deliberately not built
+
+- **Hashed verifiers instead of keyring tokens** (the clean-slate seat's pick):
+  the server only verifies client tokens, so it could store sha256 in an
+  admin-ACL'd file and need no secret at rest. Real merit, but it changes ARCH
+  section 9 and requires re-minting every client; parked as its own decision.
+- **A second scheduled task as glados-svc** (needs the password once) and
+  **S4U** (believed unable to unlock Credential Manager; unverified).
+- **A live, no-restart trigger** (inbox watcher in the server, or the admin
+  loopback API): only reachable from inside the server process; not worth it
+  for a rare operation.
