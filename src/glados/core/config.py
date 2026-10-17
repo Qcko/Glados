@@ -423,6 +423,21 @@ class STTConfig(BaseModel):
     whisper_initial_prompt: str = ""
 
 
+class SpeakerIdConfig(BaseModel):
+    # DESIGN-speaker-id.md. "off" embeds nothing and every voice turn is
+    # `fallback`; "fake" is the test embedder. Thresholds are placeholders
+    # until the bake-off on household clips sets them (slice 3).
+    backend: Literal["off", "fake"] = "off"
+    accept_threshold: float = 0.70
+    margin: float = 0.10
+    min_speech_s: float = 1.0
+    timeout_ms: int = 500
+    # Encrypted voiceprints live here: outside the repo and outside traces/.
+    store_dir: Path = Path(
+        os.environ.get("GLADOS_VOICEID_DIR") or (Path.home() / ".glados" / "voiceprints")
+    )
+
+
 class TTSConfig(BaseModel):
     # "fake" yields a silent chunk (used in tests). "piper" loads a Piper
     # voice and streams real PCM. First piper construct downloads the
@@ -462,6 +477,7 @@ class GladosConfig(BaseModel):
     vad: VADConfig = VADConfig()
     stt: STTConfig = STTConfig()
     tts: TTSConfig = TTSConfig()
+    speaker_id: SpeakerIdConfig = SpeakerIdConfig()
 
 
 # Tools that book or move money. On a cart_read server each must carry
@@ -965,6 +981,11 @@ def _apply_env_overrides(cfg: GladosConfig) -> GladosConfig:
 
     if (stt_backend := os.environ.get("GLADOS_STT_BACKEND")) in ("fake", "faster-whisper"):
         cfg = cfg.model_copy(update={"stt": cfg.stt.model_copy(update={"backend": stt_backend})})
+
+    if (sid_backend := os.environ.get("GLADOS_SPEAKERID_BACKEND")) in ("off", "fake"):
+        cfg = cfg.model_copy(
+            update={"speaker_id": cfg.speaker_id.model_copy(update={"backend": sid_backend})}
+        )
 
     if (tts_backend := os.environ.get("GLADOS_TTS_BACKEND")) in ("fake", "piper"):
         cfg = cfg.model_copy(update={"tts": cfg.tts.model_copy(update={"backend": tts_backend})})

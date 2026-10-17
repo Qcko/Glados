@@ -17,6 +17,7 @@ dependencies = [
     "faster-whisper>=1.2.0",
     "piper-tts>=1.4.2",
     "keyring>=25.0",
+    "cryptography>=48.0.0",
 ]
 
 [project.scripts]

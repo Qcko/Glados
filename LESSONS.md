@@ -27,3 +27,13 @@ not work, so the next session does not relearn it.
 - **Test autostart without opening Termux.** Opening Termux starts the
   services itself, so a check done after opening it proves nothing about boot.
   Judge by the server-side connection time instead.
+
+## Speaker identity
+
+- **The fallback speaker is a session bucket, not a person.** Every client's
+  `default_user` is a real household member, so treating an unidentified voice
+  as `default_user` would guess that person by construction. `SpeakerIdentity`
+  splits the two: `session_key` keeps today's room continuity, and `person` is
+  None unless the voice matched. Consumers (memory) key on `person` + `verified`.
+  A guest sentinel session was considered and rejected 17-10-2026: it splits
+  the conversation every time a short "yes" can't be identified.

@@ -43,6 +43,8 @@ from ..servers.time_server import NowTool
 from ..servers.toy_server import TOY_TOOLS
 from .adapters import LLM, STT, TTS, VAD
 from .audio_sink import AudioSink, FrameTooShort
+from .speaker import Utterance
+from ..voiceid import SpeakerIdentifier, build_identifier
 from .config import (
     local_config_dir,
     ClientBinding,
@@ -967,6 +969,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     # Secrets store: defaults to the real OS keyring. Tests inject
     # InMemorySecrets via `app.state.secrets = ...` after build_app().
     app.state.secrets = KeyringSecrets()
+    app.state.identifier = build_identifier(glados_cfg.speaker_id, app.state.secrets)
     app.state.release = describe_release(_REPO_ROOT)
     # How /admin/shutdown ends the process once drained. `glados.main` points
     # it at the running uvicorn servers' `should_exit`, which runs the full
@@ -1251,6 +1254,7 @@ def _register_routes(app: FastAPI) -> None:
                 state.organizer,
                 client_id,
                 state.vad_factory,
+                state.identifier,
             )
             await _serve(ws, client_id, pipeline, state.organizer)
         except WebSocketDisconnect:
@@ -1277,6 +1281,7 @@ def _build_pipeline(
     organizer: Organizer,
     client_id: str,
     vad_factory: Callable[[VADConfig], VAD],
+    identifier: SpeakerIdentifier | None = None,
 ) -> AudioPipeline:
     sink = (
         AudioSink(glados_cfg.server.traces_dir, client_id)
@@ -1284,14 +1289,17 @@ def _build_pipeline(
         else None
     )
 
-    async def on_utterance(text: str, captured_at: float) -> None:
-        await organizer.handle_audio_text(client_id, text, captured_at)
+    async def on_utterance(utterance: Utterance) -> None:
+        await organizer.handle_audio_text(
+            client_id, utterance.text, utterance.captured_at, speaker=utterance.speaker
+        )
 
     return AudioPipeline(
         sink=sink,
         vad=vad_factory(glados_cfg.vad),
         stt=stt,
         on_utterance=on_utterance,
+        identifier=identifier,
     )
 
 

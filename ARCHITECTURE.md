@@ -126,8 +126,10 @@ not an edge case.
    whether duplicates are in one room (kitchen + open-plan living room mics)
    or accidental across the house. UI `user_text` is never deduped.
 3. **Session assignment.** Bind the surviving utterance to a
-   `(room_id, speaker_id)` session. `speaker_id` defaults to
-   `room.default_user` until voice-ID lands. Attach to an existing live
+   `(room_id, speaker_id)` session. `speaker_id` is the identified person,
+   or `room.default_user` when the voice is not identified (v5,
+   DESIGN-speaker-id.md). That fallback is a session bucket, never an
+   identity: who spoke is `SpeakerIdentity.person`, None unless verified. Attach to an existing live
    session if one is open in that room within the conversation idle window,
    else open a new one.
 4. **Queue & schedule.** Per-session FIFO so one room's commands stay
@@ -675,7 +677,12 @@ Each version is its own session-sized chunk. Heavy work is deferred.
 - **v4 — wake word + dedup.** openWakeWord on Pi clients; same-utterance
   arbitration server-side.
 
-- **v5 — speaker ID.** Resemblyzer or pyannote to populate `speaker_id`.
+- **v5 — speaker ID.** Voiceprint embedding to populate `speaker_id`
+  (DESIGN-speaker-id.md). Slices 1-2 LANDED: `SpeakerIdentity` contract,
+  identifier, encrypted store, enrollment CLI, all behind `backend = "off"`.
+  Slice 3 (ONNX model + threshold bake-off) open. Identity is a
+  personalisation key, never an authorisation input before v6; a
+  misidentification can still key a turn to the wrong enrolled person.
 
 - **v6 — voice identity & access control.** Builds on v5. Capture an
   embedding at session open; subsequent utterances in the open session

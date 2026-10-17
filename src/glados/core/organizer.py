@@ -67,6 +67,7 @@ from .protocols import (
 )
 from .room_queues import RoomQueueManager
 from .sessions import SessionRegistry
+from .speaker import NO_IDENTIFIER, SpeakerMatch, resolve_identity
 from .prompt_pressure import SessionPressureMonitors, StreakAlarm, log_alarms
 from .tool_payload_cap import PayloadCap, cap_tool_payload, clamp_result_bytes
 from .traces import TraceStore
@@ -155,6 +156,9 @@ class _VoiceAnswer:
     granted: bool
     client_id: str
     text: str
+    # Audit only: who the voice sounded like. Never consulted for the grant
+    # (DESIGN-speaker-id.md decision 7).
+    speaker: SpeakerMatch = NO_IDENTIFIER
 
 
 @dataclass
@@ -207,6 +211,10 @@ class _LastTurn:
 
 
 UserTextSource = Literal["voice", "text"]
+
+
+def _rounded(score: float | None) -> float | None:
+    return None if score is None else round(score, 3)
 
 _MAX_TOOL_LOOP = 8
 
@@ -1333,6 +1341,7 @@ class Organizer:
         *,
         source: UserTextSource = "text",
         captured_at: float | None = None,
+        speaker: SpeakerMatch | None = None,
     ) -> None:
         """Enqueue a turn for the speaker's room. Returns once the turn
         is in the room's FIFO; the turn itself runs on the room's
@@ -1351,12 +1360,14 @@ class Organizer:
         if binding is None:
             return
         if source == "voice" and self._try_answer_confirm(
-            binding, client_id, text, captured_at
+            binding, client_id, text, captured_at, speaker or NO_IDENTIFIER
         ):
             return
         self._queues.enqueue(
             binding.room_id,
-            lambda: self._run_user_text(client_id, text, source=source),
+            lambda: self._run_user_text(
+                client_id, text, source=source, speaker=speaker
+            ),
             max_depth=_CONFIRM_HOLD_QUEUE_DEPTH
             if binding.room_id in self._confirm_by_room
             else None,
@@ -1368,6 +1379,7 @@ class Organizer:
         client_id: str,
         text: str,
         captured_at: float | None,
+        speaker: SpeakerMatch = NO_IDENTIFIER,
     ) -> bool:
         """Resolve the room's pending confirmation from a spoken answer.
         False means "not an answer here" and the caller queues a turn;
@@ -1391,7 +1403,9 @@ class Organizer:
             )
             return False
         pending.fut.set_result(
-            _VoiceAnswer(granted=verdict == "yes", client_id=client_id, text=text)
+            _VoiceAnswer(
+                granted=verdict == "yes", client_id=client_id, text=text, speaker=speaker
+            )
         )
         return True
 
@@ -1487,16 +1501,25 @@ class Organizer:
             )
 
     async def _run_user_text(
-        self, client_id: str, text: str, *, source: UserTextSource = "text"
+        self,
+        client_id: str,
+        text: str,
+        *,
+        source: UserTextSource = "text",
+        speaker: SpeakerMatch | None = None,
     ) -> None:
         binding = self.binding_for_client(client_id)
         if binding is None:
             return
-        session = self.sessions.get_or_open(binding.room_id, binding.default_user)
+        if source == "voice" and speaker is None:
+            speaker = NO_IDENTIFIER
+        identity = resolve_identity(speaker, binding.default_user)
+        session = self.sessions.get_or_open(binding.room_id, identity.session_key)
         envelope = CallEnvelope(
             session_id=session.session_id,
             room_id=session.room_id,
             speaker_id=session.speaker_id,
+            speaker=identity,
         )
         # Capture the task locally so the finally-block can release its own
         # _inflight slot without clobbering a successor turn that may have
@@ -1513,6 +1536,10 @@ class Organizer:
                 "turn_start",
                 room_id=session.room_id,
                 speaker_id=session.speaker_id,
+                speaker_person=identity.person,
+                speaker_source=identity.source,
+                speaker_score=_rounded(identity.score),
+                speaker_reason=speaker.reason if speaker is not None else None,
                 origin_client=client_id,
             )
             trace.event("user_text", text=text, source=source)
@@ -1735,7 +1762,12 @@ class Organizer:
                 )
 
     async def handle_audio_text(
-        self, client_id: str, text: str, captured_at: float | None = None
+        self,
+        client_id: str,
+        text: str,
+        captured_at: float | None = None,
+        *,
+        speaker: SpeakerMatch = NO_IDENTIFIER,
     ) -> None:
         """Audio-ingress entry. A short barge-in utterance (`stop`, `cancel`,
         ...) cancels the speaker's room's in-flight turn AND drops anything
@@ -1796,7 +1828,7 @@ class Organizer:
                 )
             return
         await self.handle_user_text(
-            client_id, text, source="voice", captured_at=captured_at
+            client_id, text, source="voice", captured_at=captured_at, speaker=speaker
         )
 
     # The soonest fraction of the estimated playback at which a PlaybackDone is
@@ -4274,6 +4306,8 @@ class Organizer:
                     verdict="yes" if answer.granted else "no",
                     client_id=answer.client_id,
                     text=answer.text,
+                    speaker_person=answer.speaker.person,
+                    speaker_score=_rounded(answer.speaker.score),
                 )
                 granted = answer.granted
             else:
