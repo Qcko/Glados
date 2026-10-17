@@ -60,13 +60,23 @@ duplicate source modules and exhaust the mic.
 ## Prerequisites (on the phone)
 
 1. Install **Termux** and the **Termux:Boot** and **Termux:API** addon apps.
-   Install all three from the same source (F-Droid *or* Play, not mixed) or
-   signature checks reject the addons.
-2. **Open Termux:Boot once** after installing — Termux:Boot runs nothing until
-   its app has been launched at least once.
-3. Exempt Termux from battery optimization: Android Settings → Apps → Termux →
-   Battery → **Unrestricted**. Otherwise Android kills the runit tree under doze.
-4. **Set up shared storage** so you can move the bundle in and pull the self-test
+   Install all three from **F-Droid** (or all from GitHub releases), never
+   mixed: the addons share Termux's signature. The Play Store Termux is
+   abandoned and newer phones refuse it ("won't work for your device").
+2. **Open Termux:Boot once** after installing. It only shows a readme; that
+   launch is what lets Android deliver the boot broadcast to it.
+3. Exempt **Termux, Termux:Boot and Termux:API** from battery optimization:
+   Android Settings → Apps → each → Battery → **Unrestricted**, and on Samsung
+   also keep them off Battery → Background usage limits → *Sleeping apps*.
+   Otherwise the boot script never runs, or Android kills the runit tree.
+4. **Grant the microphone to Termux:API.** The main Termux app has no
+   Microphone permission at all (its list shows only Storage); the mic reaches
+   PulseAudio through Termux:API, which shares Termux's identity. Settings →
+   Apps → Termux:API → Permissions → Microphone → Allow, or trigger the prompt
+   with `termux-microphone-record -l 2 -f ~/mictest.m4a` (then delete it).
+   Without it capture is silent and nothing errors: the client connects, the
+   server simply never hears speech.
+5. **Set up shared storage** so you can move the bundle in and pull the self-test
    report out via Android's file picker (Termux's private `$HOME` is invisible to
    it):
    ```sh
@@ -74,7 +84,7 @@ duplicate source modules and exhaust the mic.
    ```
    With this done, `selftest.sh` publishes its report to `~/storage/downloads`
    (Android **Downloads**), and you can drop the install bundle there too.
-5. Packages: handled by `install.sh` below, or by hand —
+6. Packages: handled by `install.sh` below, or by hand —
    ```sh
    pkg install python pulseaudio termux-services termux-api
    ```
