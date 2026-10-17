@@ -8,8 +8,14 @@
 param([string]$OutDir)
 $ErrorActionPreference = 'Stop'
 
+function Get-MainCheckout([string]$fallback) {
+    $first = git -C $fallback worktree list --porcelain 2>$null | Select-Object -First 1
+    if ($LASTEXITCODE -eq 0 -and $first -match '^worktree (.+)$') { return $Matches[1] }
+    return $fallback
+}
+
 $root = (git rev-parse --show-toplevel).Trim()
-if (-not $OutDir) { $OutDir = Join-Path $root 'dist' }
+if (-not $OutDir) { $OutDir = Join-Path (Get-MainCheckout $root) 'dist' }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $tar = Join-Path $OutDir 'glados-phone-bundle.tar.gz'

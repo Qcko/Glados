@@ -13,7 +13,11 @@
 set -e
 
 ROOT=$(git rev-parse --show-toplevel)
-OUTDIR=${1:-"$ROOT/dist"}
+main_checkout() {
+  git -C "$ROOT" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p'
+}
+MAIN=$(main_checkout)
+OUTDIR=${1:-"${MAIN:-$ROOT}/dist"}
 mkdir -p "$OUTDIR"
 TAR="$OUTDIR/glados-phone-bundle.tar.gz"
 GO="$OUTDIR/go.sh"
