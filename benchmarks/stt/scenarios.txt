@@ -1,0 +1,17 @@
+# Spontaneous clips: read the card silently, then SAY it your own way (no script).
+# ~15 per speaker. Reference transcript is typed afterwards from the recording.
+1. You ran out of butter and milk. Ask GLaDOS to add them.
+2. You want cheese for a pizza night. Ask for two kinds.
+3. Ask what is already in the Dunnes cart.
+4. Ask GLaDOS to remove something you added by mistake.
+5. Ask whether you are free on a day next week.
+6. Add a doctor appointment with a day and a time.
+7. Set a timer for something in the oven.
+8. Ask what time it is, casually.
+9. GLaDOS just misheard you. Correct it.
+10. Tell GLaDOS to stop talking.
+11. Ask for ingredients for a dish you would cook this weekend.
+12. Ask about the weather before going out.
+13. Change a quantity of something already in the cart.
+14. Ask for a delivery slot on a day of your choice.
+15. Ask a quick question while doing something else (half attention, mumbled).

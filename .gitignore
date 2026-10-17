@@ -20,3 +20,6 @@ client_room/deploy/termux/glados-room.env
 # state, never committed.
 client_room/deploy/termux/service/*/down
 dist/
+
+# STT bias lexicon with household names (benchmarks/stt/lexicon.example.txt)
+benchmarks/stt/lexicon.local.txt

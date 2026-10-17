@@ -1,7 +1,8 @@
 # DESIGN - STT fit to our voices (backlog track 4)
 
-Status: REVISED after design roster (architect, QA/measurement, security,
-clean-slate), awaiting user sign-off. Nothing built, no GPU run yet.
+Status: SIGNED OFF 17-10-2026 with changes: Parakeet is in the bake-off; the
+onset test and the phone arm run ON PROD (no devbox re-pointing). Prod steps
+(config change, restart, deploy) still each need the user's go-ahead.
 
 ## Problem
 
@@ -60,8 +61,10 @@ ship. Steps 0 and 1a need no GPU and can run in parallel.
     `tts gate: dropped audio` near user-reported misses. Read-only.
 0.2 Phone-side opt-in raw trace, `capture_trace` in room config, default off,
     written to Termux private `$HOME` (never `~/storage/shared`), size cap,
-    deleted when step 0 closes. Server side: dev instance `wav_traces = true`
-    traces the FULL inbound stream (pre-VAD), not only VAD segments.
+    deleted when step 0 closes. Server side: PROD `wav_traces = true` in
+    `glados.local.toml` for a bounded window only (it records every kitchen
+    utterance), traces the FULL inbound stream (pre-VAD); switched back off and
+    the WAVs deleted or moved into the corpus when the window ends.
 0.3 Alignment by a **deterministic acoustic marker** (a click played before
     each trial), both streams at 16 kHz, not speech-onset judgement. Loss =
     onset-energy offset between aligned streams; threshold **> 50 ms** fixed
@@ -85,12 +88,11 @@ ship. Steps 0 and 1a need no GPU and can run in parallel.
 - `scripts/stt_corpus.py record`: one prompt at a time, 16 kHz mono PCM16,
   `manifest.jsonl` with `text`, `speaker`, `mic`, `entities`, `split`.
 - Per speaker: ~100 read prompts (household-shaped requests) of which **30 %
-  use entities NOT in the lexicon** (held-out), plus **~15 spontaneous** clips
+  use entities NOT in the lexicon** (held-out; `benchmarks/stt/prompts.jsonl`), plus **~15 spontaneous** clips
   from scenario cards (no script). Shared: **>= 30 no-speech clips** (TV,
   kitchen noise, music, room tone, incl. ones that pass Silero).
 - Mic arms: (a) desk close-talk = PRIMARY until step 0 closes; (b) kitchen
-  phone -> devbox dev instance with its own TLS cert and per-client token
-  (revoked after), LAN only, for the measurement window only.
+  phone on PROD as enrolled, captured by the prod trace window above.
 
 ### Step 2 - bake-off (devbox GPU slot, handshake with track 3)
 
@@ -98,7 +100,7 @@ Scorer and decision rule are **committed before the first run**.
 
 | Axis | Values |
 |---|---|
-| Model | distil-small.en int8 CPU (baseline), medium.en, distil-large-v3.5, large-v3-turbo, large-v3 (fp16 / int8_float16 CUDA); **Parakeet-TDT-0.6B** via ONNX (sherpa-onnx), not NeMo - see decision 2 |
+| Model | distil-small.en int8 CPU (baseline), medium.en, distil-large-v3.5, large-v3-turbo, large-v3 (fp16 / int8_float16 CUDA); **Parakeet-TDT-0.6B** via ONNX (sherpa-onnx), not NeMo (approved 17-10-2026) |
 | Decoding | beam 1; beam 5 only if beam 1 is within noise |
 | Biasing | none, hotwords, initial_prompt, both (lexicon) |
 | Post-correction | none, **lexicon snap** (deterministic phonetic/fuzzy match of entity spans to the lexicon) |

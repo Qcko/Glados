@@ -1,0 +1,95 @@
+{"id": "g01", "text": "Add two packs of Kerrygold butter to the cart", "entities": [["Kerrygold", "lex"], ["two", "num"]]}
+{"id": "g02", "text": "Put Barry's tea on the shopping list", "entities": [["Barry's", "lex"]]}
+{"id": "g03", "text": "Order a sliced pan from Brennans", "entities": [["Brennans", "lex"]]}
+{"id": "g04", "text": "Add six Clonakilty sausages", "entities": [["Clonakilty", "lex"], ["six", "num"]]}
+{"id": "g05", "text": "Do they have Ballymaloe relish in Dunnes", "entities": [["Ballymaloe", "lex"], ["Dunnes", "lex"]]}
+{"id": "g06", "text": "Add a litre of Avonmore milk", "entities": [["Avonmore", "lex"], ["litre", "unit"]]}
+{"id": "g07", "text": "We need a big bag of Tayto cheese and onion", "entities": [["Tayto", "lex"]]}
+{"id": "g08", "text": "Get some Gruyere and a wedge of Comte", "entities": [["Gruyere", "lex"], ["Comte", "lex"]]}
+{"id": "g09", "text": "Add four hundred grams of pancetta", "entities": [["four hundred", "num"], ["pancetta", "lex"]]}
+{"id": "g10", "text": "Is the Gubbeen cheese on offer this week", "entities": [["Gubbeen", "lex"]]}
+{"id": "g11", "text": "Remove the Denny rashers from the cart", "entities": [["Denny", "lex"]]}
+{"id": "g12", "text": "Add three tins of chopped tomatoes", "entities": [["three", "num"]]}
+{"id": "g13", "text": "Order some gochujang paste", "entities": [["gochujang", "lex"]]}
+{"id": "g14", "text": "Add a jar of kimchi and a pack of tofu", "entities": [["kimchi", "lex"], ["tofu", "lex"]]}
+{"id": "g15", "text": "Put mozzarella and parmesan on the list", "entities": [["mozzarella", "lex"], ["parmesan", "lex"]]}
+{"id": "g16", "text": "Get feta and a bag of Kalamata olives", "entities": [["feta", "lex"], ["Kalamata", "lex"]]}
+{"id": "g17", "text": "Add venison mince if they have it", "entities": [["venison", "lex"]]}
+{"id": "g18", "text": "Get half a kilo of Irish beef mince", "entities": [["half a kilo", "num"]]}
+{"id": "g19", "text": "What's in my Dunnes cart right now", "entities": [["Dunnes", "lex"]]}
+{"id": "g20", "text": "Book a delivery slot for Saturday morning", "entities": [["Saturday", "time"]]}
+{"id": "g21", "text": "Add Sheridans brown bread", "entities": [["Sheridans", "lex"]]}
+{"id": "g22", "text": "Get two bottles of Club Orange", "entities": [["Club Orange", "lex"], ["two", "num"]]}
+{"id": "g23", "text": "Order a tub of mascarpone and ladyfingers", "entities": [["mascarpone", "lex"], ["ladyfingers", "lex"]]}
+{"id": "g24", "text": "Add a pack of udon noodles and some miso", "entities": [["udon", "lex"], ["miso", "lex"]]}
+{"id": "g25", "text": "Get tortillas and a block of cheddar", "entities": [["tortillas", "lex"], ["cheddar", "lex"]]}
+{"id": "g26", "text": "Add sour cream and jalapenos", "entities": [["jalapenos", "lex"]]}
+{"id": "g27", "text": "Put Hermelin on the list if Dunnes stocks it", "entities": [["Hermelin", "lex"], ["Dunnes", "lex"]]}
+{"id": "g28", "text": "Add a bag of Odlums flour", "entities": [["Odlums", "held"]]}
+{"id": "g29", "text": "Get Flahavan's porridge oats", "entities": [["Flahavan's", "held"]]}
+{"id": "g30", "text": "Add a wedge of Cashel Blue", "entities": [["Cashel Blue", "held"]]}
+{"id": "g31", "text": "Put Lyons tea bags in the cart", "entities": [["Lyons", "held"]]}
+{"id": "g32", "text": "Order Glenisk natural yoghurt", "entities": [["Glenisk", "held"]]}
+{"id": "g33", "text": "Add a bottle of Hellmann's mayonnaise", "entities": [["Hellmann's", "held"]]}
+{"id": "g34", "text": "Get a block of Dubliner cheese", "entities": [["Dubliner", "held"]]}
+{"id": "g35", "text": "Add Siucra caster sugar", "entities": [["Siucra", "held"]]}
+{"id": "g36", "text": "Do they sell halloumi and taramasalata", "entities": [["halloumi", "held"], ["taramasalata", "held"]]}
+{"id": "g37", "text": "Add a jar of Bisto gravy granules", "entities": [["Bisto", "held"]]}
+{"id": "g38", "text": "Get some pecorino and guanciale", "entities": [["pecorino", "held"], ["guanciale", "held"]]}
+{"id": "g39", "text": "Order Knorr chicken stock pots", "entities": [["Knorr", "held"]]}
+{"id": "g40", "text": "Add five Granny Smith apples", "entities": [["Granny Smith", "held"], ["five", "num"]]}
+{"id": "g41", "text": "Put Durkan's cream crackers on the list", "entities": [["Durkan's", "held"]]}
+{"id": "g42", "text": "Add gorgonzola and a bag of rocket", "entities": [["gorgonzola", "held"], ["rocket", "held"]]}
+{"id": "g43", "text": "Get edamame and nori sheets", "entities": [["edamame", "held"], ["nori", "held"]]}
+{"id": "g44", "text": "Add Ferrero Rocher, the big box", "entities": [["Ferrero Rocher", "held"]]}
+{"id": "g45", "text": "Order Kilmeaden cheddar, the mature one", "entities": [["Kilmeaden", "held"]]}
+{"id": "g46", "text": "Find me some Emmental and Raclette", "entities": [["Emmental", "held"], ["Raclette", "held"]]}
+{"id": "c01", "text": "What's on my calendar tomorrow", "entities": [["tomorrow", "time"]]}
+{"id": "c02", "text": "Add dentist on Thursday at half three", "entities": [["Thursday", "time"], ["half three", "time"]]}
+{"id": "c03", "text": "Move the meeting to ten fifteen", "entities": [["ten fifteen", "time"]]}
+{"id": "c04", "text": "Am I free on the twenty third of November", "entities": [["twenty third", "num"], ["November", "time"]]}
+{"id": "c05", "text": "Remind me to call the vet at five past nine", "entities": [["five past nine", "time"]]}
+{"id": "c06", "text": "What day is Christmas this year", "entities": [["Christmas", "time"]]}
+{"id": "c07", "text": "Cancel Friday's dinner booking", "entities": [["Friday", "time"]]}
+{"id": "c08", "text": "Put the bins out reminder on Wednesday evening", "entities": [["Wednesday", "time"]]}
+{"id": "t01", "text": "What time is it", "entities": []}
+{"id": "t02", "text": "Set a timer for twelve minutes", "entities": [["twelve", "num"]]}
+{"id": "t03", "text": "How long is left on the timer", "entities": []}
+{"id": "t04", "text": "Set a timer for one hour and forty minutes", "entities": [["one hour", "num"], ["forty", "num"]]}
+{"id": "t05", "text": "What's the weather in Dublin today", "entities": [["Dublin", "lex"]]}
+{"id": "t06", "text": "Will it rain in Galway tomorrow", "entities": [["Galway", "held"]]}
+{"id": "t07", "text": "Convert two hundred Fahrenheit to Celsius", "entities": [["two hundred", "num"], ["Fahrenheit", "held"], ["Celsius", "held"]]}
+{"id": "a01", "text": "Hey GLaDOS, are you there", "entities": [["GLaDOS", "lex"]]}
+{"id": "a02", "text": "GLaDOS, stop", "entities": [["GLaDOS", "lex"], ["stop", "cmd"]]}
+{"id": "a03", "text": "Cancel that", "entities": [["cancel", "cmd"]]}
+{"id": "a04", "text": "Yes, go ahead", "entities": [["yes", "cmd"]]}
+{"id": "a05", "text": "No, don't order it", "entities": [["no", "cmd"]]}
+{"id": "a06", "text": "Never mind", "entities": []}
+{"id": "a07", "text": "Say that again", "entities": []}
+{"id": "a08", "text": "Louder please", "entities": []}
+{"id": "a09", "text": "Wait, actually make it three", "entities": [["three", "num"]]}
+{"id": "a10", "text": "That's wrong, I said butter not batter", "entities": [["butter", "held"], ["batter", "held"]]}
+{"id": "p01", "text": "Tell {PERSON_A} dinner is ready", "entities": [["{PERSON_A}", "lex"]]}
+{"id": "p02", "text": "When is {PERSON_B} home today", "entities": [["{PERSON_B}", "lex"]]}
+{"id": "p03", "text": "Add {PERSON_A}'s birthday to the calendar", "entities": [["{PERSON_A}", "lex"]]}
+{"id": "p04", "text": "What did {PERSON_B} put on the shopping list", "entities": [["{PERSON_B}", "lex"]]}
+{"id": "l01", "text": "Add milk, eggs, two onions, a bag of carrots and some Kerrygold butter, and tell me the total", "entities": [["two", "num"], ["Kerrygold", "lex"]]}
+{"id": "l02", "text": "I want to make lasagne on Sunday so add mince, mozzarella, parmesan, passata and lasagne sheets", "entities": [["Sunday", "time"], ["mozzarella", "lex"], ["parmesan", "lex"]]}
+{"id": "l03", "text": "Check if the Dunnes delivery is still coming between four and six this afternoon", "entities": [["Dunnes", "lex"], ["four", "num"], ["six", "num"]]}
+{"id": "l04", "text": "Find a Korean recipe with gochujang and pork belly for two people", "entities": [["gochujang", "lex"], ["two", "num"]]}
+{"id": "l05", "text": "Get the ingredients for svickova, so beef, root vegetables, cream and cranberries", "entities": [["svickova", "held"], ["cranberries", "held"]]}
+{"id": "l06", "text": "Add everything for tacos al pastor except the pineapple", "entities": [["al pastor", "held"], ["pineapple", "held"]]}
+{"id": "l07", "text": "Remind me on the first of December to order the turkey from the butcher", "entities": [["first", "num"], ["December", "time"]]}
+{"id": "l08", "text": "How much did we spend in Dunnes last month on cheese", "entities": [["Dunnes", "lex"]]}
+{"id": "l09", "text": "Make a shopping list for moussaka with aubergines, lamb mince and bechamel", "entities": [["moussaka", "held"], ["aubergines", "held"], ["bechamel", "held"]]}
+{"id": "l10", "text": "Put okonomiyaki flour, cabbage and Kewpie mayo on the list", "entities": [["okonomiyaki", "held"], ["Kewpie", "held"]]}
+{"id": "s01", "text": "Add Philadelphia cream cheese", "entities": [["Philadelphia", "held"]]}
+{"id": "s02", "text": "Add bramborove knedliky if they have them", "entities": [["knedliky", "lex"]]}
+{"id": "s03", "text": "Order eighteen eggs", "entities": [["eighteen", "num"]]}
+{"id": "s04", "text": "Order eighty eggs", "entities": [["eighty", "num"]]}
+{"id": "s05", "text": "Add thirteen yoghurts", "entities": [["thirteen", "num"]]}
+{"id": "s06", "text": "Add thirty yoghurts", "entities": [["thirty", "num"]]}
+{"id": "s07", "text": "Get a three litre bottle of water", "entities": [["three", "num"]]}
+{"id": "s08", "text": "Get a free range chicken", "entities": [["free range", "held"]]}
+{"id": "s09", "text": "Add the thick cut Clonakilty rashers, not the thin ones", "entities": [["Clonakilty", "lex"]]}
+{"id": "s10", "text": "Put Oatly barista on the list", "entities": [["Oatly", "held"]]}

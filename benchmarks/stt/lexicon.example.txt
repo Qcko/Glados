@@ -1,0 +1,42 @@
+# STT bias lexicon -- one term per line. FROZEN before recording (DESIGN-stt-fit.md).
+# Copy to lexicon.local.txt (gitignored) and add household names under [people].
+# Terms tagged "held" in prompts.jsonl must NOT be added here: they measure
+# whether biasing hurts words outside the list.
+[terms]
+GLaDOS
+Dunnes
+Sheridans
+Dublin
+Avonmore
+Ballymaloe
+Barry's
+Brennans
+Clonakilty
+Club Orange
+Denny
+Kerrygold
+Tayto
+Comte
+Gruyere
+Gubbeen
+Hermelin
+cheddar
+feta
+Kalamata
+mozzarella
+parmesan
+mascarpone
+ladyfingers
+pancetta
+venison
+gochujang
+kimchi
+tofu
+udon
+miso
+tortillas
+jalapenos
+knedliky
+[people]
+# PERSON_A = <name>
+# PERSON_B = <name>
