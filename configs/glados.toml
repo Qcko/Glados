@@ -229,6 +229,30 @@ history_max_turns = 8
 # replay. Disable in production to keep disk usage bounded.
 wav_traces = true
 
+[wake]
+# Wake-word admission (DESIGN.md, wake word). "off" = every room always
+# listening (today). "required" = speech becomes a turn only after "Hey
+# GLaDOS"; un-woken speech is discarded untranscribed. A room can override
+# this with `wake_mode` in rooms.toml -- turn the kitchen on first.
+mode = "off"
+backend = "openwakeword"
+# Local model dir (relative to this config dir); nothing is downloaded at
+# runtime. Every file must be pinned below or a required room refuses boot.
+model_dir = "models/wake"
+model_file = "hey_jarvis_v0.1.onnx"   # stand-in until hey_glados is trained
+melspec_file = "melspectrogram.onnx"
+embedding_file = "embedding_model.onnx"
+threshold = 0.5
+armed_window_s = 8.0
+followup_window_s = 6.0
+dedup_window_s = 0.5
+cooldown_s = 1.5
+
+[wake.sha256]
+# "hey_jarvis_v0.1.onnx" = "<sha256>"
+# "melspectrogram.onnx" = "<sha256>"
+# "embedding_model.onnx" = "<sha256>"
+
 [vad]
 # "fake": fixed-size utterances (used in tests). "silero": real VAD.
 backend = "silero"

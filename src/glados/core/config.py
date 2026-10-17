@@ -400,6 +400,35 @@ class VADConfig(BaseModel):
     silero_speech_pad_ms: int = 200
 
 
+class WakeConfig(BaseModel):
+    """Wake-word admission (DESIGN.md, wake word). `mode = "off"` keeps every
+    room always listening; a room can override it in rooms.toml."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["off", "required"] = "off"
+    backend: Literal["openwakeword", "fake"] = "openwakeword"
+    # Local directory holding the three files below; nothing is downloaded.
+    # Relative paths resolve against the config dir.
+    model_dir: str = "models/wake"
+    model_file: str = "hey_jarvis_v0.1.onnx"
+    melspec_file: str = "melspectrogram.onnx"
+    embedding_file: str = "embedding_model.onnx"
+    # filename -> sha256; every file above must be pinned or boot refuses.
+    sha256: dict[str, str] = {}
+    threshold: float = 0.5
+    armed_window_s: float = 8.0
+    followup_window_s: float = 6.0
+    dedup_window_s: float = 0.5
+    cooldown_s: float = 1.5
+    # Leading phrases stripped from an admitted transcript, incl. the ways
+    # Whisper spells the wake word.
+    aliases: list[str] = [
+        "hey glados", "hey gladys", "hi glados", "hey glad os", "a glados",
+        "hey jarvis",
+    ]
+
+
 class STTConfig(BaseModel):
     # "fake" returns `fake_text`. "faster-whisper" runs the configured
     # model; first call downloads the weights to HF_HOME.
@@ -475,6 +504,7 @@ class GladosConfig(BaseModel):
     cart_verify: CartVerifyConfig = CartVerifyConfig()
     audio: AudioConfig = AudioConfig()
     vad: VADConfig = VADConfig()
+    wake: WakeConfig = WakeConfig()
     stt: STTConfig = STTConfig()
     tts: TTSConfig = TTSConfig()
     speaker_id: SpeakerIdConfig = SpeakerIdConfig()
@@ -821,6 +851,11 @@ class RoomPolicy(BaseModel):
     announce_sources: list[str] | None = None
     quiet_hours: QuietHours | None = None
     announce_veto_pause: bool = True
+    # Wake gating for this room; None follows `[wake] mode` in glados.toml.
+    wake_mode: Literal["off", "required"] | None = None
+    # Added to this room's wake energy in cross-room arbitration, to even
+    # out mics with different gain.
+    wake_gain_db: float = 0.0
 
     def allows_source(self, source_room: str) -> bool:
         return self.announce_sources is None or source_room in self.announce_sources

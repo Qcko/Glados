@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from .wake import Admission
+
 SpeakerSource = Literal["voice", "fallback", "typed"]
 
 MatchReason = Literal[
@@ -67,6 +69,8 @@ class Utterance:
     text: str
     captured_at: float
     speaker: SpeakerMatch = NO_IDENTIFIER
+    # Set when wake gating admitted the segment (DESIGN.md, wake word).
+    admission: Admission | None = None
 
 
 def resolve_identity(match: SpeakerMatch | None, default_user: str) -> SpeakerIdentity:
