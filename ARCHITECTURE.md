@@ -121,10 +121,14 @@ not an edge case.
 1. **Ingress.** Tag every incoming `audio_chunk` / `user_text` with
    `(client_id, room_id, role, server_timestamp)`. Server-side timestamps to
    sidestep client clock skew.
-2. **Dedup.** Sliding window (~300 ms) across all mic clients. Energy + rough
-   audio fingerprint match → keep the loudest, drop the rest. Same code path
-   whether duplicates are in one room (kitchen + open-plan living room mics)
-   or accidental across the house. UI `user_text` is never deduped.
+2. **Wake gate + dedup.** In a wake-required room, audio is admitted per VAD
+   segment, decided BEFORE transcription: un-woken speech is discarded
+   untranscribed. Wake hits from all mics are arbitrated in a 0.5 s window
+   (loudest wins, per-room gain offset); only the winner's room is armed and
+   the winning mic owns the room through its follow-up window, which is what
+   dedups the command itself. Same code path for two mics in one room or
+   across the house. UI `user_text` is never gated or deduped. See DESIGN.md,
+   wake word.
 3. **Session assignment.** Bind the surviving utterance to a
    `(room_id, speaker_id)` session. `speaker_id` defaults to
    `room.default_user` until voice-ID lands. Attach to an existing live
@@ -229,8 +233,9 @@ class TTS(Protocol):
 class LLM(Protocol):
     async def chat(self, msgs: list[Msg], tools: list[ToolSpec]) -> AsyncIterator[Delta]: ...
 
-class WakeWord(Protocol):
-    async def listen(self) -> AsyncIterator[WakeEvent]: ...
+class WakeWord(Protocol):            # mirrors VAD; run on a worker thread
+    def feed(self, pcm: bytes) -> list[float]: ...   # detection scores
+    def reset(self) -> None: ...
 ```
 
 Backends that cannot stream are wrapped to yield a single chunk so the
@@ -672,8 +677,12 @@ Each version is its own session-sized chunk. Heavy work is deferred.
     confirm BT-speaker output (rides the host's BlueZ/PulseAudio sink, not the
     GLaDOS protocol). Then AEC (revisit a shared-clock duplex stream).
 
-- **v4 — wake word + dedup.** openWakeWord on Pi clients; same-utterance
-  arbitration server-side.
+- **v4 — wake word + dedup.** openWakeWord runs on the SERVER, one detector
+  per mic connection (clients stay dumb; one clock for arbitration).
+  Invariant: audio admission is wake-gated per room, decided before STT;
+  wake admission is not authorisation (confirm gates unchanged); UI is never
+  gated. Built 17-10-2026 behind `[wake] mode` (default off); custom
+  "hey_glados" model still to train. See DESIGN.md, wake word.
 
 - **v5 — speaker ID.** Resemblyzer or pyannote to populate `speaker_id`.
 

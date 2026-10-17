@@ -218,3 +218,15 @@ class TTS(Protocol):
     inference in `asyncio.to_thread` so the event loop stays responsive."""
 
     def synthesize(self, text: str) -> AsyncIterator[TtsChunkOut]: ...
+
+
+class WakeWord(Protocol):
+    """Wake-word detector over a stream of 16 kHz int16 PCM bytes.
+
+    Mirrors `VAD`: `feed` consumes a chunk and returns the scores of any
+    detections (at or above the backend's threshold) in arrival order;
+    `reset` clears internal buffers. Blocking: the pipeline runs it on a
+    worker thread, never on the event loop."""
+
+    def feed(self, pcm: bytes) -> list[float]: ...
+    def reset(self) -> None: ...

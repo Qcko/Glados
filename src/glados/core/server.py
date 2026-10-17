@@ -20,6 +20,7 @@ import sys
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -41,7 +42,7 @@ from ..mcp.stdio_client import StdioServer, StdioToolProxy
 from ..servers.room_intercom import SpeakIntoTool
 from ..servers.time_server import NowTool
 from ..servers.toy_server import TOY_TOOLS
-from .adapters import LLM, STT, TTS, VAD
+from .adapters import LLM, STT, TTS, VAD, WakeWord
 from .audio_sink import AudioSink, FrameTooShort
 from .config import (
     local_config_dir,
@@ -55,6 +56,7 @@ from .config import (
     STTConfig,
     TTSConfig,
     VADConfig,
+    WakeConfig,
     load_glados_config,
     load_rooms_config,
     load_servers_config,
@@ -66,6 +68,7 @@ from . import memory_gate
 from .ollama_lifecycle import OllamaLifecycle
 from .cart_verifier import CartVerifier
 from .organizer import Organizer
+from .wake import Admission, WakeGate, WakeTimings
 from .prompt_budget import measure_boot_budget
 from .release import describe_release
 from .secrets import KeyringSecrets, SecretsStore
@@ -461,6 +464,69 @@ def _build_vad(cfg: VADConfig) -> VAD:
     return FakeVAD(utterance_samples=cfg.fake_utterance_samples)
 
 
+@dataclass(frozen=True)
+class _WakeWiring:
+    gate: WakeGate
+    cfg: WakeConfig
+    detector_factory: Callable[[], WakeWord]
+    rooms_cfg: RoomsConfig
+
+
+def _room_wake_mode(glados_cfg: GladosConfig, rooms_cfg: RoomsConfig, room_id: str) -> str:
+    policy = rooms_cfg.policy_for(room_id)
+    if policy is not None and policy.wake_mode is not None:
+        return policy.wake_mode
+    return glados_cfg.wake.mode
+
+
+def _build_wake(
+    glados_cfg: GladosConfig, rooms_cfg: RoomsConfig, cfg_dir: Path
+) -> _WakeWiring | None:
+    """Wake wiring, or None when no room requires a wake. Verifies the model
+    files against their pins NOW, so a bad model refuses the boot instead of
+    failing on the first connection (DESIGN.md decision 11)."""
+    rooms = {c.room_id for c in rooms_cfg.clients}
+    modes = {room: _room_wake_mode(glados_cfg, rooms_cfg, room) for room in rooms}
+    if "required" not in modes.values():
+        return None
+    cfg = glados_cfg.wake
+    gate = WakeGate(
+        timings=WakeTimings(
+            armed_window_s=cfg.armed_window_s,
+            followup_window_s=cfg.followup_window_s,
+            dedup_window_s=cfg.dedup_window_s,
+        ),
+        mode_for_room=lambda room: modes.get(room, cfg.mode),
+        gain_for_room=lambda room: (
+            p.wake_gain_db if (p := rooms_cfg.policy_for(room)) is not None else 0.0
+        ),
+    )
+    return _WakeWiring(gate, cfg, _wake_detector_factory(cfg, cfg_dir), rooms_cfg)
+
+
+def _wake_detector_factory(cfg: WakeConfig, cfg_dir: Path) -> Callable[[], WakeWord]:
+    if cfg.backend == "fake":
+        from ..audio.wake.fake import FakeWakeWord
+
+        return FakeWakeWord
+    from ..audio.wake.openwakeword import OpenWakeWord, verify_model_files
+
+    model_dir = Path(cfg.model_dir)
+    if not model_dir.is_absolute():
+        model_dir = cfg_dir / model_dir
+    files = (cfg.model_file, cfg.melspec_file, cfg.embedding_file)
+    unpinned = [name for name in files if name not in cfg.sha256]
+    if unpinned:
+        raise RuntimeError(f"wake: model files without a sha256 pin: {unpinned}")
+    verify_model_files(model_dir, cfg.sha256)
+    return lambda: OpenWakeWord(
+        model_path=model_dir / cfg.model_file,
+        melspec_path=model_dir / cfg.melspec_file,
+        embedding_path=model_dir / cfg.embedding_file,
+        threshold=cfg.threshold,
+    )
+
+
 def _build_stt(cfg: STTConfig) -> STT:
     if cfg.backend == "faster-whisper":
         from ..audio.stt.whisper import WhisperSTT
@@ -601,7 +667,10 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     notify_observers = _make_notify_observers(admin_conns, admin_observed)
 
     sessions = SessionRegistry(idle_window_s=glados_cfg.session.idle_window_s)
+    wake = _build_wake(glados_cfg, rooms_cfg, cfg_dir)
     organizer = Organizer(
+        wake_gate=wake.gate if wake is not None else None,
+        wake_aliases=glados_cfg.wake.aliases,
         llm=llm,
         tts=tts,
         mcp=mcp,
@@ -964,6 +1033,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     # Stored on state so tests can swap it post-`build_app()` the same
     # way they swap stt/tts.
     app.state.vad_factory = _build_vad
+    app.state.wake = wake
     # Secrets store: defaults to the real OS keyring. Tests inject
     # InMemorySecrets via `app.state.secrets = ...` after build_app().
     app.state.secrets = KeyringSecrets()
@@ -1251,6 +1321,7 @@ def _register_routes(app: FastAPI) -> None:
                 state.organizer,
                 client_id,
                 state.vad_factory,
+                _wake_hook(state.wake, state.organizer, binding),
             )
             await _serve(ws, client_id, pipeline, state.organizer)
         except WebSocketDisconnect:
@@ -1277,22 +1348,67 @@ def _build_pipeline(
     organizer: Organizer,
     client_id: str,
     vad_factory: Callable[[VADConfig], VAD],
+    wake: "_PipelineWakeHook | None" = None,
 ) -> AudioPipeline:
+    # No WAV trace in a wake-gated room: it would write un-woken speech to
+    # disk, which the gate exists to prevent (ARCH section 9).
     sink = (
         AudioSink(glados_cfg.server.traces_dir, client_id)
-        if glados_cfg.audio.wav_traces
+        if glados_cfg.audio.wav_traces and wake is None
         else None
     )
 
-    async def on_utterance(text: str, captured_at: float) -> None:
-        await organizer.handle_audio_text(client_id, text, captured_at)
+    async def on_utterance(
+        text: str, captured_at: float, admission: Admission | None = None
+    ) -> None:
+        await organizer.handle_audio_text(client_id, text, captured_at, admission)
 
     return AudioPipeline(
         sink=sink,
         vad=vad_factory(glados_cfg.vad),
         stt=stt,
         on_utterance=on_utterance,
+        wake=wake,
     )
+
+
+class _PipelineWakeHook:
+    """Binds one mic connection's detector to the Organizer's wake gate."""
+
+    def __init__(self, detector: WakeWord, cooldown_s: float, organizer: Organizer, client_id: str) -> None:
+        self.detector = detector
+        self.cooldown_s = cooldown_s
+        self._organizer = organizer
+        self._client_id = client_id
+
+    def on_hit(self, score: float, energy_dbfs: float, at: float) -> None:
+        self._organizer.wake_hit(self._client_id, score, energy_dbfs, at)
+
+    def on_fault(self) -> None:
+        self._organizer.wake_fault(self._client_id)
+
+    async def decide(self, start: float, end: float) -> Admission | None:
+        return await self._organizer.wake_decide(self._client_id, start, end)
+
+
+class _NeverWakes:
+    """Detector for a non-mic role in a wake-required room: its audio can
+    never arm a room, only pass where an un-woken segment may."""
+
+    def feed(self, pcm: bytes) -> list[float]:
+        return []
+
+    def reset(self) -> None:
+        pass
+
+
+def _wake_hook(
+    wake: _WakeWiring | None, organizer: Organizer, binding: ClientBinding
+) -> _PipelineWakeHook | None:
+    if wake is None or wake.gate.mode(binding.room_id) != "required":
+        return None
+    detector = wake.detector_factory() if binding.role == "mic" else _NeverWakes()
+    return _PipelineWakeHook(detector, wake.cfg.cooldown_s, organizer, binding.client_id)
 
 
 async def _handshake(
