@@ -20,3 +20,6 @@ client_room/deploy/termux/glados-room.env
 # state, never committed.
 client_room/deploy/termux/service/*/down
 dist/
+
+# Wake-word model files (DESIGN.md, wake word): pinned by sha256 in glados.toml, not committed.
+configs/models/
