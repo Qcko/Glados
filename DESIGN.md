@@ -1,3 +1,119 @@
+# DESIGN - wake word ("Hey GLaDOS") and cross-room wake arbitration
+
+Status: revised after roster, awaiting user sign-off (17-10-2026). ARCH section 12 v4.
+
+## The problem
+
+Every utterance the VAD closes on any mic becomes a turn. A TV, a phone call,
+or two people chatting in the kitchen all reach the LLM. With a second room
+online, one spoken command heard by two mics runs twice. ARCH section 3 item 2
+promised dedup; it was never built.
+
+## Decisions (revised after the design roster, 17-10-2026)
+
+1. **Detection runs on the server, one detector per mic connection** -- not on
+   the phone. The phone already streams every frame (dumb client, ARCH 2);
+   Termux has no reliable onnxruntime; every hit lands on one server clock, so
+   arbitration is a comparison, not a clock-sync problem. Clean-slate seat
+   reached the same shape independently (verdict: keep-and-patch).
+2. **`WakeWord` adapter mirrors `VAD`**: sync `feed(pcm) -> list[float]`
+   (scores above threshold) + `reset()`. The pipeline turns a hit into
+   `WakeHit(client_id, room_id, score, energy_dbfs, at)`: `at` is the frame's
+   ARRIVAL time taken before inference; `energy_dbfs` comes from a ~1 s RMS
+   ring buffer in the pipeline; `room_id` is the SERVER-side binding, never a
+   client field. Inference runs on a single-worker executor per pipeline
+   (ordered per connection, off the event loop); bounded, drops logged. A
+   per-pipeline 1.5 s cooldown collapses the burst of hits one phrase makes.
+   ARCH 6's async `listen()` sketch is replaced. Backends: `openwakeword`,
+   `fake` (scripted by frame index).
+3. **Gate BEFORE STT, not after (privacy, ARCH 9).** The pipeline asks the
+   Organizer at VadEnd whether to transcribe the segment: yes if a winning hit
+   for this connection lies in `[vad_start, vad_end]`, the room is armed, its
+   follow-up window is open, a confirm is pending, or a turn is in flight
+   (barge-in). Otherwise the segment is discarded untranscribed and the drop is
+   logged as room + duration + reason -- never text, no trace. Conversations
+   GLaDOS was not addressed in are never written down.
+4. **Admission is an interval test over stored wins.** Each room keeps its
+   recent winning hits (pruned after `armed_window_s`, default 8 s) and its
+   lost hits. Segment admitted if `start in [win.at, win.at + armed]` or
+   `win.at in [start, end + 0.3 s]`. A segment containing a LOST hit is dropped
+   even if a follow-up window is open (the losing room never runs the command).
+   The pipeline passes `(text, start_at, end_at)`.
+5. **Winning mic owns the room** from the win until the follow-up window
+   closes; other mics in that room are not admitted meanwhile (two-mic rooms
+   run a command once).
+6. **Wake-only segment arms, starts no turn.** The phrase is stripped from the
+   transcript by a pure helper over configured aliases incl. Whisper spellings
+   ("hey glados", "hey gladys", "hey jarvis" for the stand-in), with a test
+   corpus. Empty after strip -> no turn.
+7. **Follow-ups without re-wake** for `followup_window_s` (6 s) after a
+   room's `last_turn_end` (own per-room stamp, not gate internals). A wake in
+   the window extends it. Barge-in and confirm answers keep today's rules;
+   confirm stays restricted to the room's own mic role.
+8. **Cross-room arbitration (WakeArbiter, pure class, injected clock/timer).**
+   First hit opens a 0.5 s window (widened from ARCH 3's 0.3 s for LAN
+   arrival jitter); best hit per connection kept; winner = highest
+   `energy_dbfs + room gain offset` (score breaks ties). Losers logged with
+   room/score/energy, no text. Global by default; acoustic zones are a later
+   add if two separate rooms ever wake within 0.5 s.
+9. **Self-wake guard: a hit while ANY room's TTS gate is closed is ignored.**
+   Covers GLaDOS's voice from the kitchen waking the living room. Cost: you
+   cannot wake GLaDOS while she is speaking anywhere -- "stop" still works.
+10. **Wake admission is not authorisation.** Mutating tools keep the ARCH 3 /
+    DESIGN-voice-confirm gate unchanged. Admitted turns record why
+    (armed / one-breath / follow-up / confirm / barge-in) in the trace.
+11. **Rollout and failure.** `[wake] mode = "off" | "required"` in
+    glados.toml (default `off` = today), per-room `wake_mode` override in
+    rooms.toml; rooms with `off` do not enter arbitration. No runtime model
+    download: model path + pinned sha256 in config, checked at boot; a missing
+    or mismatched model when any room is `required` fails boot. A runtime
+    detector fault in a `required` room fails CLOSED (nothing admitted but
+    barge-in, logged loudly) -- never falls back to always-listening.
+12. **Prototype first.** Ship with openWakeWord's pretrained "hey_jarvis" in
+    the kitchen only; the custom "hey_glados" model is a later file swap
+    (training on the devbox GPU, queued behind tracks 3/4).
+13. **UI `user_text` is never gated.**
+
+## Deliberately not built (known-issue list)
+
+- Earcon / "listening" cue on wake.
+- Waking GLaDOS mid-reply ("Hey GLaDOS, stop") -- excluded by decision 9;
+  "stop" covers it.
+- Audio-trim of the wake phrase before STT (text strip first; trim if the
+  alias strip proves leaky).
+- Capture-clock timestamps from client sample counts (client drop-oldest
+  queue makes the count drift); revisit if 0.5 s proves too narrow.
+- Acoustic zones; per-room thresholds; phone-side detection.
+- Custom "hey_glados" training (own slice, GPU queue).
+
+## The flow
+
+```mermaid
+flowchart TD
+    mic["mic client (phone)<br/>streams every frame, unchanged"] -->|"audio_chunk"| ww
+    mic -->|"audio_chunk"| vad
+    subgraph pipe["AudioPipeline, one per mic connection"]
+        vad["VAD"]
+        stt["STT"]
+        ww["WakeWord.feed<br/>openWakeWord ONNX"]
+    end
+    ww -->|"WakeHit(room, score, energy, at)"| arb
+    vad -->|"segment start/end: transcribe?"| adm
+    adm -->|"yes"| stt
+    stt -->|"text"| turn
+    subgraph org["Organizer"]
+        arb["WakeArbiter<br/>0.5 s window across mics<br/>loudest wins; hits during ANY TTS gate ignored"]
+        arb -->|"winner only"| armed["room ARMED<br/>for armed_window_s"]
+        adm{"transcribe segment?<br/>won hit inside, armed, follow-up,<br/>confirm pending, turn in flight"}
+        armed --> adm
+        turn["strip wake phrase -> handle_user_text<br/>(empty = wake-only, no turn)"]
+        adm -->|"no"| drop["discarded UNTRANSCRIBED<br/>log: room, duration, reason"]
+    end
+    ui["ui client user_text"] -->|"never gated"| turn
+```
+
+---
+
 # DESIGN — spoken-length cap on tool results
 
 ## The problem
