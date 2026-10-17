@@ -55,3 +55,5 @@ default_user = "qcko"
 # announce_sources = ["desk"]                    # omit for "any room"; [] for none
 # quiet_hours = { start = "22:00", end = "07:00" }
 # announce_veto_pause = true                     # default; false for one utterance
+# memory = false                                 # per-speaker memory opt-in (DESIGN-speaker-memory.md);
+#                                                # leave off where a TV or radio is in earshot

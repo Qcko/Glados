@@ -24,6 +24,8 @@ from ...core.adapters import (
 
 
 class FakeLLM:
+    is_local = True
+
     async def chat(
         self, messages: list[LLMMessage], tools: list[ToolSpec]
     ) -> AsyncIterator[LLMEvent]:

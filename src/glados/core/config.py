@@ -351,6 +351,28 @@ class SessionConfig(BaseModel):
     history_max_turns: int = 8
 
 
+class MemoryConfig(BaseModel):
+    """Per-speaker long-term memory (DESIGN-speaker-memory.md, ARCH section 14
+    Layer 3). Off by default and off in the shipped config until the dispatch
+    suite has passed with a full block injected on every live model surface
+    (ARCH section 8 behavioural ceiling). A room also has to opt in with
+    `memory = true` on its `[[rooms]]` row.
+
+    `db_path` holds personal data in plaintext: keep it outside any repo tree.
+    `writer_model` is the bake-off seam; empty means `[llm].model`, which is
+    the only value that keeps the model resident without a reload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    db_path: Path = Path("data/speaker_memory.sqlite")
+    writer_model: str = ""
+    writer_num_predict: int = 256
+    max_facts: int = 30
+    inject_chars: int = 600
+    idle_s: float = 60.0
+
+
 class CartVerifyConfig(BaseModel):
     """Read the real cart before and after a turn's cart writes and speak
     what changed instead of the model's reply (DESIGN-cart-verify.md). Only
@@ -457,6 +479,7 @@ class GladosConfig(BaseModel):
     llm: LLMConfig = LLMConfig()
     router: RouterConfig = RouterConfig()
     session: SessionConfig = SessionConfig()
+    memory: MemoryConfig = MemoryConfig()
     cart_verify: CartVerifyConfig = CartVerifyConfig()
     audio: AudioConfig = AudioConfig()
     vad: VADConfig = VADConfig()
@@ -805,6 +828,10 @@ class RoomPolicy(BaseModel):
     announce_sources: list[str] | None = None
     quiet_hours: QuietHours | None = None
     announce_veto_pause: bool = True
+    # Opt-in to per-speaker memory (DESIGN-speaker-memory.md). Until voice-ID,
+    # every voice in the room writes into its default user, so leave it off in
+    # a room with a TV or radio in earshot.
+    memory: bool = False
 
     def allows_source(self, source_room: str) -> bool:
         return self.announce_sources is None or source_room in self.announce_sources

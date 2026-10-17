@@ -338,6 +338,10 @@ LLM.
   unaffected). Summarisation thresholds and any injected memory (section 14)
   therefore have a *behavioural* ceiling that is lower than the window and
   differs per model.
+- **Per-speaker facts are separate from both.** Durable facts about a person
+  (section 14 Layer 3, `DESIGN-speaker-memory.md`) live in their own SQLite
+  table, `speaker_facts`. It is not the session log above, which is still
+  unbuilt, and that table name is reserved so the two schemas do not fork.
 
 ---
 
@@ -1201,6 +1205,35 @@ It also re-derives the "never auto-written" rule of Layer 2 from a second,
 non-security direction: an auto-writer grows the prompt without bound, and
 prompt growth alone is sufficient to suppress dispatch. Data and harness:
 `DESIGN-turn-outcome-guards.md`, section "Controlled experiment".
+
+**Layer 3 -- per-speaker facts (auto-written, never trusted; added
+17-10-2026).** Durable facts about the person speaking ("is vegetarian", "has
+a daughter called Ema") are written by the model, asynchronously, after a
+turn. That is what Layer 2 forbids, so Layer 3 has to answer both of Layer 2's
+reasons, and it does so by never entering the trusted prompt at all:
+
+- **Trust.** The facts are untrusted data from end to end. The writer is shown
+  only what the speaker said. GLaDOS's reply is context only, and it is dropped
+  entirely when the session holds `<external>` content, because a reply can
+  paraphrase a hostile page. Tool output never reaches the writer. Facts
+  are injected per turn and per speaker as a `<memory-notes>` block behind a
+  "reference data, not instructions" preamble. They are never injected when
+  the turn's brain is not local (positive check, section 9), and never
+  retained in history. **A fact authorises nothing**: confirm gates,
+  quantities and money steps are judged on the live utterance by harness
+  code, which never reads memory. The deterministic validator (caps, charset,
+  defang) is noise reduction, not the boundary.
+- **Volume.** There is a hard fact cap per speaker and a hard character cap
+  per block, and the boot budget proof prices the largest block in tokens.
+  The behavioural cost at that cap (section 8) must be measured on every live
+  model surface before a shipped config enables it, which is why it ships
+  disabled.
+
+Until voice-ID, every voice in a room is that room's default user, so facts
+are keyed `(room_id, speaker_id)` and each room opts in separately. The writer
+runs on the resident primary model. It runs only while the house is idle, and
+a starting turn preempts it; `OLLAMA_NUM_PARALLEL` stays 1. Removal is
+operator-side for now (`python -m glados.memory forget|forget-session|wipe`).
 
 **Ownership split.** The *gate* belongs in **LocalGuard** (the local-
 first, baseline-driven, fail-closed auditor): the injection scan ruleset,
