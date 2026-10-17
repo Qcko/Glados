@@ -43,6 +43,7 @@ Everything lives under one root on prod (`<root>`, chosen at bootstrap):
 | `logs\` | `glados.log` and `stdout.log` | GLaDOS |
 | `dunnes\<sha>\`, `dunnes\current` | Dunnes MCP server builds | deploy |
 | `secrets\` | Dunnes browser profile | the Dunnes server |
+| `secrets\inbox\` | client tokens waiting to be registered (transient) | you; GLaDOS deletes them |
 
 Only administrators write code or config; the service account reads the
 release and writes only `state`, `logs`, caches and `secrets`.
@@ -113,15 +114,43 @@ model surface.
    `GLADOS_PROD_SSH_HOST` to it, ship the Dunnes build (`-Dunnes`), then the
    first tag. That first deploy builds the release but reports "not ready":
    no client token exists yet.
-6. Put each prod client's token in `<root>\secrets\<client-id>.token` and
-   store it **as the service account**, so the service can read it:
-   `runas /user:glados-svc "powershell -NoProfile -ExecutionPolicy Bypass -File <root>\bin\set-client-auth.ps1 -ClientId prod-desk-ui"`.
-   It reads back what it stored. Do not use the interactive
-   `glados.secrets set` prompt here: its input is hidden and unconfirmed, and
-   a console paste can be stored as a control character. Then deploy the
-   same tag again (it reuses the build).
+6. Register each prod client's token (see "Adding or rotating a client
+   token" below), then deploy the same tag again (it reuses the build).
 7. Log into Dunnes once as the service account (the task has no desktop, so
    `bootstrap_login`'s window can never be seen there):
    `runas /user:glados-svc "powershell -NoProfile -ExecutionPolicy Bypass -File <root>\bin\dunnes-login.ps1"`,
    log in, close Edge, then stop the Edge background processes left running
    as the service account before GLaDOS opens the profile.
+
+## Adding or rotating a client token
+
+No one types the service account's password. The `GLaDOS` task already runs
+as that account, and its launcher (`run-glados.ps1`) stores every token it
+finds in `<root>\secrets\inbox\` in that account's keyring before the server
+starts. The design is in DESIGN.md, under "registering client tokens without
+the service password".
+
+1. Add the client id to `[auth].clients` (tracked config or the box's
+   `local\glados.local.toml`). A token for an id that is not listed stays in
+   the inbox.
+2. From the devbox, copy the token in under a temporary name, then rename it,
+   so the launcher never reads a half-copied file:
+   `scp <token-file> denathrius:<root>/secrets/inbox/<client-id>.token.part`
+   then `ssh denathrius "Rename-Item <root>\secrets\inbox\<client-id>.token.part <client-id>.token"`.
+3. `deploy-prod.ps1 -Restart`. It prints one `ingest:` line per file
+   (`registered`, `rotated`, or `kept` with a reason), and warns if any token
+   file is still in the inbox. The same lines appear under `-Status`; the
+   detail is in `<root>\logs\secrets-ingest.log`. Names only, never values.
+4. Delete the devbox copy once the client connects.
+
+The launcher refuses to ingest anything unless the inbox ACL is exactly what
+bootstrap sets (administrators and SYSTEM full control, the service account
+read and delete, no inheritance). If a box was bootstrapped before this
+existed, re-run `bootstrap.ps1` as an administrator to create the inbox.
+
+After a forced reset of the service account's password (which wipes its
+keyring), put every token back in the inbox and restart: it is the same path.
+
+`set-client-auth.ps1` (run through `runas /user:glados-svc`) still works if
+you have the password, and remains the fallback for secrets other than client
+tokens.

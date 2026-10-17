@@ -233,10 +233,30 @@ function Stop-Unready {
 
 function Restart-Current {
     Stop-Glados
+    Remove-Item (Join-Path $Root 'state\secrets-ingest.json') -ErrorAction SilentlyContinue
     Start-ScheduledTask -TaskName $TaskName
     $tag = Get-CurrentName
-    if (-not (Wait-Ready $tag)) { Fail "restarted $tag but it did not become ready" }
+    $ready = Wait-Ready $tag
+    Write-IngestSummary
+    if (-not $ready) { Fail "restarted $tag but it did not become ready" }
     Write-Output "RESTARTED $tag"
+}
+
+function Write-IngestSummary {
+    # Names and outcomes only; run-glados.ps1 writes it, values never leave the keyring.
+    $pending = @(Get-ChildItem (Join-Path $Root 'secrets\inbox') -Filter '*.token' -File -ErrorAction SilentlyContinue)
+    $summary = Join-Path $Root 'state\secrets-ingest.json'
+    if (Test-Path $summary) {
+        Write-Output "ingest:    last run $((Get-Item $summary).LastWriteTime.ToString('dd-MM-yyyy HH:mm'))"
+        # Assigned first: PS 5.1 emits a JSON array as ONE object through a pipeline.
+        $outcomes = Get-Content -Raw $summary | ConvertFrom-Json
+        foreach ($o in $outcomes) {
+            Write-Output "ingest:    $($o.result) $($o.name) $($o.reason)".TrimEnd()
+        }
+    }
+    if ($pending.Count) {
+        Write-Output "ingest:    $($pending.Count) token file(s) still in the inbox; see logs\secrets-ingest.log"
+    }
 }
 
 # ---- rollback / status -------------------------------------------------
@@ -266,6 +286,7 @@ function Show-Status {
     Write-Output "last good: $(Get-Content (Join-Path $Root 'last-good.txt') -ErrorAction SilentlyContinue)"
     Write-Output "task:      $((Get-ScheduledTask -TaskName $TaskName).State)"
     Write-Output "healthz:   $(Get-Health | ConvertTo-Json -Compress -Depth 5)"
+    Write-IngestSummary
 }
 
 # ---- Dunnes server -----------------------------------------------------
