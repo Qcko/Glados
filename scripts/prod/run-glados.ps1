@@ -21,6 +21,7 @@ $env:GLADOS_HOST = '0.0.0.0'
 $env:GLADOS_TLS_CERT = Join-Path $Root 'tls\cert.pem'
 $env:GLADOS_TLS_KEY = Join-Path $Root 'tls\key.pem'
 $env:GLADOS_OLLAMA_AUTOSTART = '0'
+$env:GLADOS_ADMIN_PORT = '9765'
 $env:HF_HOME = Join-Path $Root 'cache\hf'
 $env:GLADOS_PIPER_VOICES_DIR = Join-Path $Root 'cache\piper\voices'
 

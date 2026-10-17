@@ -33,7 +33,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_del.add_argument("name")
 
     p_ingest = sub.add_parser(
-        "ingest", help="Store every allowlisted <client>.token in a directory, then delete it."
+        "ingest",
+        help="Store every allowlisted <client>.token (and the reserved "
+        "admin.observe-token.token) in a directory, then delete it.",
     )
     p_ingest.add_argument("inbox", type=Path)
     p_ingest.add_argument("--summary", type=Path, help="Write outcomes (no values) as JSON here.")

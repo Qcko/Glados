@@ -11,7 +11,7 @@ import pytest
 
 from glados.core.secrets import InMemorySecrets
 from glados.secrets import run
-from glados.secrets.ingest import SCOPE, ingest_dir
+from glados.secrets.ingest import ADMIN_FILE, ADMIN_NAME, ADMIN_SCOPE, SCOPE, ingest_dir
 
 TOKEN = "A" * 20 + "b-_" + "9" * 20
 NON_ASCII = chr(0xE9) * 40
@@ -183,6 +183,62 @@ def test_rerun_after_success_is_a_no_op(tmp_path):
     ingest_dir(tmp_path, ["kitchen-mic"], store)
 
     assert ingest_dir(tmp_path, ["kitchen-mic"], store) == []
+
+
+def _drop_admin(inbox, value=TOKEN + "\r\n"):
+    path = inbox / ADMIN_FILE
+    path.write_bytes(value.encode("utf-8"))
+    return path
+
+
+def test_admin_secret_is_stored_without_being_a_listed_client(tmp_path):
+    store = InMemorySecrets()
+    path = _drop_admin(tmp_path)
+
+    (outcome,) = ingest_dir(tmp_path, [], store)
+
+    assert (outcome.name, outcome.result, outcome.reason) == ("admin/observe-token", "registered", "")
+    assert store.get(ADMIN_SCOPE, ADMIN_NAME) == TOKEN
+    assert store.get(SCOPE, "admin.observe-token") is None
+    assert not path.exists()
+
+
+def test_admin_secret_still_gets_the_value_check(tmp_path):
+    store = InMemorySecrets()
+    path = _drop_admin(tmp_path, "short")
+
+    (outcome,) = ingest_dir(tmp_path, [], store)
+
+    assert (outcome.result, outcome.reason) == ("kept", "value is not a token")
+    assert path.exists()
+    assert store.get(ADMIN_SCOPE, ADMIN_NAME) is None
+
+
+def test_admin_secret_still_gets_the_link_check(tmp_path):
+    path = _drop_admin(tmp_path)
+    os.link(path, tmp_path / "elsewhere")
+
+    (outcome,) = ingest_dir(tmp_path, [], InMemorySecrets())
+
+    assert outcome.reason == "file has more than one hard link"
+
+
+def test_a_client_named_admin_stays_a_client_token(tmp_path):
+    store = InMemorySecrets()
+    _drop(tmp_path, "admin")
+
+    (outcome,) = ingest_dir(tmp_path, ["admin"], store)
+
+    assert outcome.name == "admin"
+    assert store.get(SCOPE, "admin") == TOKEN
+    assert store.get(ADMIN_SCOPE, ADMIN_NAME) is None
+
+
+def test_other_dotted_names_are_ignored(tmp_path):
+    (tmp_path / "admin.other.token").write_text(TOKEN)
+    (tmp_path / "client-tokens.kitchen-mic.token").write_text(TOKEN)
+
+    assert ingest_dir(tmp_path, ["kitchen-mic"], InMemorySecrets()) == []
 
 
 def test_cli_uses_merged_config_and_writes_summary_without_values(tmp_path, monkeypatch):

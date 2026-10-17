@@ -89,22 +89,46 @@ def _run_with_admin(server, ssl_args: dict) -> None:
         )
     )
     _stop_on_request(app, [main_server, admin_server])
+    asyncio.run(_serve_both(main_server, admin_server))
 
-    async def _serve_both() -> None:
-        # Each Server.serve() installs its own signal handlers; the second
-        # install wins, so a Ctrl-C only flips one server's should_exit. Wait
-        # for whichever stops first (signal or crash), then tell the other to
-        # exit too -- otherwise gather would hang forever on the survivor.
-        tasks = [
-            asyncio.create_task(main_server.serve()),
-            asyncio.create_task(admin_server.serve()),
-        ]
-        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        main_server.should_exit = True
-        admin_server.should_exit = True
-        await asyncio.gather(*tasks)
 
-    asyncio.run(_serve_both())
+async def _serve_both(main_server, admin_server) -> None:
+    """Each Server.serve() installs its own signal handlers; the second install
+    wins, so a Ctrl-C only flips one server's should_exit. Wait for whichever
+    stops first, then tell the other to exit too -- otherwise gather would hang
+    forever on the survivor. The one exception: an admin viewer that could not
+    start (port taken) must not take the voice service down with it."""
+    import asyncio
+
+    main_task = asyncio.create_task(main_server.serve())
+    admin_task = asyncio.create_task(_serve_admin(admin_server))
+    done, _ = await asyncio.wait(
+        [main_task, admin_task], return_when=asyncio.FIRST_COMPLETED
+    )
+    if main_task not in done and admin_task.result() == _ADMIN_FAILED_TO_START:
+        await main_task
+        return
+    main_server.should_exit = True
+    admin_server.should_exit = True
+    await asyncio.gather(main_task, admin_task)
+
+
+_ADMIN_FAILED_TO_START = "failed-to-start"
+
+
+async def _serve_admin(admin_server) -> str:
+    """uvicorn reports a failed bind by calling sys.exit(1) inside serve()."""
+    import logging
+
+    try:
+        await admin_server.serve()
+    except SystemExit:
+        logging.getLogger("glados").error(
+            "admin viewer failed to start on 127.0.0.1:%s; serving without it",
+            admin_server.config.port,
+        )
+        return _ADMIN_FAILED_TO_START
+    return "stopped"
 
 
 def _tls_args(certfile: str, keyfile: str) -> dict:

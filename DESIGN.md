@@ -140,7 +140,7 @@ flowchart TD
     any -- no --> server["exec glados.exe"]
     any -- yes --> acl{"inbox ACL + owner ok,<br/>not a reparse point?"}
     acl -- no --> refuse["ingest nothing,<br/>log refusal"] --> server
-    acl -- yes --> each["per file: name pattern, id in<br/>merged [auth].clients, nlink=1,<br/>value charset + length"]
+    acl -- yes --> each["per file: id in merged [auth].clients<br/>(or the reserved admin file), nlink=1,<br/>value charset + length"]
     each -- bad --> keep["leave file, log name + reason"]
     each -- ok --> store["keyring set, get, compare"]
     store -- mismatch / error --> keep
@@ -173,9 +173,16 @@ flowchart TD
 - **Write order:** set, get, constant-time compare, then delete. A failed delete
   after a good store is a WARN (a token left at rest); the next run is
   idempotent.
-- **Scope:** `client-tokens` only. The ingest logic is a small generic function
-  (dir, allowlist, store) so another service account's launcher (calendar-svc)
-  can reuse the pattern; GLaDOS does not take more scopes until one needs it.
+- **Scope:** `client-tokens`, plus exactly one reserved file,
+  `admin.observe-token.token` -> `admin`/`observe-token`, the secret of the
+  loopback admin room viewer (prod launcher sets `GLADOS_ADMIN_PORT=9765`).
+  Matched by exact name, never a widened pattern: client ids cannot contain a
+  dot, so it cannot collide with a client, and other dotted names are ignored.
+  It skips only the `[auth].clients` check; link, regular-file and value checks
+  still apply. Rotation = ingest + restart: auth is checked once per handshake,
+  so a viewer opened with the old secret stays open until the restart. View it
+  only through a loopback SSH tunnel (`ssh -L 9766:127.0.0.1:9765 <prod>`),
+  never `-g` or a non-loopback bind.
 - **Trigger:** the existing `restart` verb; no new verb. `status` and `restart`
   print the last ingest summary.
 - **Recovery after a forced password reset:** drop every token in the inbox,

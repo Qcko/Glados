@@ -1,4 +1,5 @@
-"""Move client tokens from an inbox directory into the running account's keyring.
+"""Move client tokens (and the one reserved admin secret) from an inbox
+directory into the running account's keyring.
 
 Run by the prod launcher as the service account, so the token lands in the
 vault the server reads without anyone typing that account's password (see
@@ -20,10 +21,21 @@ from typing import Callable, Iterable
 from ..core.secrets import SecretsStore
 
 SCOPE = "client-tokens"
+ADMIN_FILE = "admin.observe-token.token"
+ADMIN_SCOPE = "admin"
+ADMIN_NAME = "observe-token"
 _NAME = re.compile(r"[a-z0-9-]+\.token")
 _VALUE = re.compile(r"[A-Za-z0-9_-]{32,128}")
 _UTF8_BOM = b"\xef\xbb\xbf"
-_REPARSE_POINT =getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+@dataclass(frozen=True)
+class _Target:
+    label: str
+    scope: str
+    name: str
+    refusal: str
 
 
 @dataclass(frozen=True)
@@ -46,35 +58,41 @@ def ingest_dir(
 ) -> list[Outcome]:
     allowed_ids = set(allowed)
     return [
-        _ingest_file(path, allowed_ids, store, scope, remove)
+        _ingest_file(path, target, store, remove)
         for path in sorted(inbox.iterdir())
-        if _NAME.fullmatch(path.name)
+        if (target := _target_for(path.name, allowed_ids, scope)) is not None
     ]
+
+
+def _target_for(filename: str, allowed_ids: set[str], scope: str) -> _Target | None:
+    if filename == ADMIN_FILE:
+        return _Target(f"{ADMIN_SCOPE}/{ADMIN_NAME}", ADMIN_SCOPE, ADMIN_NAME, "")
+    if not _NAME.fullmatch(filename):
+        return None
+    client_id = filename[: -len(".token")]
+    refusal = "" if client_id in allowed_ids else "client id is not in [auth].clients"
+    return _Target(client_id, scope, client_id, refusal)
 
 
 def _ingest_file(
     path: Path,
-    allowed_ids: set[str],
+    target: _Target,
     store: SecretsStore,
-    scope: str,
     remove: Callable[[Path], None],
 ) -> Outcome:
-    client_id = path.name[: -len(".token")]
     try:
-        refusal = _refuse_file(path, client_id, allowed_ids)
+        refusal = target.refusal or _refuse_file(path)
         value = None if refusal else _read_value(path)
     except OSError as exc:
-        return Outcome(client_id, "kept", f"read error: {type(exc).__name__}")
+        return Outcome(target.label, "kept", f"read error: {type(exc).__name__}")
     if refusal:
-        return Outcome(client_id, "kept", refusal)
+        return Outcome(target.label, "kept", refusal)
     if value is None:
-        return Outcome(client_id, "kept", "value is not a token")
-    return _store_and_remove(path, client_id, value, store, scope, remove)
+        return Outcome(target.label, "kept", "value is not a token")
+    return _store_and_remove(path, target, value, store, remove)
 
 
-def _refuse_file(path: Path, client_id: str, allowed_ids: set[str]) -> str:
-    if client_id not in allowed_ids:
-        return "client id is not in [auth].clients"
+def _refuse_file(path: Path) -> str:
     info = os.lstat(path)
     if _is_link(path, info):
         return "file is a link or reparse point"
@@ -105,23 +123,22 @@ def _read_value(path: Path) -> str | None:
 
 def _store_and_remove(
     path: Path,
-    client_id: str,
+    target: _Target,
     value: str,
     store: SecretsStore,
-    scope: str,
     remove: Callable[[Path], None],
 ) -> Outcome:
     try:
-        previous = store.get(scope, client_id)
-        store.set(scope, client_id, value)
-        stored = store.get(scope, client_id) or ""
+        previous = store.get(target.scope, target.name)
+        store.set(target.scope, target.name, value)
+        stored = store.get(target.scope, target.name) or ""
     except Exception as exc:  # noqa: BLE001 - any keyring failure keeps the file
-        return Outcome(client_id, "kept", f"keyring error: {type(exc).__name__}")
+        return Outcome(target.label, "kept", f"keyring error: {type(exc).__name__}")
     if not hmac.compare_digest(stored.encode(), value.encode()):
-        return Outcome(client_id, "kept", "read-back mismatch")
+        return Outcome(target.label, "kept", "read-back mismatch")
     result = "registered" if previous is None else "rotated"
     try:
         remove(path)
     except OSError as exc:
-        return Outcome(client_id, result, f"WARN stored but file not deleted: {type(exc).__name__}")
-    return Outcome(client_id, result)
+        return Outcome(target.label, result, f"WARN stored but file not deleted: {type(exc).__name__}")
+    return Outcome(target.label, result)
