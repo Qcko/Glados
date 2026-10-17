@@ -143,7 +143,13 @@ Pre-registered:
 
 ## Coordination
 
-- Track 1 lands first; rebase before landing.
+- Track 1 landed 17-10-2026 (`3d9daca`, merged here). Two consequences:
+  (a) wake-gated rooms write NO WAV traces, so the prod trace window for
+  step 0 / the phone arm needs the kitchen room un-gated for that window (or a
+  trace exemption agreed with the wake design); (b) the transcribe-or-discard
+  decision now happens before STT, so a clip the wake gate drops never reaches
+  Whisper - onset loss after "Hey GLaDOS" is a new case step 0 must include.
+  Wake is off by default, so neither bites until it is enabled on prod.
 - Track 2: per-speaker results handed over as data; no interface asked now.
 - Track 3: GPU slot handshake before step 2.
 
