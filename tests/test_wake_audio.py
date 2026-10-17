@@ -336,3 +336,23 @@ def test_hook_only_for_required_rooms_and_never_wakes_for_non_mic(tmp_path: Path
     assert _wake_hook(wiring, organizer=None, binding=LIVING) is None
     assert isinstance(_wake_hook(wiring, None, KITCHEN).detector, FakeWakeWord)
     assert _wake_hook(wiring, None, KITCHEN_SPEAKER).detector.feed(b"\x00\x00") == []
+
+
+async def test_typed_turn_opens_no_mic_follow_up_window(tmp_path: Path) -> None:
+    async with desk_organizer(tmp_path, llm=FakeLLM(), bindings=BINDINGS, wake_gate=_gate(),
+                              wake_aliases=["hey glados"]) as h:
+        await h.org.handle_user_text("kitchen-mic", "typed question")
+        await _settle(h)
+        now = asyncio.get_running_loop().time()
+        await _say(h.org, "kitchen-mic", "overheard chat", now, now + 1)
+        await _settle(h)
+        assert _transcripts(h) == ["typed question"]
+
+
+def test_barge_in_with_the_wake_phrase_still_counts(tmp_path: Path) -> None:
+    from glados.core.organizer import Organizer
+
+    org = Organizer.__new__(Organizer)
+    org._wake_aliases = ["hey glados"]
+    kept = org._apply_admission("kitchen-mic", "Hey GLaDOS, stop", Admission("barge_in_only"))
+    assert kept == "stop"

@@ -62,7 +62,7 @@ class _Window:
 @dataclass
 class _RoomState:
     wins: list[WakeHit] = field(default_factory=list)
-    losses: list[float] = field(default_factory=list)
+    losses: list[tuple[str, float]] = field(default_factory=list)
     owner: str | None = None
     owner_until: float = float("-inf")
     last_turn_end: float | None = None
@@ -147,11 +147,17 @@ class WakeGate:
         for state in self._rooms.values():
             state.faulted.discard(client_id)
 
-    def turn_ended(self, room_id: str, at: float) -> None:
+    def turn_ended(self, room_id: str, at: float, started_at: float | None = None) -> None:
+        """Open the follow-up window. The owner mic keeps the room through it
+        only if it still owned the room when this turn began."""
         state = self._room(room_id)
         state.last_turn_end = at
-        if state.owner is not None:
-            state.owner_until = max(state.owner_until, at + self._t.followup_window_s)
+        if state.owner is None:
+            return
+        if state.owner_until >= (at if started_at is None else started_at):
+            state.owner_until = at + self._t.followup_window_s
+        else:
+            state.owner = None
 
     def decide(self, facts: SegmentFacts, now: float) -> Admission | Drop:
         self.settle(now)
@@ -164,7 +170,7 @@ class WakeGate:
     def _judge(self, state: _RoomState, facts: SegmentFacts) -> Admission | Drop:
         if facts.client_id in state.faulted:
             return Admission("barge_in_only") if facts.turn_in_flight else Drop("detector_fault")
-        if any(self._inside(at, facts) for at in state.losses):
+        if any(c == facts.client_id and self._inside(at, facts) for c, at in state.losses):
             return Drop("lost_arbitration")
         if self._owned_by_other(state, facts):
             return Drop("not_owner")
@@ -212,7 +218,7 @@ class WakeGate:
         )
         for hit in contenders:
             if hit is not winner:
-                self._room(hit.room_id).losses.append(hit.at)
+                self._room(hit.room_id).losses.append((hit.client_id, hit.at))
 
     def _followup_end(self, state: _RoomState) -> float:
         if state.last_turn_end is None:
@@ -222,7 +228,7 @@ class WakeGate:
     def _prune(self, state: _RoomState, now: float) -> None:
         horizon = now - self._t.armed_window_s - self._t.followup_window_s
         state.wins = [w for w in state.wins if w.at >= horizon]
-        state.losses = [at for at in state.losses if at >= horizon]
+        state.losses = [(c, at) for c, at in state.losses if at >= horizon]
 
     def _room(self, room_id: str) -> _RoomState:
         return self._rooms.setdefault(room_id, _RoomState())

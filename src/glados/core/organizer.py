@@ -1519,6 +1519,7 @@ class Organizer:
             self._inflight[session.session_id] = (task, session.room_id)
         trace = self.traces.open(session.session_id)
         cancelled = False
+        started_at = asyncio.get_running_loop().time()
         try:
             trace.event(
                 "turn_start",
@@ -1729,7 +1730,7 @@ class Organizer:
             trace.event("cancelled")
         finally:
             _TURN_CART.set(None)
-            self._stamp_turn_end(session.room_id)
+            self._stamp_turn_end(session.room_id, source, cancelled, started_at)
             entry = self._inflight.get(session.session_id)
             if entry is not None and entry[0] is task:
                 del self._inflight[session.session_id]
@@ -1845,15 +1846,19 @@ class Organizer:
         if self._wake_gate is not None:
             self._wake_gate.forget_client(client_id)
 
-    def _stamp_turn_end(self, room_id: str) -> None:
-        """Anchor the follow-up window on the later of now and the end of
-        the reply's estimated playback (the TTS gate horizon)."""
-        if self._wake_gate is None:
+    def _stamp_turn_end(
+        self, room_id: str, source: str, cancelled: bool, started_at: float
+    ) -> None:
+        """Open the follow-up window after a VOICE turn, anchored on the later
+        of now and the reply's estimated playback end (the TTS gate horizon);
+        a cancelled turn's reply was cut short, so it anchors on now. Typed
+        turns open no mic window."""
+        if self._wake_gate is None or source != "voice":
             return
         now = asyncio.get_running_loop().time()
         gate = self._tts_gate.get(room_id)
-        at = max(now, gate.closed_until) if gate is not None else now
-        self._wake_gate.turn_ended(room_id, at)
+        at = max(now, gate.closed_until) if gate is not None and not cancelled else now
+        self._wake_gate.turn_ended(room_id, at, started_at)
 
     def _apply_admission(self, client_id: str, text: str, admission: Admission) -> str | None:
         """Text to hand on for an admitted segment, or None when it ends
@@ -1861,10 +1866,10 @@ class Organizer:
         wake-only segment (it armed the room; it is not a turn)."""
         if admission.reason == "wake_off":
             return text
-        if admission.reason == "barge_in_only" and not _is_barge_in(text):
+        stripped = strip_wake_phrase(text, self._wake_aliases)
+        if admission.reason == "barge_in_only" and not _is_barge_in(stripped):
             log.info("wake: %s spoke during a turn without waking; not a barge-in", client_id)
             return None
-        stripped = strip_wake_phrase(text, self._wake_aliases)
         if not stripped:
             log.info("wake: wake-only segment from %s; room stays armed", client_id)
             return None

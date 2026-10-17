@@ -471,9 +471,6 @@ class _WakeWiring:
     detector_factory: Callable[[], WakeWord]
     rooms_cfg: RoomsConfig
 
-    def required_for(self, binding: ClientBinding) -> bool:
-        return binding.role == "mic" and self.gate.mode(binding.room_id) == "required"
-
 
 def _room_wake_mode(glados_cfg: GladosConfig, rooms_cfg: RoomsConfig, room_id: str) -> str:
     policy = rooms_cfg.policy_for(room_id)
@@ -1353,9 +1350,11 @@ def _build_pipeline(
     vad_factory: Callable[[VADConfig], VAD],
     wake: "_PipelineWakeHook | None" = None,
 ) -> AudioPipeline:
+    # No WAV trace in a wake-gated room: it would write un-woken speech to
+    # disk, which the gate exists to prevent (ARCH section 9).
     sink = (
         AudioSink(glados_cfg.server.traces_dir, client_id)
-        if glados_cfg.audio.wav_traces
+        if glados_cfg.audio.wav_traces and wake is None
         else None
     )
 

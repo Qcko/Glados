@@ -76,6 +76,7 @@ class AudioPipeline:
             else None
         )
         self._wake_faulted = False
+        self._closed = False
         self._last_hit_at = float("-inf")
         self._energy: deque[tuple[float, int]] = deque()
         self._energy_samples = 0
@@ -84,8 +85,9 @@ class AudioPipeline:
         pcm = self._parse(framed)
         if self._sink is not None:
             self._sink.write(framed)
+        arrived_at = asyncio.get_running_loop().time()
         if self._wake is not None:
-            await self._feed_wake(pcm, asyncio.get_running_loop().time())
+            await self._feed_wake(pcm, arrived_at)
         for event in self._vad.feed(pcm):
             if isinstance(event, VadStart):
                 # Anchor the utterance to when speech BEGAN, not when the VAD
@@ -96,17 +98,17 @@ class AudioPipeline:
                 # bleed always *begins* while GLaDOS is still playing, so the
                 # start lands inside the closed window regardless of how long
                 # the utterance is.
-                self._utterance_start_at = asyncio.get_running_loop().time()
+                self._utterance_start_at = arrived_at
             elif isinstance(event, VadEnd):
                 # Pair with the VadStart stamp (fall back to now for a VadEnd
                 # with no recorded start -- a force-cut or a reset mid-utterance).
                 captured_at = (
                     self._utterance_start_at
                     if self._utterance_start_at is not None
-                    else asyncio.get_running_loop().time()
+                    else arrived_at
                 )
                 self._utterance_start_at = None
-                ended_at = asyncio.get_running_loop().time()
+                ended_at = arrived_at
                 self._spawn_transcription(event.pcm, captured_at, ended_at)
 
     async def drain(self) -> None:
@@ -124,8 +126,9 @@ class AudioPipeline:
             self._sink.close()
         self._vad.reset()
         if self._wake is not None:
-            self._wake.detector.reset()
-            self._wake_exec.shutdown(wait=False, cancel_futures=True)
+            self._closed = True
+            self._wake_exec.submit(self._wake.detector.reset)
+            self._wake_exec.shutdown(wait=False)
 
     async def _feed_wake(self, pcm: bytes, arrived_at: float) -> None:
         """Run the detector off the event loop, in frame order. `arrived_at`
@@ -133,7 +136,7 @@ class AudioPipeline:
         A detector fault is reported once and ends detection on this
         connection -- the room then fails closed (DESIGN.md decision 11)."""
         self._track_energy(pcm)
-        if self._wake_faulted:
+        if self._wake_faulted or self._closed:
             return
         loop = asyncio.get_running_loop()
         try:

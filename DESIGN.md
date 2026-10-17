@@ -1,6 +1,6 @@
 # DESIGN - wake word ("Hey GLaDOS") and cross-room wake arbitration
 
-Status: revised after roster, awaiting user sign-off (17-10-2026). ARCH section 12 v4.
+Status: signed off and built 17-10-2026 (mode off by default; openwakeword package + model files not yet installed). ARCH section 12 v4.
 
 ## The problem
 
@@ -73,6 +73,19 @@ promised dedup; it was never built.
     the kitchen only; the custom "hey_glados" model is a later file swap
     (training on the devbox GPU, queued behind tracks 3/4).
 13. **UI `user_text` is never gated.**
+
+## Consequences worth knowing (from the code duck)
+
+- A segment admitted only because a turn is in flight (`barge_in_only`) IS
+  transcribed -- the barge-in check needs the words -- but its text is
+  dropped unlogged unless it is a barge-in.
+- WAV traces are off for every mic in a wake-required room: the sink writes
+  raw audio before any gating.
+- A mic whose detector faulted cannot answer a voice confirm either (fail
+  closed); the desk dialog still can.
+- Playback in ANY room blocks waking in every room (decision 9's cost).
+- Only VOICE turns open the follow-up window; a typed turn opens no mic
+  window, and a cancelled turn anchors it on now, not on the cut reply.
 
 ## Deliberately not built (known-issue list)
 

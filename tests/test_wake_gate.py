@@ -158,7 +158,7 @@ def test_turn_end_extends_ownership_through_follow_up() -> None:
     gate.offer(_hit("k1", "kitchen", 1.0, energy=-20.0), now=1.0)
     gate.offer(_hit("k2", "kitchen", 1.1, energy=-30.0), now=1.1)
     gate.settle(2.0)
-    gate.turn_ended("kitchen", at=15.0)
+    gate.turn_ended("kitchen", at=15.0, started_at=5.0)
     assert _decide(gate, _seg("k2", "kitchen", 18.0, 19.0)) == Drop("not_owner")
     assert _decide(gate, _seg("k1", "kitchen", 18.0, 19.0)) == Admission("follow_up")
 
@@ -219,3 +219,21 @@ def test_old_wins_are_pruned() -> None:
 def test_strip_wake_phrase(heard: str, expected: str) -> None:
     aliases = ["hey glados", "hey gladys", "hey jarvis"]
     assert strip_wake_phrase(heard, aliases) == expected
+
+
+def test_same_room_winner_is_not_dropped_by_its_sibling_mics_loss() -> None:
+    gate = _gate()
+    gate.offer(_hit("k1", "kitchen", 1.0, energy=-30.0), now=1.0)
+    gate.offer(_hit("k2", "kitchen", 1.05, energy=-20.0), now=1.05)
+    gate.settle(2.0)
+    assert _decide(gate, _seg("k2", "kitchen", 0.5, 1.5)) == Admission("one_breath")
+    assert _decide(gate, _seg("k1", "kitchen", 0.5, 1.5)) == Drop("lost_arbitration")
+
+
+def test_turn_end_does_not_revive_an_expired_owner() -> None:
+    gate = _gate()
+    gate.offer(_hit("k1", "kitchen", 1.0, energy=-20.0), now=1.0)
+    gate.offer(_hit("k2", "kitchen", 1.1, energy=-30.0), now=1.1)
+    gate.settle(2.0)
+    gate.turn_ended("kitchen", at=100.0)
+    assert _decide(gate, _seg("k2", "kitchen", 101.0, 102.0)) == Admission("follow_up")
