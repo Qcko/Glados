@@ -59,6 +59,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_bake.add_argument("--cases", type=Path, action="append",
                         help="Corpus file(s) (default: benchmarks/memory/cases.jsonl).")
     p_bake.add_argument("--out", type=Path, help="Report dir (default: $GLADOS_LAB_DIR/glados/memory_bakeoff).")
+    p_bake.add_argument("--num-predict", type=int,
+                        help="Writer output cap (default: [memory].writer_num_predict). "
+                        "Raise it for a reasoning model, or its thinking eats the answer.")
     return p
 
 
@@ -87,6 +90,8 @@ def _config():
 async def _bakeoff(args: argparse.Namespace) -> int:
     cfg = _config()
     mem = cfg.memory.model_copy(update={"writer_model": args.model}) if args.model else cfg.memory
+    if args.num_predict:
+        mem = mem.model_copy(update={"writer_num_predict": args.num_predict})
     model = mem.writer_model or cfg.llm.model
     try:
         bakeoff.check_local_ollama(cfg)

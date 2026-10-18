@@ -115,6 +115,25 @@ family only), per-tag tables beyond counts.
   committed cases that contain any token from the gitignored household
   lexicon.
 
+## Candidate writers
+
+Mistral family only (user, 17-10-2026), sized for prod: Ollama runs on the
+32 GB R9700 and GLaDOS keeps about 8 GB pinned, so a writer model that is not
+the live one has about 20 GB including its KV cache at `num_ctx` 16384.
+Verify each tag on ollama.com before pulling; none is pulled on prod yet.
+
+| Candidate | Approx. size (Q4) | Notes |
+|---|---|---|
+| `ministral3:3b-instruct` | ~3 GB | run 18-10-2026 |
+| `ministral3:8b-instruct` | ~6 GB | shipped writer = the live model, the baseline row |
+| `ministral3:14b-instruct` | ~9 GB | run 18-10-2026 |
+| Mistral Small 3.x 24B instruct | ~15 GB + KV | strongest that fits beside GLaDOS; tight |
+| Mistral Nemo 12B instruct | ~7 GB | older generation, middle option |
+| Magistral Small 24B | ~15 GB + KV | reasoning: run with `--num-predict 2048` or more, or the 256-token cap blanks it (the `num_predict = 512` lesson) |
+
+A writer that is not the live model loads beside it, so on prod the winner's
+cost is VRAM and a reload-free batch, not only its score.
+
 ## First slice
 
 1. ~20 synthetic cases (self fact, request-not-fact, empty days, a drop, a
