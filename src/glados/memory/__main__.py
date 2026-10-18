@@ -3,7 +3,7 @@
 Shell access on the server is the only way in, by design: this is how a fact
 that should not be there gets removed until a voice "forget that" exists.
 Safe to run while GLaDOS is up -- every delete bumps the speaker's generation,
-so an in-flight writer job cannot re-add what was just removed, and the
+so an in-flight batch chunk cannot re-add what was just removed, and the
 server's cache reloads on its next turn.
 """
 

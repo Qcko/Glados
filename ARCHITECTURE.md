@@ -1224,8 +1224,8 @@ prompt growth alone is sufficient to suppress dispatch. Data and harness:
 
 **Layer 3 -- per-speaker facts (auto-written, never trusted; added
 17-10-2026).** Durable facts about the person speaking ("is vegetarian", "has
-a daughter called Ema") are written by the model, asynchronously, after a
-turn. That is what Layer 2 forbids, so Layer 3 has to answer both of Layer 2's
+a daughter called Ema") are written by the model in a once-a-day batch over
+the day's staged turns (revised 18-10-2026; it was after each turn). That is what Layer 2 forbids, so Layer 3 has to answer both of Layer 2's
 reasons, and it does so by never entering the trusted prompt at all:
 
 - **Trust.** The facts are untrusted data from end to end. The writer is shown
@@ -1245,10 +1245,17 @@ reasons, and it does so by never entering the trusted prompt at all:
   model surface before a shipped config enables it, which is why it ships
   disabled.
 
-Until voice-ID, every voice in a room is that room's default user, so facts
-are keyed `(room_id, speaker_id)` and each room opts in separately. The writer
-runs on the resident primary model. It runs only while the house is idle, and
-a starting turn preempts it; `OLLAMA_NUM_PARALLEL` stays 1. Removal is
+- **At rest.** Staged turns are verbatim speech, so they are encrypted per
+  row under their own keyring key (none, nothing staged), kept at most 2 days,
+  and deleted for real (`secure_delete`, WAL truncate) in the same transaction
+  that writes what they produced.
+
+Only a voice-verified person is a memory key: typed turns and unidentified
+voices read and write nothing, so memory is inert until speaker ID ships its
+embedder. Facts are keyed `(room_id, person)` and each room opts in
+separately. The writer runs on the resident primary model, once per local
+date, only after the house has been idle 10 minutes, and a starting turn
+preempts it; `OLLAMA_NUM_PARALLEL` stays 1. Removal is
 operator-side for now (`python -m glados.memory forget|forget-session|wipe`).
 
 **Ownership split.** The *gate* belongs in **LocalGuard** (the local-
