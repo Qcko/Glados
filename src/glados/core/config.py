@@ -358,9 +358,11 @@ class MemoryConfig(BaseModel):
     (ARCH section 8 behavioural ceiling). A room also has to opt in with
     `memory = true` on its `[[rooms]]` row.
 
-    `db_path` holds personal data in plaintext: keep it outside any repo tree.
-    `writer_model` is the bake-off seam; empty means `[llm].model`, which is
-    the only value that keeps the model resident without a reload."""
+    `db_path` holds personal data (facts in plaintext, staged notes
+    encrypted): keep it outside any repo tree. `writer_model` is the bake-off
+    seam; empty means `[llm].model`, which is the only value that keeps the
+    model resident without a reload. `batch_window` ("HH:MM-HH:MM", local
+    time, may wrap midnight) only narrows when the daily batch may run."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -370,7 +372,42 @@ class MemoryConfig(BaseModel):
     writer_num_predict: int = 256
     max_facts: int = 30
     inject_chars: int = 600
-    idle_s: float = 60.0
+    batch_window: str = ""
+    idle_before_batch_s: float = Field(default=600.0, ge=0)
+    note_retention_days: float = Field(default=2.0, gt=0)
+    max_notes_per_batch: int = Field(default=30, ge=1)
+    daily_adds: int = Field(default=8, ge=0)
+    daily_drops: int = Field(default=4, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_idle_s(cls, data: object) -> object:
+        if isinstance(data, dict) and "idle_s" in data:
+            raise ValueError(
+                "[memory] idle_s is gone: memory is now a daily batch; "
+                "use idle_before_batch_s (default 600)"
+            )
+        return data
+
+    @field_validator("batch_window")
+    @classmethod
+    def _check_window(cls, value: str) -> str:
+        if value:
+            parse_batch_window(value)
+        return value
+
+    def window(self) -> tuple[clock_time, clock_time] | None:
+        return parse_batch_window(self.batch_window) if self.batch_window else None
+
+
+def parse_batch_window(value: str) -> tuple[clock_time, clock_time]:
+    try:
+        start, end = (clock_time.fromisoformat(part.strip()) for part in value.split("-"))
+    except ValueError as e:
+        raise ValueError(f"batch_window {value!r} must be HH:MM-HH:MM") from e
+    if start == end:
+        raise ValueError(f"batch_window {value!r} is empty")
+    return start, end
 
 
 class CartVerifyConfig(BaseModel):

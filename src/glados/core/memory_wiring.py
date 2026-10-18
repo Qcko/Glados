@@ -16,8 +16,10 @@ from ..brain.llm.llamacpp import LlamaCppLLM
 from ..brain.llm.ollama import OllamaLLM
 from .adapters import LLM
 from .config import GladosConfig, LLMConfig, MemoryConfig, RoomsConfig
-from .memory_writer import MemoryWriter
-from .speaker_memory import SpeakerMemoryStore
+from ..voiceid.store import VoiceprintStore
+from .memory_writer import BatchPolicy, EnrollmentUnknown, MemoryWriter
+from .secrets import SecretsStore
+from .speaker_memory import SpeakerMemoryStore, notes_cipher
 from .speaker_memory_hooks import SpeakerMemory
 
 if TYPE_CHECKING:
@@ -43,7 +45,7 @@ def build_speaker_memory(
         is_busy=lambda: organizer().any_turn_busy(),
         is_warm=lambda: organizer().llm_warmed,
         rewarm=lambda: organizer().rewarm_prefix(),
-        idle_s=cfg.memory.idle_s,
+        policy=batch_policy(cfg),
     )
     memory = SpeakerMemory(
         store=store,
@@ -56,6 +58,46 @@ def build_speaker_memory(
         [r.room_id for r in rooms.rooms if r.memory], cfg.memory.inject_chars,
     )
     return memory, writer, writer_llm
+
+
+def batch_policy(cfg: GladosConfig) -> BatchPolicy:
+    mem = cfg.memory
+    return BatchPolicy(
+        idle_before_batch_s=mem.idle_before_batch_s,
+        retention_days=mem.note_retention_days,
+        max_notes_per_batch=mem.max_notes_per_batch,
+        daily_adds=mem.daily_adds,
+        daily_drops=mem.daily_drops,
+        context_tokens=cfg.llm.num_ctx or 2048,
+        output_tokens=mem.writer_num_predict,
+        window=mem.window(),
+    )
+
+
+def open_speaker_memory(
+    bundle: tuple[SpeakerMemory, MemoryWriter, LLM], cfg: GladosConfig, secrets: SecretsStore
+) -> None:
+    """Boot step run where the secrets store is final (the lifespan): unlock
+    the staged notes, bind the enrollment check, and enforce retention --
+    prod is often off at night, so boot is what actually keeps the limit."""
+    memory, writer, _llm = bundle
+    memory.unlock(notes_cipher(secrets))
+    writer.set_enrollment(_enrolled_check(VoiceprintStore(cfg.speaker_id.store_dir, secrets)))
+    writer.expire()
+
+
+def _enrolled_check(voiceprints: VoiceprintStore) -> Callable[[str], bool]:
+    """Read at apply time, so a person un-enrolled overnight is purged. No
+    loadable print at all is "unknown", never "nobody": a missing voiceid key
+    must not read as every person un-enrolled and purge every note."""
+
+    def is_enrolled(person: str) -> bool:
+        people = {p for p, _model in voiceprints.people()}
+        if not people:
+            raise EnrollmentUnknown("no voiceprint loadable")
+        return person in people
+
+    return is_enrolled
 
 
 def _room_opted_in(rooms: RoomsConfig, room_id: str) -> bool:

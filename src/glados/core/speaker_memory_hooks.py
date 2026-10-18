@@ -1,19 +1,30 @@
 """The organizer's whole view of per-speaker memory (DESIGN-speaker-memory.md).
 
-Three narrow calls keep the writer, its queue and its gating out of
+Three narrow calls keep the writer, its staging and its gating out of
 `organizer.py`: the block a turn injects, the note a committed turn leaves,
 and the push that a turn is starting.
+
+A committed turn's note is encrypted and inserted by a tracked background
+task. The turn never awaits it, and the insert waits at most on the store's
+write lock, which no LLM call ever holds.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import uuid
 from collections.abc import Callable
 
-from .memory_facts import MEMORY_PREAMBLE, TurnNote, render_block, wrap_block
+from cryptography.fernet import Fernet
+
+from .memory_facts import MEMORY_PREAMBLE, StagedNote, render_block, wrap_block
 from .memory_writer import MemoryWriter
 from .prompt_budget import dense_payload
 from .speaker import SpeakerIdentity
 from .speaker_memory import SpeakerMemoryStore
+
+log = logging.getLogger(__name__)
 
 
 class SpeakerMemory:
@@ -29,6 +40,13 @@ class SpeakerMemory:
         self._writer = writer
         self._room_enabled = room_enabled
         self._inject_chars = inject_chars
+        self._staging: set[asyncio.Task] = set()
+        self.staging_failed = 0
+
+    def unlock(self, cipher: Fernet | None) -> None:
+        """Hand the store its notes key. Until then, and for good if the
+        keyring gave none, nothing is staged."""
+        self._store.set_cipher(cipher)
 
     def system_suffix(self, room_id: str, speaker: SpeakerIdentity | None) -> str:
         """Text to append to this turn's system prompt, or "" for none."""
@@ -61,8 +79,31 @@ class SpeakerMemory:
         person = _verified_person(speaker)
         if person is None or not self._room_enabled(room_id) or not user_text.strip():
             return
-        note = TurnNote(user_text=user_text, reply=None if untrusted else reply)
-        self._writer.note_turn((room_id, person), session_id, note)
+        note = StagedNote(
+            id=0, user_text=user_text, reply=None if untrusted else reply, untrusted=untrusted
+        )
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self._store.stage_note, (room_id, person, session_id), uuid.uuid4().hex, note
+            ),
+            name="memory-stage",
+        )
+        self._staging.add(task)
+        task.add_done_callback(self._staged)
+
+    def _staged(self, task: asyncio.Task) -> None:
+        self._staging.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            self.staging_failed += 1
+            log.warning(
+                "speaker memory: staging a note failed: %s", type(task.exception()).__name__
+            )
+
+    async def drain(self) -> None:
+        """Let every staging insert in flight finish. Shutdown calls this
+        before `close`, so no thread is left writing to a closed connection."""
+        if self._staging:
+            await asyncio.wait(set(self._staging))
 
     def turn_starting(self) -> None:
         self._writer.turn_starting()

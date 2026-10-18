@@ -10,7 +10,7 @@ Fixed by the user (17-10-2026): build first, bake-off later. The writer runs on
 the SAME resident model as the organizer (`ministral3:8b-instruct`), not a
 second model.
 
-Revised by the user (18-10-2026), not yet built:
+Revised by the user (18-10-2026), built on branch `claude/nostalgic-blackburn-9e0f36`:
 
 - **Key.** Memory keys on the voice-verified person (`SpeakerIdentity.person`
   when `source == "voice"`). Typed turns and unidentified voices read and write
@@ -52,9 +52,10 @@ run is injected from the next turn on, which in practice is the next morning.
    and a `wal_checkpoint(TRUNCATE)` after every delete, so a consumed,
    expired or forgotten note does not survive in freelist pages or the WAL.
    Tables:
-   - `speaker_facts(...)` as today, plus a `fact_sources(fact_id, session_id)`
-     link so a fact distilled from several sessions is removed by
-     `forget-session` for ANY of them.
+   - `speaker_facts(...)` as today, plus a `fact_sources(fact_id, session_id,
+     utterance_id)` link so a fact distilled from several sessions is removed
+     by `forget-session` for ANY of them. A writer add that restates a known
+     fact is not a new fact: it links the known one to this session too.
    - `speaker_notes(id, room_id, person, session_id, utterance_id, user_text,
      reply, untrusted, created_at)`. `user_text` and `reply` are ciphertext,
      the rest stays queryable. `reply` is NULL when the turn saw `<external>`.
