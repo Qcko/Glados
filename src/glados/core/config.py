@@ -874,9 +874,9 @@ class RoomPolicy(BaseModel):
     announce_sources: list[str] | None = None
     quiet_hours: QuietHours | None = None
     announce_veto_pause: bool = True
-    # Opt-in to per-speaker memory (DESIGN-speaker-memory.md). Until voice-ID,
-    # every voice in the room writes into its default user, so leave it off in
-    # a room with a TV or radio in earshot.
+    # Opt-in to per-speaker memory (DESIGN-speaker-memory.md). Only a
+    # voice-matched speaker reads or writes it; typed turns and unidentified
+    # voices get none, so it stays inert until voice-ID has an embedder.
     memory: bool = False
     # Wake gating for this room; None follows `[wake] mode` in glados.toml.
     wake_mode: Literal["off", "required"] | None = None

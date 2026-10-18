@@ -5,9 +5,9 @@ event loop for the turn-start lookup, and a WRITE connection used only from
 worker threads (`asyncio.to_thread`) behind a lock. WAL lets the read run
 while a write is in progress, so a turn never waits on the writer's fsync.
 
-Facts are keyed `(room_id, speaker_id)`: until voice-ID lands every voice in a
-room is that room's default user, so keying on the speaker alone would let one
-room's TV write into another room's profile.
+Facts are keyed `(room_id, speaker_id)`, where `speaker_id` is always a
+voice-verified person (`SpeakerIdentity.person`), never the session bucket
+`session.speaker_id`, which falls back to the client's default user.
 
 A per-key `generation` is bumped by every write, including the operator CLI
 running in another process, and `purges` by every delete. The writer's apply
