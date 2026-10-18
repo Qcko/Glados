@@ -59,3 +59,12 @@ def test_an_overlay_for_a_hidden_tool_is_warned_about(caplog) -> None:
     with caplog.at_level(logging.WARNING):
         _expose(entry, _specs("a", "b"))
     assert "tool_overlays name hidden tools: b" in caplog.text
+
+
+def test_every_exposed_calendar_write_is_mutating() -> None:
+    raw = tomllib.loads(Path("configs/servers.example.toml").read_text(encoding="utf-8"))
+    calendar = next(e for e in ServersConfig(**raw).server if e.id == "calendar")
+    writes = [n for n in calendar.expose_tools if n.split("_")[0] in {"create", "update", "delete"}]
+    assert writes
+    for name in writes:
+        assert calendar.tool_overlays[name].mutating, name

@@ -424,3 +424,26 @@ expose_tools = [
     "get_agenda", "list_events", "create_event", "update_event", "delete_event",
     "get_user_timezone", "create_task", "update_task", "delete_task",
 ]
+
+# The calendar writes carry mutating = true for the same reason as the Dunnes
+# cart writes: without it a successful write looks like a no-op to the
+# turn-outcome goal-check, the turn is classed `failed`, and the escalation
+# loopback may re-drive it -- a second create_event. Seen in the G1 live check
+# on 18-10-2026: one create landed and the turn still read `failed`.
+[server.tool_overlays.create_event]
+mutating = true
+
+[server.tool_overlays.update_event]
+mutating = true
+
+[server.tool_overlays.delete_event]
+mutating = true
+
+[server.tool_overlays.create_task]
+mutating = true
+
+[server.tool_overlays.update_task]
+mutating = true
+
+[server.tool_overlays.delete_task]
+mutating = true
