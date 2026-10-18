@@ -21,5 +21,7 @@ client_room/deploy/termux/glados-room.env
 client_room/deploy/termux/service/*/down
 dist/
 
+# STT bias lexicon with household names (benchmarks/stt/lexicon.example.txt)
+benchmarks/stt/lexicon.local.txt
 # Wake-word model files (DESIGN.md, wake word): pinned by sha256 in glados.toml, not committed.
 configs/models/

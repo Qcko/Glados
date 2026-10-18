@@ -154,3 +154,41 @@ keyring), put every token back in the inbox and restart: it is the same path.
 `set-client-auth.ps1` (run through `runas /user:glados-svc`) still works if
 you have the password, and remains the fallback for secrets other than client
 tokens.
+
+## The calendar server
+
+The household calendar runs on prod as its own account, `calendar-svc`, and
+its data is not readable by `glados-svc`. GLaDOS therefore never runs calendar
+code: the calendar's `serve` task hosts its MCP server on the local named pipe
+`\.\pipe\calendar-mcp`, and GLaDOS's `calendar` entry spawns
+`glados.mcp.pipe_shim`, which relays stdio to that pipe (calendar-mcp
+DESIGN.md, "Slice K1").
+
+- The pipe admits only `glados-svc`, local callers only, with read and
+  write-data access. The shim opens it with exactly that access.
+- Before relaying a byte, the shim checks that the pipe is owned by
+  `calendar-svc`'s SID and refuses it otherwise, so a process that creates
+  the pipe name first cannot pose as the calendar.
+- A session ends after 30 idle minutes, and every calendar deploy restarts
+  `serve`, which ends all sessions. The entry is `lazy = true`, so GLaDOS
+  respawns the shim on the next calendar request.
+- The owner check needs `calendar-svc` to be a standard user whose task does
+  not run with highest privileges. An elevated creator makes the pipe owner
+  `BUILTIN\Administrators`, and the shim then refuses every connection.
+- The shim exits 0 when either side ends cleanly, 3 when the pipe is missing
+  or stays busy for `--wait-s` seconds (default 30), 4 when the owner is
+  wrong, and 5 on a relay I/O error. Closing its stdin ends it at once,
+  dropping any reply still in flight, which matches MCP's stdio shutdown.
+
+To enable it:
+
+1. On the calendar side, run its `deploy-prod.ps1 -Bootstrap -PipeClientUser
+   glados-svc` and ship a calendar release, so `serve` creates the pipe.
+2. Read `calendar-svc`'s SID on prod:
+   `(New-Object Security.Principal.NTAccount 'calendar-svc').Translate([Security.Principal.SecurityIdentifier]).Value`.
+3. Copy the `calendar` entry from `configs/servers.example.toml` into
+   `local\servers.toml`, fill in `<root>` and the SID, and set
+   `autostart = true`.
+4. Deploy (or restart GLaDOS), then run the G1 check: one read and one write
+   from GLaDOS while the calendar's `serve` is writing, and confirm in the
+   trace that the results arrived wrapped in `<external>`.

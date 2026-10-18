@@ -145,8 +145,13 @@ def _read_manifest(path: Path) -> list[dict]:
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
-            out.append(json.loads(line))
+            out.append(_resolve_audio(json.loads(line), path.parent))
     return out
+
+
+def _resolve_audio(entry: dict, base: Path) -> dict:
+    audio = Path(entry["audio"])
+    return entry if audio.is_absolute() else {**entry, "audio": str(base / audio)}
 
 
 def _summarise(clips: list[dict]) -> dict:

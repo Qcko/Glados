@@ -157,3 +157,11 @@ def test_read_manifest_skips_blank_and_comments(tmp_path: Path) -> None:
     )
     entries = bench._read_manifest(f)
     assert [e["text"] for e in entries] == ["one", "two"]
+
+
+def test_read_manifest_resolves_relative_audio_against_manifest_dir(tmp_path: Path) -> None:
+    f = tmp_path / "manifest.jsonl"
+    f.write_text('{"audio": "spk1/a.wav", "text": "x"}\n{"audio": "' + str(tmp_path / "b.wav").replace("\\", "/") + '", "text": "y"}\n', encoding="utf-8")
+    entries = bench._read_manifest(f)
+    assert Path(entries[0]["audio"]) == tmp_path / "spk1" / "a.wav"
+    assert Path(entries[1]["audio"]) == tmp_path / "b.wav"
