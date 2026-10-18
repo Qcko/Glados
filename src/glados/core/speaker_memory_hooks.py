@@ -12,6 +12,7 @@ from collections.abc import Callable
 from .memory_facts import MEMORY_PREAMBLE, TurnNote, render_block, wrap_block
 from .memory_writer import MemoryWriter
 from .prompt_budget import dense_payload
+from .speaker import SpeakerIdentity
 from .speaker_memory import SpeakerMemoryStore
 
 
@@ -29,13 +30,14 @@ class SpeakerMemory:
         self._room_enabled = room_enabled
         self._inject_chars = inject_chars
 
-    def system_suffix(self, room_id: str, speaker_id: str) -> str:
+    def system_suffix(self, room_id: str, speaker: SpeakerIdentity | None) -> str:
         """Text to append to this turn's system prompt, or "" for none."""
-        if not self._room_enabled(room_id):
+        person = _verified_person(speaker)
+        if person is None or not self._room_enabled(room_id):
             return ""
         block = render_block(
-            f"speaker:{speaker_id}",
-            self._store.facts(room_id, speaker_id),
+            f"speaker:{person}",
+            self._store.facts(room_id, person),
             self._inject_chars,
         )
         return f"\n{MEMORY_PREAMBLE}\n{block}" if block else ""
@@ -50,19 +52,29 @@ class SpeakerMemory:
         self,
         *,
         room_id: str,
-        speaker_id: str,
+        speaker: SpeakerIdentity | None,
         session_id: str,
         user_text: str,
         reply: str,
         untrusted: bool,
     ) -> None:
-        if not self._room_enabled(room_id) or not user_text.strip():
+        person = _verified_person(speaker)
+        if person is None or not self._room_enabled(room_id) or not user_text.strip():
             return
         note = TurnNote(user_text=user_text, reply=None if untrusted else reply)
-        self._writer.note_turn((room_id, speaker_id), session_id, note)
+        self._writer.note_turn((room_id, person), session_id, note)
 
     def turn_starting(self) -> None:
         self._writer.turn_starting()
 
     def close(self) -> None:
         self._store.close()
+
+
+def _verified_person(speaker: SpeakerIdentity | None) -> str | None:
+    """Whose memory a turn may touch: only a voice-matched person. A typed
+    turn or an unidentified voice falls back to the client's default user,
+    who is a real person, so it gets no memory (DESIGN-speaker-id.md)."""
+    if speaker is None or not speaker.verified:
+        return None
+    return speaker.person

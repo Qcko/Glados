@@ -28,6 +28,7 @@ from glados.core.memory_facts import (
 )
 from glados.core.memory_writer import MemoryWriter
 from glados.core.speaker_memory import SpeakerMemoryStore, StaleGeneration
+from glados.core.speaker import SpeakerIdentity, SpeakerMatch
 from glados.core.speaker_memory_hooks import SpeakerMemory
 
 from .organizer_harness import CLIENT_ID, ROOM_ID, desk_organizer
@@ -333,6 +334,15 @@ def _memory(store, *, enabled_rooms=(ROOM_ID,)):
     return memory, writer
 
 
+QCKO_VOICE = SpeakerMatch(person="qcko", score=0.9, reason="accepted")
+
+
+async def _say(h, text, speaker=QCKO_VOICE, source="voice"):
+    """Memory needs a voice-matched speaker, so the organizer tests speak as
+    one unless a test says otherwise."""
+    await h.org.handle_user_text(CLIENT_ID, text, source=source, speaker=speaker)
+
+
 async def _seed(store, room=ROOM_ID, speaker="qcko"):
     await store.apply((room, speaker), adds=["Is vegetarian."], drop_ids=[],
                       expected_generation=0, source_session="s", source_utterance="u")
@@ -343,7 +353,7 @@ async def test_turn_carries_the_speakers_facts_as_guarded_data(tmp_path, store):
     memory, writer = _memory(store)
     llm = ScriptedLLM()
     async with desk_organizer(tmp_path, llm=llm, speaker_memory=memory) as h:
-        await h.org.handle_user_text(CLIENT_ID, "what's for dinner")
+        await _say(h, "what's for dinner")
         await h.org.flush()
         system = llm.prompts[0][0].content
         assert '<memory-notes source="speaker:qcko">' in system
@@ -356,9 +366,9 @@ async def test_injected_facts_are_not_kept_in_history_or_shared_prompt(tmp_path,
     memory, _ = _memory(store)
     llm = ScriptedLLM()
     async with desk_organizer(tmp_path, llm=llm, speaker_memory=memory) as h:
-        await h.org.handle_user_text(CLIENT_ID, "hello")
+        await _say(h, "hello")
         await h.org.flush()
-        await h.org.handle_user_text(CLIENT_ID, "again")
+        await _say(h, "again")
         await h.org.flush()
         second = llm.prompts[-1]
         assert sum("Is vegetarian." in (m.content or "") for m in second) == 1
@@ -370,7 +380,7 @@ async def test_another_speakers_facts_are_never_injected(tmp_path, store):
     memory, _ = _memory(store)
     llm = ScriptedLLM()
     async with desk_organizer(tmp_path, llm=llm, speaker_memory=memory) as h:
-        await h.org.handle_user_text(CLIENT_ID, "hello")
+        await _say(h, "hello")
         await h.org.flush()
         assert "memory-notes" not in llm.prompts[0][0].content
 
@@ -380,7 +390,7 @@ async def test_room_not_opted_in_gets_no_memory_and_writes_none(tmp_path, store)
     memory, writer = _memory(store, enabled_rooms=())
     llm = ScriptedLLM()
     async with desk_organizer(tmp_path, llm=llm, speaker_memory=memory) as h:
-        await h.org.handle_user_text(CLIENT_ID, "I'm vegetarian")
+        await _say(h, "I'm vegetarian")
         await h.org.flush()
         assert "memory-notes" not in llm.prompts[0][0].content
         assert writer.notes == []
@@ -391,7 +401,7 @@ async def test_a_non_local_brain_never_receives_memory(tmp_path, store):
     memory, _ = _memory(store)
     llm = CloudLLM()
     async with desk_organizer(tmp_path, llm=llm, speaker_memory=memory) as h:
-        await h.org.handle_user_text(CLIENT_ID, "hello")
+        await _say(h, "hello")
         await h.org.flush()
         assert all("memory-notes" not in (m.content or "") for m in llm.prompts[0])
 
@@ -400,11 +410,11 @@ async def test_committed_turn_leaves_a_note_and_drops_the_reply_when_untrusted(t
     memory, writer = _memory(store)
     llm = ScriptedLLM("Lovely.")
     async with desk_organizer(tmp_path, llm=llm, speaker_memory=memory) as h:
-        await h.org.handle_user_text(CLIENT_ID, "I'm vegetarian")
+        await _say(h, "I'm vegetarian")
         await h.org.flush()
         sid = h.session_id()
         h.org._untrusted_sessions.add(sid)
-        await h.org.handle_user_text(CLIENT_ID, "my daughter is Ema")
+        await _say(h, "my daughter is Ema")
         await h.org.flush()
     (key, session, first), (_, _, second) = writer.notes
     assert key == (ROOM_ID, "qcko") and session == sid
@@ -539,7 +549,44 @@ async def test_traces_record_the_size_of_injected_memory_not_the_facts(tmp_path,
     traces = tmp_path / "traces"
     traces.mkdir()
     async with desk_organizer(traces, llm=ScriptedLLM(), speaker_memory=memory) as h:
-        await h.org.handle_user_text(CLIENT_ID, "hello")
+        await _say(h, "hello")
         await h.org.flush()
     dumped = str(trace_events(traces))
     assert "Is vegetarian." not in dumped and "speaker memory:" in dumped
+
+
+@pytest.mark.parametrize(
+    "how", [{"source": "voice", "speaker": SpeakerMatch.none("low_score", 0.4)},
+            {"source": "text", "speaker": None}],
+    ids=["unidentified-voice", "typed"],
+)
+async def test_an_unverified_speaker_reads_and_writes_no_memory(tmp_path, store, how):
+    await _seed(store)
+    memory, writer = _memory(store)
+    llm = ScriptedLLM("Lovely.")
+    async with desk_organizer(tmp_path, llm=llm, speaker_memory=memory) as h:
+        await _say(h, "I'm vegetarian", **how)
+        await h.org.flush()
+        assert "memory-notes" not in llm.prompts[0][0].content
+    assert writer.notes == []
+
+
+async def test_a_verified_voice_reads_and_writes_under_its_person(store):
+    await _seed(store, speaker="ema")
+    memory, writer = _memory(store)
+    ema = SpeakerIdentity(person="ema", session_key="ema", source="voice", score=0.9)
+    assert "Is vegetarian." in memory.system_suffix(ROOM_ID, ema)
+    memory.on_turn_committed(room_id=ROOM_ID, speaker=ema, session_id="s",
+                             user_text="hi", reply="hello", untrusted=False)
+    assert [key for key, _, _ in writer.notes] == [(ROOM_ID, "ema")]
+
+
+def test_the_fallback_bucket_is_never_used_as_a_memory_key(store):
+    memory, writer = _memory(store)
+    fallback = SpeakerIdentity(person=None, session_key="qcko", source="fallback")
+    typed = SpeakerIdentity(person="qcko", session_key="qcko", source="typed")
+    for who in (fallback, typed, None):
+        assert memory.system_suffix(ROOM_ID, who) == ""
+        memory.on_turn_committed(room_id=ROOM_ID, speaker=who, session_id="s",
+                                 user_text="hi", reply="hello", untrusted=False)
+    assert writer.notes == []

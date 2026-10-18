@@ -16,6 +16,7 @@ from glados.audio.stt.fake import FakeSTT
 from glados.audio.vad.fake import FakeVAD
 from glados.core.adapters import VadEnd, VadStart
 from glados.core.audio_sink import AudioSink, FrameTooShort
+from glados.core.speaker import Utterance
 
 
 def _pcm(samples: list[int]) -> bytes:
@@ -97,8 +98,8 @@ async def test_fake_stt_accepts_callable() -> None:
 async def test_pipeline_invokes_on_utterance_at_vad_boundary(tmp_path: Path) -> None:
     seen: list[tuple[str, float]] = []
 
-    async def on_utterance(text: str, captured_at: float) -> None:
-        seen.append((text, captured_at))
+    async def on_utterance(u: Utterance) -> None:
+        seen.append((u.text, u.captured_at))
 
     pipe = AudioPipeline(
         sink=AudioSink(tmp_path, "desk-ui"),
@@ -123,8 +124,8 @@ async def test_pipeline_anchors_capture_at_utterance_start(tmp_path: Path) -> No
     end."""
     seen: list[float] = []
 
-    async def on_utterance(text: str, captured_at: float) -> None:
-        seen.append(captured_at)
+    async def on_utterance(u: Utterance) -> None:
+        seen.append(u.captured_at)
 
     pipe = AudioPipeline(
         sink=None,
@@ -148,8 +149,8 @@ async def test_pipeline_anchors_capture_at_utterance_start(tmp_path: Path) -> No
 async def test_pipeline_skips_empty_transcripts(tmp_path: Path) -> None:
     seen: list[str] = []
 
-    async def on_utterance(text: str, captured_at: float) -> None:
-        seen.append(text)
+    async def on_utterance(u: Utterance) -> None:
+        seen.append(u.text)
 
     pipe = AudioPipeline(
         sink=None,
@@ -168,7 +169,7 @@ async def test_pipeline_with_no_sink_skips_wav(tmp_path: Path) -> None:
         sink=None,
         vad=FakeVAD(utterance_samples=2),
         stt=FakeSTT(""),
-        on_utterance=lambda _t, _c: asyncio.sleep(0),
+        on_utterance=lambda _u: asyncio.sleep(0),
     )
     await pipe.feed_frame(_frame(0, [1, 2]))
     await pipe.close()
@@ -181,7 +182,7 @@ async def test_pipeline_rejects_short_frame() -> None:
         sink=None,
         vad=FakeVAD(utterance_samples=2),
         stt=FakeSTT(""),
-        on_utterance=lambda _t, _c: asyncio.sleep(0),
+        on_utterance=lambda _u: asyncio.sleep(0),
     )
     with pytest.raises(FrameTooShort):
         await pipe.feed_frame(b"\x00\x00\x00")
@@ -201,7 +202,7 @@ async def test_pipeline_logs_stt_errors_and_does_not_fire(
         sink=None,
         vad=FakeVAD(utterance_samples=2),
         stt=BrokenSTT(),
-        on_utterance=lambda t, _c: seen.append(t) or asyncio.sleep(0),
+        on_utterance=lambda u: seen.append(u.text) or asyncio.sleep(0),
     )
     with caplog.at_level("ERROR", logger="glados.audio.pipeline"):
         await pipe.feed_frame(_frame(0, [1, 2]))
@@ -222,8 +223,8 @@ async def test_pipeline_close_drains_in_flight(tmp_path: Path) -> None:
             await finish.wait()
             return "late"
 
-    async def on_utterance(text: str, captured_at: float) -> None:
-        results.append(text)
+    async def on_utterance(u: Utterance) -> None:
+        results.append(u.text)
 
     pipe = AudioPipeline(
         sink=None,

@@ -68,6 +68,8 @@ from .protocols import (
 from .room_queues import RoomQueueManager
 from .sessions import SessionRegistry
 from .speaker_memory_hooks import SpeakerMemory
+from .speaker import NO_IDENTIFIER, SpeakerMatch, resolve_identity
+from .wake import Admission, Drop, SegmentFacts, WakeGate, WakeHit, strip_wake_phrase
 from .prompt_pressure import SessionPressureMonitors, StreakAlarm, log_alarms
 from .tool_payload_cap import PayloadCap, cap_tool_payload, clamp_result_bytes
 from .traces import TraceStore
@@ -156,6 +158,9 @@ class _VoiceAnswer:
     granted: bool
     client_id: str
     text: str
+    # Audit only: who the voice sounded like. Never consulted for the grant
+    # (DESIGN-speaker-id.md decision 7).
+    speaker: SpeakerMatch = NO_IDENTIFIER
 
 
 @dataclass
@@ -208,6 +213,10 @@ class _LastTurn:
 
 
 UserTextSource = Literal["voice", "text"]
+
+
+def _rounded(score: float | None) -> float | None:
+    return None if score is None else round(score, 3)
 
 _MAX_TOOL_LOOP = 8
 
@@ -1132,6 +1141,8 @@ class Organizer:
         cart_verifier: CartVerifier | None = None,
         clients_with_capability: "Callable[[str], list[ClientBinding]] | None" = None,
         speaker_memory: SpeakerMemory | None = None,
+        wake_gate: WakeGate | None = None,
+        wake_aliases: list[str] | None = None,
     ) -> None:
         # Per-speaker long-term memory (DESIGN-speaker-memory.md). None = off.
         self._speaker_memory = speaker_memory
@@ -1139,6 +1150,11 @@ class Organizer:
         if speaker_memory is not None:
             self._queues.on_enqueue(speaker_memory.turn_starting)
         self._max_result_bytes = max_result_bytes
+        # Wake-word admission (DESIGN.md, wake word). None = every room
+        # always listening, the behaviour before wake gating existed.
+        self._wake_gate = wake_gate
+        self._wake_aliases = list(wake_aliases or [])
+        self._wake_settle_handles: set[asyncio.TimerHandle] = set()
         # Reads the real cart around a turn's writes (DESIGN-cart-verify.md).
         # One TurnCart per USER turn (`_TURN_CART`), so every retry drive of
         # that turn shares one BEFORE and one AFTER.
@@ -1339,6 +1355,7 @@ class Organizer:
         *,
         source: UserTextSource = "text",
         captured_at: float | None = None,
+        speaker: SpeakerMatch | None = None,
     ) -> None:
         """Enqueue a turn for the speaker's room. Returns once the turn
         is in the room's FIFO; the turn itself runs on the room's
@@ -1357,12 +1374,14 @@ class Organizer:
         if binding is None:
             return
         if source == "voice" and self._try_answer_confirm(
-            binding, client_id, text, captured_at
+            binding, client_id, text, captured_at, speaker or NO_IDENTIFIER
         ):
             return
         self._queues.enqueue(
             binding.room_id,
-            lambda: self._run_user_text(client_id, text, source=source),
+            lambda: self._run_user_text(
+                client_id, text, source=source, speaker=speaker
+            ),
             max_depth=_CONFIRM_HOLD_QUEUE_DEPTH
             if binding.room_id in self._confirm_by_room
             else None,
@@ -1374,6 +1393,7 @@ class Organizer:
         client_id: str,
         text: str,
         captured_at: float | None,
+        speaker: SpeakerMatch = NO_IDENTIFIER,
     ) -> bool:
         """Resolve the room's pending confirmation from a spoken answer.
         False means "not an answer here" and the caller queues a turn;
@@ -1397,7 +1417,9 @@ class Organizer:
             )
             return False
         pending.fut.set_result(
-            _VoiceAnswer(granted=verdict == "yes", client_id=client_id, text=text)
+            _VoiceAnswer(
+                granted=verdict == "yes", client_id=client_id, text=text, speaker=speaker
+            )
         )
         return True
 
@@ -1429,6 +1451,9 @@ class Organizer:
 
     async def close(self) -> None:
         """Cancel all room workers. Server lifespan calls this on shutdown."""
+        for handle in self._wake_settle_handles:
+            handle.cancel()
+        self._wake_settle_handles.clear()
         await self._queues.close()
 
     def expect_llm_warmup(self) -> None:
@@ -1498,16 +1523,25 @@ class Organizer:
             )
 
     async def _run_user_text(
-        self, client_id: str, text: str, *, source: UserTextSource = "text"
+        self,
+        client_id: str,
+        text: str,
+        *,
+        source: UserTextSource = "text",
+        speaker: SpeakerMatch | None = None,
     ) -> None:
         binding = self.binding_for_client(client_id)
         if binding is None:
             return
-        session = self.sessions.get_or_open(binding.room_id, binding.default_user)
+        if source == "voice" and speaker is None:
+            speaker = NO_IDENTIFIER
+        identity = resolve_identity(speaker, binding.default_user)
+        session = self.sessions.get_or_open(binding.room_id, identity.session_key)
         envelope = CallEnvelope(
             session_id=session.session_id,
             room_id=session.room_id,
             speaker_id=session.speaker_id,
+            speaker=identity,
         )
         # Capture the task locally so the finally-block can release its own
         # _inflight slot without clobbering a successor turn that may have
@@ -1519,11 +1553,16 @@ class Organizer:
             self._inflight[session.session_id] = (task, session.room_id)
         trace = self.traces.open(session.session_id)
         cancelled = False
+        started_at = asyncio.get_running_loop().time()
         try:
             trace.event(
                 "turn_start",
                 room_id=session.room_id,
                 speaker_id=session.speaker_id,
+                speaker_person=identity.person,
+                speaker_source=identity.source,
+                speaker_score=_rounded(identity.score),
+                speaker_reason=speaker.reason if speaker is not None else None,
                 origin_client=client_id,
             )
             trace.event("user_text", text=text, source=source)
@@ -1717,7 +1756,7 @@ class Organizer:
                     final_text, trace,
                 )
             self._commit_history(session.session_id, new_history, outcome, final_text)
-            self._note_for_memory(session, text, final_text, outcome)
+            self._note_for_memory(envelope, text, final_text, outcome)
             await self._speak(session.session_id, session.room_id, final_text, trace)
             await self._emit_turn_outcome(
                 session.session_id, session.room_id, kind, trace
@@ -1730,6 +1769,7 @@ class Organizer:
             trace.event("cancelled")
         finally:
             _TURN_CART.set(None)
+            self._stamp_turn_end(session.room_id, source, cancelled, started_at)
             entry = self._inflight.get(session.session_id)
             if entry is not None and entry[0] is task:
                 del self._inflight[session.session_id]
@@ -1746,8 +1786,143 @@ class Organizer:
                     )
                 )
 
+    def wake_hit(self, client_id: str, score: float, energy_dbfs: float, at: float) -> None:
+        """A mic's detector fired. Ignored while ANY room's TTS gate is
+        closed (GLaDOS's own voice, heard in this room or the next, must not
+        wake anything); otherwise offered to cross-room arbitration. The room
+        comes from the server-side binding, never from the client."""
+        binding = self.binding_for_client(client_id)
+        if self._wake_gate is None or binding is None:
+            return
+        if any(self._room_mic_gated(room, at) for room in list(self._tts_gate)):
+            log.info("wake: ignored hit from %s during TTS playback", client_id)
+            return
+        hit = WakeHit(client_id, binding.room_id, score, energy_dbfs, at)
+        loop = asyncio.get_running_loop()
+        deadline = self._wake_gate.offer(hit, loop.time())
+        log.info(
+            "wake: hit from %s in %s score=%.2f energy=%.1fdBFS",
+            client_id, binding.room_id, score, energy_dbfs,
+        )
+        if deadline is not None:
+            self._schedule_wake_settle(deadline)
+
+    def _schedule_wake_settle(self, deadline: float) -> None:
+        """Timers may fire a clock tick early (Windows ~15 ms granularity), so
+        the window is settled AS OF its deadline, never as of an early now."""
+        loop = asyncio.get_running_loop()
+        handle: asyncio.TimerHandle | None = None
+
+        def fire() -> None:
+            self._wake_settle_handles.discard(handle)
+            self._settle_wake(max(loop.time(), deadline))
+
+        handle = loop.call_later(max(0.0, deadline - loop.time()), fire)
+        self._wake_settle_handles.add(handle)
+
+    def _settle_wake(self, now: float) -> None:
+        winner = self._wake_gate.settle(now)
+        if winner is not None:
+            log.info(
+                "wake: %s in %s won arbitration (energy=%.1fdBFS score=%.2f)",
+                winner.client_id, winner.room_id, winner.energy_dbfs, winner.score,
+            )
+
+    def wake_fault(self, client_id: str) -> None:
+        binding = self.binding_for_client(client_id)
+        if self._wake_gate is None or binding is None:
+            return
+        log.error(
+            "wake: detector fault on %s; %s admits only barge-in from it",
+            client_id, binding.room_id,
+        )
+        self._wake_gate.fault(client_id, binding.room_id)
+
+    async def wake_decide(self, client_id: str, start: float, end: float) -> Admission | None:
+        """May the segment [start, end] from this mic be transcribed? Called
+        BEFORE STT. A refused segment is logged as room, duration and reason
+        only -- never its words: speech GLaDOS was not addressed in is never
+        written down (ARCH section 9)."""
+        binding = self.binding_for_client(client_id)
+        if binding is None:
+            return None
+        if self._wake_gate is None:
+            return Admission("wake_off")
+        await self._await_wake_window(start, end)
+        room = binding.room_id
+        facts = SegmentFacts(
+            client_id=client_id,
+            room_id=room,
+            start=start,
+            end=end,
+            turn_in_flight=self._room_busy(room),
+            confirm_pending=room in self._confirm_by_room,
+        )
+        verdict = self._wake_gate.decide(facts, asyncio.get_running_loop().time())
+        if isinstance(verdict, Drop):
+            log.info(
+                "wake: discarded %.1fs segment from %s in %s untranscribed (%s)",
+                end - start, client_id, room, verdict.reason,
+            )
+            return None
+        return verdict
+
+    async def _await_wake_window(self, start: float, end: float) -> None:
+        """A short "Hey GLaDOS, lights" can end before the arbitration window
+        that holds its own hit has closed; wait it out so the room is armed
+        before it is judged."""
+        deadline = self._wake_gate.pending_deadline(start, end)
+        if deadline is None:
+            return
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(max(0.0, deadline - loop.time()))
+        self._settle_wake(max(loop.time(), deadline))
+
+    def _room_busy(self, room_id: str) -> bool:
+        return self._has_active_or_starting_turn(room_id) or self._queues.queue_depth(room_id) > 0
+
+    def wake_client_gone(self, client_id: str) -> None:
+        if self._wake_gate is not None:
+            self._wake_gate.forget_client(client_id)
+
+    def _stamp_turn_end(
+        self, room_id: str, source: str, cancelled: bool, started_at: float
+    ) -> None:
+        """Open the follow-up window after a VOICE turn, anchored on the later
+        of now and the reply's estimated playback end (the TTS gate horizon);
+        a cancelled turn's reply was cut short, so it anchors on now. Typed
+        turns open no mic window."""
+        if self._wake_gate is None or source != "voice":
+            return
+        now = asyncio.get_running_loop().time()
+        gate = self._tts_gate.get(room_id)
+        at = max(now, gate.closed_until) if gate is not None and not cancelled else now
+        self._wake_gate.turn_ended(room_id, at, started_at)
+
+    def _apply_admission(self, client_id: str, text: str, admission: Admission) -> str | None:
+        """Text to hand on for an admitted segment, or None when it ends
+        here: a barge-in-only admission that is not a barge-in, or a
+        wake-only segment (it armed the room; it is not a turn)."""
+        if admission.reason == "wake_off":
+            return text
+        stripped = strip_wake_phrase(text, self._wake_aliases)
+        if admission.reason == "barge_in_only" and not _is_barge_in(stripped):
+            log.info("wake: %s spoke during a turn without waking; not a barge-in", client_id)
+            return None
+        if not stripped:
+            log.info("wake: wake-only segment from %s; room stays armed", client_id)
+            return None
+        log.info("wake: admitted segment from %s (%s)", client_id, admission.reason)
+        return stripped
+
     async def handle_audio_text(
-        self, client_id: str, text: str, captured_at: float | None = None
+        self,
+        client_id: str,
+        text: str,
+        captured_at: float | None = None,
+        admission: Admission | None = None,
+        *,
+        speaker: SpeakerMatch = NO_IDENTIFIER,
     ) -> None:
         """Audio-ingress entry. A short barge-in utterance (`stop`, `cancel`,
         ...) cancels the speaker's room's in-flight turn AND drops anything
@@ -1771,6 +1946,11 @@ class Organizer:
         binding = self.binding_for_client(client_id)
         if binding is None:
             return
+        if admission is not None:
+            kept = self._apply_admission(client_id, text, admission)
+            if kept is None:
+                return
+            text = kept
         if _is_barge_in(text):
             # Barge-in always passes through the gate -- that's the whole
             # point of voice-driven interrupt. The user is allowed to say
@@ -1808,7 +1988,7 @@ class Organizer:
                 )
             return
         await self.handle_user_text(
-            client_id, text, source="voice", captured_at=captured_at
+            client_id, text, source="voice", captured_at=captured_at, speaker=speaker
         )
 
     # The soonest fraction of the estimated playback at which a PlaybackDone is
@@ -2213,14 +2393,14 @@ class Organizer:
             self._written_sessions.add(session_id)
 
     def _note_for_memory(
-        self, session, text: str, final_text: str, outcome: TurnRecord
+        self, envelope: CallEnvelope, text: str, final_text: str, outcome: TurnRecord
     ) -> None:
         if self._speaker_memory is None or not final_text.strip():
             return
         self._speaker_memory.on_turn_committed(
-            room_id=session.room_id,
-            speaker_id=session.speaker_id,
-            session_id=session.session_id,
+            room_id=envelope.room_id,
+            speaker=envelope.speaker,
+            session_id=envelope.session_id,
             user_text=text,
             reply=final_text,
             untrusted=outcome.untrusted_seen,
@@ -2234,7 +2414,7 @@ class Organizer:
         nothing, so a route added later fails closed."""
         if self._speaker_memory is None or not getattr(llm, "is_local", False):
             return ""
-        return self._speaker_memory.system_suffix(envelope.room_id, envelope.speaker_id)
+        return self._speaker_memory.system_suffix(envelope.room_id, envelope.speaker)
 
     def _traceable(self, messages: list[LLMMessage]) -> list[dict]:
         """Messages as the trace records them: a system message carrying
@@ -2867,6 +3047,7 @@ class Organizer:
     async def client_disconnected(self, client_id: str) -> None:
         """A money step shown on this client cannot be answered any more:
         end it now rather than wait out the deadline."""
+        self.wake_client_gone(client_id)
         for pending in list(self._pending_confirms.values()):
             if pending.only_client == client_id and not pending.fut.done():
                 pending.fut.set_result(_SCREEN_GONE)
@@ -4347,6 +4528,8 @@ class Organizer:
                     verdict="yes" if answer.granted else "no",
                     client_id=answer.client_id,
                     text=answer.text,
+                    speaker_person=answer.speaker.person,
+                    speaker_score=_rounded(answer.speaker.score),
                 )
                 granted = answer.granted
             else:

@@ -422,6 +422,35 @@ class VADConfig(BaseModel):
     silero_speech_pad_ms: int = 200
 
 
+class WakeConfig(BaseModel):
+    """Wake-word admission (DESIGN.md, wake word). `mode = "off"` keeps every
+    room always listening; a room can override it in rooms.toml."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["off", "required"] = "off"
+    backend: Literal["openwakeword", "fake"] = "openwakeword"
+    # Local directory holding the three files below; nothing is downloaded.
+    # Relative paths resolve against the config dir.
+    model_dir: str = "models/wake"
+    model_file: str = "hey_jarvis_v0.1.onnx"
+    melspec_file: str = "melspectrogram.onnx"
+    embedding_file: str = "embedding_model.onnx"
+    # filename -> sha256; every file above must be pinned or boot refuses.
+    sha256: dict[str, str] = {}
+    threshold: float = 0.5
+    armed_window_s: float = 8.0
+    followup_window_s: float = 6.0
+    dedup_window_s: float = 0.5
+    cooldown_s: float = 1.5
+    # Leading phrases stripped from an admitted transcript, incl. the ways
+    # Whisper spells the wake word.
+    aliases: list[str] = [
+        "hey glados", "hey gladys", "hi glados", "hey glad os", "a glados",
+        "hey jarvis",
+    ]
+
+
 class STTConfig(BaseModel):
     # "fake" returns `fake_text`. "faster-whisper" runs the configured
     # model; first call downloads the weights to HF_HOME.
@@ -443,6 +472,21 @@ class STTConfig(BaseModel):
     # labelled per-speaker audio).
     whisper_hotwords: str = ""
     whisper_initial_prompt: str = ""
+
+
+class SpeakerIdConfig(BaseModel):
+    # DESIGN-speaker-id.md. "off" embeds nothing and every voice turn is
+    # `fallback`; "fake" is the test embedder. Thresholds are placeholders
+    # until the bake-off on household clips sets them (slice 3).
+    backend: Literal["off", "fake"] = "off"
+    accept_threshold: float = 0.70
+    margin: float = 0.10
+    min_speech_s: float = 1.0
+    timeout_ms: int = 500
+    # Encrypted voiceprints live here: outside the repo and outside traces/.
+    store_dir: Path = Path(
+        os.environ.get("GLADOS_VOICEID_DIR") or (Path.home() / ".glados" / "voiceprints")
+    )
 
 
 class TTSConfig(BaseModel):
@@ -483,8 +527,10 @@ class GladosConfig(BaseModel):
     cart_verify: CartVerifyConfig = CartVerifyConfig()
     audio: AudioConfig = AudioConfig()
     vad: VADConfig = VADConfig()
+    wake: WakeConfig = WakeConfig()
     stt: STTConfig = STTConfig()
     tts: TTSConfig = TTSConfig()
+    speaker_id: SpeakerIdConfig = SpeakerIdConfig()
 
 
 # Tools that book or move money. On a cart_read server each must carry
@@ -832,6 +878,11 @@ class RoomPolicy(BaseModel):
     # every voice in the room writes into its default user, so leave it off in
     # a room with a TV or radio in earshot.
     memory: bool = False
+    # Wake gating for this room; None follows `[wake] mode` in glados.toml.
+    wake_mode: Literal["off", "required"] | None = None
+    # Added to this room's wake energy in cross-room arbitration, to even
+    # out mics with different gain.
+    wake_gain_db: float = 0.0
 
     def allows_source(self, source_room: str) -> bool:
         return self.announce_sources is None or source_room in self.announce_sources
@@ -992,6 +1043,11 @@ def _apply_env_overrides(cfg: GladosConfig) -> GladosConfig:
 
     if (stt_backend := os.environ.get("GLADOS_STT_BACKEND")) in ("fake", "faster-whisper"):
         cfg = cfg.model_copy(update={"stt": cfg.stt.model_copy(update={"backend": stt_backend})})
+
+    if (sid_backend := os.environ.get("GLADOS_SPEAKERID_BACKEND")) in ("off", "fake"):
+        cfg = cfg.model_copy(
+            update={"speaker_id": cfg.speaker_id.model_copy(update={"backend": sid_backend})}
+        )
 
     if (tts_backend := os.environ.get("GLADOS_TTS_BACKEND")) in ("fake", "piper"):
         cfg = cfg.model_copy(update={"tts": cfg.tts.model_copy(update={"backend": tts_backend})})
