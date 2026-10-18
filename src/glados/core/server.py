@@ -42,7 +42,7 @@ from ..mcp.stdio_client import StdioServer, StdioToolProxy
 from ..servers.room_intercom import SpeakIntoTool
 from ..servers.time_server import NowTool
 from ..servers.toy_server import TOY_TOOLS
-from .adapters import LLM, STT, TTS, VAD, WakeWord
+from .adapters import LLM, STT, TTS, VAD, ToolSpec, WakeWord
 from .audio_sink import AudioSink, FrameTooShort
 from .speaker import Utterance
 from ..voiceid import SpeakerIdentifier, build_identifier
@@ -54,6 +54,7 @@ from .config import (
     LLMConfig,
     RoomsConfig,
     RouterConfig,
+    ServerEntry,
     ServersConfig,
     STTConfig,
     TTSConfig,
@@ -141,6 +142,30 @@ def _build_cart_verifier(
         max_age_s=glados_cfg.cart_verify.cache_max_age_s,
         persona=glados_cfg.cart_verify.persona,
     )
+
+
+def _expose(entry: ServerEntry, specs: list[ToolSpec]) -> list[ToolSpec]:
+    """Keep only the tools `expose_tools` names, and say what was dropped so a
+    server that grew a tool, or an allowlist typo, is visible at boot."""
+    exposure = entry.exposed([s.name for s in specs])
+    if exposure.hidden:
+        log.info(
+            "stdio server %s: %d tools not in expose_tools, hidden: %s",
+            entry.id, len(exposure.hidden), ", ".join(exposure.hidden),
+        )
+    if exposure.unknown:
+        log.warning(
+            "stdio server %s: expose_tools names tools the server does not "
+            "list: %s", entry.id, ", ".join(exposure.unknown),
+        )
+    stale = sorted(set(entry.tool_overlays) & set(exposure.hidden))
+    if stale:
+        log.warning(
+            "stdio server %s: tool_overlays name hidden tools: %s",
+            entry.id, ", ".join(stale),
+        )
+    kept = set(exposure.kept)
+    return [s for s in specs if s.name in kept]
 
 
 def _build_tool_router(servers_cfg: ServersConfig) -> "ToolRouter | None":
@@ -880,6 +905,14 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
                     "stdio server %s failed to initialise: %s -- skipping",
                     entry.id,
                     type(e).__name__ if isinstance(e, asyncio.TimeoutError) else e,
+                )
+                await server.aclose()
+                continue
+            specs = _expose(entry, specs)
+            if entry.expose_tools is not None and not specs:
+                log.error(
+                    "stdio server %s REFUSED: expose_tools matches none of "
+                    "the tools it lists", entry.id,
                 )
                 await server.aclose()
                 continue

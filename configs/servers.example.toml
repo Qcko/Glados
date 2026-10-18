@@ -413,3 +413,14 @@ intent_keywords = [
     "calendar", "agenda", "schedule", "event", "events", "appointment",
     "appointments", "meeting", "meetings", "todo", "board",
 ]
+# The voice verbs only (DESIGN-tool-exposure.md, S1). Without this list every
+# tool the server lists is registered and priced into every prompt -- all 33
+# came to 5512 tokens and GLaDOS refused to boot. Left out on purpose: sharing
+# and ACL changes (grant_access, revoke_access, list_grants), RRULE history,
+# board/section/checklist admin, and undelete. Those are app jobs, and an
+# untrusted event title should never be one model call away from them. A tool
+# the server adds later stays hidden until it is named here.
+expose_tools = [
+    "get_agenda", "list_events", "create_event", "update_event", "delete_event",
+    "get_user_timezone", "create_task", "update_task", "delete_task",
+]

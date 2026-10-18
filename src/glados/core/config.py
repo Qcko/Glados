@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import tomllib
+from dataclasses import dataclass
 from datetime import time as clock_time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -648,6 +649,13 @@ class ToolOverlay(BaseModel):
         return value
 
 
+@dataclass(frozen=True)
+class ToolExposure:
+    kept: list[str]
+    hidden: list[str]
+    unknown: list[str]
+
+
 class ServerEntry(BaseModel):
     id: str
     command: str
@@ -706,6 +714,12 @@ class ServerEntry(BaseModel):
     # {"lines": [{"productId": str, "quantity": int units, "packOf"?: int}]};
     # anything else fails parse and the server is simply never verified.
     cart_read: str | None = None
+    # The tools of this server GLaDOS registers (DESIGN-tool-exposure.md, S1).
+    # None registers every tool the server lists. A list registers only those
+    # names: a tool the server adds later stays hidden until someone names it
+    # here, so neither the prompt budget nor the dispatcher grows behind the
+    # operator's back.
+    expose_tools: list[str] | None = None
 
     @model_validator(mode="after")
     def _money_step_needs_cart_read(self) -> "ServerEntry":
@@ -718,6 +732,18 @@ class ServerEntry(BaseModel):
                 "(DESIGN-checkout-reconcile.md)"
             )
         return self
+
+    def exposed(self, tool_names: list[str]) -> "ToolExposure":
+        """Split the server's listed tools by `expose_tools`."""
+        if self.expose_tools is None:
+            return ToolExposure(kept=list(tool_names), hidden=[], unknown=[])
+        allowed = set(self.expose_tools)
+        listed = set(tool_names)
+        return ToolExposure(
+            kept=[n for n in tool_names if n in allowed],
+            hidden=sorted(listed - allowed),
+            unknown=sorted(allowed - listed),
+        )
 
     def ungated_money_tools(self, tool_names: list[str]) -> list[str]:
         """Known money tools this server exposes without `money_step` -- a
