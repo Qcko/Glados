@@ -40,6 +40,7 @@ from datetime import time as clock_time
 
 from .adapters import LLM, LLMMessage, LLMText
 from .memory_facts import DayBudget, Fact, WriterVerdict, judge_writer_output, writer_messages
+from .memory_review import ReviewLog
 from .speaker_memory import (
     Chunk,
     ChunkWrite,
@@ -92,6 +93,7 @@ class MemoryWriter:
         poll_s: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
         local_now: Callable[[], datetime] = datetime.now,
+        review: ReviewLog | None = None,
     ) -> None:
         self._llm = llm
         self._store = store
@@ -103,6 +105,7 @@ class MemoryWriter:
         self._poll_s = poll_s
         self._clock = clock
         self._local_now = local_now
+        self._review = review
         self._last_activity = clock()
         self._job: asyncio.Task | None = None
         self._wake = asyncio.Event()
@@ -125,6 +128,7 @@ class MemoryWriter:
         self._wake.set()
 
     async def run(self) -> None:
+        self._wake = asyncio.Event()
         while True:
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=self._poll_s)
@@ -259,6 +263,8 @@ class MemoryWriter:
                 log.info("memory chunk stale room=%s person=%s: retrying", *group[:2])
                 continue
             self._log_applied(chunk, verdict, outcome)
+            if outcome == "applied":
+                await self._send_to_review(write, verdict, known)
             return outcome, called_llm
         return "failed", called_llm
 
@@ -269,6 +275,20 @@ class MemoryWriter:
             outcome, *chunk.group[:2], len(chunk.ids), len(verdict.adds),
             len(verdict.drop_ids), verdict.rejected,
         )
+
+    async def _send_to_review(
+        self, write: ChunkWrite, verdict: WriterVerdict, known: list[Fact]
+    ) -> None:
+        """Shadow mode's output. Shielded like the apply, so a preempt cannot
+        drop the record of facts that are already committed; a failed write
+        costs the record, never the chunk."""
+        if self._review is None:
+            return
+        entries = review_entries(write, verdict, known)
+        try:
+            await self._committed(asyncio.to_thread(self._review.append, entries))
+        except Exception as e:
+            log.warning("memory review write failed: %s", type(e).__name__)
 
     def _fit_chunk(self, group: Group, known: list[Fact]) -> Chunk:
         """The largest leading slice of the group that fits the window. A
@@ -321,3 +341,20 @@ class MemoryWriter:
                 if isinstance(event, LLMText):
                     parts.append(event.text)
         return "".join(parts)
+
+
+def review_entries(write: ChunkWrite, verdict: WriterVerdict, known: list[Fact]) -> list[dict]:
+    """One line per change the chunk made, for a human to score."""
+    room_id, person, session_id = write.group
+    base = {"run_date": write.run_date, "room": room_id, "person": person, "session": session_id}
+    text_of = {f.id: f.text for f in known}
+    entries = [
+        {**base, "kind": "add", "fact": a.text, "notes": len(a.note_ids), "untrusted": a.untrusted}
+        for a in verdict.adds
+    ]
+    entries += [{**base, "kind": "drop", "fact": text_of.get(i, "")} for i in verdict.drop_ids]
+    entries += [
+        {**base, "kind": "reaffirm", "fact": text_of.get(i, ""), "notes": len(ids)}
+        for i, ids in verdict.reaffirmed.items()
+    ]
+    return entries

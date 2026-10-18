@@ -39,7 +39,8 @@ flowchart TD
     M -- yes --> C
     M -- no --> R[Record the run date in memory_batch_runs]
     T[Turn starts] -.->|cancel the writer call now| W
-    S -->|next turn reads the capped block| I[Per-turn prompt assembly]
+    S -->|inject = true: next turn reads the capped block| I[Per-turn prompt assembly]
+    A -->|inject = false: shadow| J[(review.jsonl<br/>one line per change, score empty)]
 ```
 
 The day boundary and the go-live point are code. A fact written in tonight's
@@ -225,11 +226,22 @@ hold across chunks of one day; logs carry no note text.
 
 ## Rollout
 
-`[memory] enabled = false` in code and in the shipped `configs/glados.toml`. The
-devbox turns it on locally. Before prod gets it, run the dispatch suite with a
-full 600-char block injected, on every live model surface. The writer bake-off
-(any Mistral-family model that fits) comes after that, and also decides whether
-30-note chunks extract as well as single turns on Ministral 3 8B.
+1. **Shadow (shipped, 18-10-2026).** `[memory] enabled = true, inject = false`
+   in `configs/glados.toml`, every room opted in via `[memory] rooms` (a
+   `[[rooms]]` row would collide with a box overlay row). The batch runs and writes
+   facts, but no turn carries them (`system_suffix` is empty, the boot budget
+   pays nothing). Every add, drop and reaffirm is appended to `review_path`
+   (`$GLADOS_MEMORY_DIR` or `~/.glados/memory/review.jsonl`, owner-only, fact
+   text only, never the speech) with an empty `score` for a human to fill in.
+   Code defaults stay `enabled = false`. Livingroom facts (TV and radio in
+   earshot) accrue in the db meanwhile: review or purge them before inject.
+2. **Inject.** Only after the review shows the facts help, and the dispatch
+   suite has passed with a full 600-char block injected on every live model
+   surface.
+
+The writer bake-off (any Mistral-family model that fits) needs a scorer, and
+also decides whether 30-note chunks extract as well as single turns on
+Ministral 3 8B.
 
 ## Follow-ups (not this slice)
 

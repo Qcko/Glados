@@ -614,3 +614,43 @@ def test_no_loadable_voiceprint_reads_as_unknown_not_nobody(tmp_path):
     check = _enrolled_check(VoiceprintStore(tmp_path / "prints", InMemorySecrets()))
     with pytest.raises(EnrollmentUnknown):
         check("qcko")
+
+
+# ---- shadow review file -------------------------------------------------------
+
+
+async def test_shadow_batch_writes_each_change_to_the_review_file(store, tmp_path):
+    from glados.core.memory_review import ReviewLog
+    from glados.core.memory_writer import MemoryWriter
+
+    from .speaker_memory_helpers import seed
+
+    seed(store, text="Has a cat.")
+    seed(store, text="Lives in Cork.")
+    review = tmp_path / "review" / "review.jsonl"
+    clock = Clock()
+    raw = json.dumps({"add": [{"fact": "Is vegetarian.", "notes": [1]},
+                              {"fact": "has a cat", "notes": [1]}], "drop": [1]})
+    writer, _ = make_writer(store, ScriptedLLM(raw), clock=clock)
+    writer._review = ReviewLog(review)
+    stage(store, "I'm vegetarian, I moved, and yes the cat")
+    await run_idle(writer, clock)
+    rows = [json.loads(line) for line in review.read_text(encoding="utf-8").splitlines()]
+    kinds = {(r["kind"], r["fact"]) for r in rows}
+    assert kinds == {("add", "Is vegetarian."), ("drop", "Lives in Cork."), ("reaffirm", "Has a cat.")}
+    assert all(r["score"] is None and r["person"] == "qcko" and r["session"] == "s1" for r in rows)
+    assert "I moved" not in review.read_text(encoding="utf-8"), "facts only, never the speech"
+
+
+async def test_a_failing_review_write_does_not_fail_the_chunk(store, tmp_path):
+    from glados.core.memory_review import ReviewLog
+
+    clock = Clock()
+    writer, _ = make_writer(store, ScriptedLLM(VEG), clock=clock)
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    writer._review = ReviewLog(blocker / "review.jsonl")
+    stage(store, "I'm vegetarian")
+    await run_idle(writer, clock)
+    assert _texts(store) == ["Is vegetarian."] and store.staged_count() == 0
+    assert writer.chunks_failed == 0

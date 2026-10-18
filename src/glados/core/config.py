@@ -352,15 +352,24 @@ class SessionConfig(BaseModel):
     history_max_turns: int = 8
 
 
+_MEMORY_DIR = Path(os.environ.get("GLADOS_MEMORY_DIR") or (Path.home() / ".glados" / "memory"))
+
+
 class MemoryConfig(BaseModel):
     """Per-speaker long-term memory (DESIGN-speaker-memory.md, ARCH section 14
-    Layer 3). Off by default and off in the shipped config until the dispatch
-    suite has passed with a full block injected on every live model surface
-    (ARCH section 8 behavioural ceiling). A room also has to opt in with
-    `memory = true` on its `[[rooms]]` row.
+    Layer 3). Off by default. A room also has to opt in with `memory = true`
+    on its `[[rooms]]` row.
 
-    `db_path` holds personal data (facts in plaintext, staged notes
-    encrypted): keep it outside any repo tree. `writer_model` is the bake-off
+    `inject` is the feedback switch. Off (the default, and the shipped
+    config), memory runs in SHADOW: the nightly batch writes facts, but no
+    turn ever carries them, and every add, drop and reaffirm is appended to
+    `review_path` for a human to score. It stays off until the dispatch suite
+    has passed with a full block injected on every live model surface (ARCH
+    section 8 behavioural ceiling) and the review shows the facts help.
+
+    `db_path` and `review_path` hold personal data (facts in plaintext,
+    staged notes encrypted): both default outside the repo, under
+    `$GLADOS_MEMORY_DIR` or `~/.glados/memory`. `writer_model` is the bake-off
     seam; empty means `[llm].model`, which is the only value that keeps the
     model resident without a reload. `batch_window` ("HH:MM-HH:MM", local
     time, may wrap midnight) only narrows when the daily batch may run."""
@@ -368,7 +377,10 @@ class MemoryConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
-    db_path: Path = Path("data/speaker_memory.sqlite")
+    inject: bool = False
+    rooms: list[str] = []
+    db_path: Path = _MEMORY_DIR / "speaker_memory.sqlite"
+    review_path: Path = _MEMORY_DIR / "review.jsonl"
     writer_model: str = ""
     writer_num_predict: int = 256
     max_facts: int = 30

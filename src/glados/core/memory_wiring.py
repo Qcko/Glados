@@ -17,6 +17,7 @@ from ..brain.llm.ollama import OllamaLLM
 from .adapters import LLM
 from .config import GladosConfig, LLMConfig, MemoryConfig, RoomsConfig
 from ..voiceid.store import VoiceprintStore
+from .memory_review import ReviewLog
 from .memory_writer import BatchPolicy, EnrollmentUnknown, MemoryWriter
 from .secrets import SecretsStore
 from .speaker_memory import SpeakerMemoryStore, notes_cipher
@@ -46,16 +47,19 @@ def build_speaker_memory(
         is_warm=lambda: organizer().llm_warmed,
         rewarm=lambda: organizer().rewarm_prefix(),
         policy=batch_policy(cfg),
+        review=None if cfg.memory.inject else ReviewLog(cfg.memory.review_path),
     )
     memory = SpeakerMemory(
         store=store,
         writer=writer,
-        room_enabled=lambda room_id: _room_opted_in(rooms, room_id),
+        room_enabled=lambda room_id: _room_opted_in(rooms, cfg.memory, room_id),
         inject_chars=cfg.memory.inject_chars,
+        inject=cfg.memory.inject,
     )
     log.info(
-        "speaker memory on: rooms=%s inject_chars=%d",
-        [r.room_id for r in rooms.rooms if r.memory], cfg.memory.inject_chars,
+        "speaker memory on: rooms=%s mode=%s",
+        _opted_in_rooms(rooms, cfg.memory),
+        "inject" if cfg.memory.inject else "shadow",
     )
     return memory, writer, writer_llm
 
@@ -100,9 +104,18 @@ def _enrolled_check(voiceprints: VoiceprintStore) -> Callable[[str], bool]:
     return is_enrolled
 
 
-def _room_opted_in(rooms: RoomsConfig, room_id: str) -> bool:
+def _room_opted_in(rooms: RoomsConfig, mem: MemoryConfig, room_id: str) -> bool:
+    """Either list opts a room in. `[memory] rooms` exists so the shipped
+    opt-in needs no `[[rooms]]` row, which a box's rooms.local.toml row for the
+    same room would turn into a duplicate-policy boot failure."""
+    if room_id in mem.rooms:
+        return True
     policy = rooms.policy_for(room_id)
     return policy is not None and policy.memory
+
+
+def _opted_in_rooms(rooms: RoomsConfig, mem: MemoryConfig) -> list[str]:
+    return sorted(set(mem.rooms) | {r.room_id for r in rooms.rooms if r.memory})
 
 
 def build_writer_llm(cfg: LLMConfig, mem: MemoryConfig) -> LLM:

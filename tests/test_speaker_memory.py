@@ -228,11 +228,11 @@ class SpyWriter:
         self.starts += 1
 
 
-def _memory(store, *, enabled_rooms=(ROOM_ID,)):
+def _memory(store, *, enabled_rooms=(ROOM_ID,), inject=True):
     writer = SpyWriter()
     memory = SpeakerMemory(
         store=store, writer=writer,
-        room_enabled=lambda room: room in enabled_rooms, inject_chars=600,
+        room_enabled=lambda room: room in enabled_rooms, inject_chars=600, inject=inject,
     )
     return memory, writer
 
@@ -367,9 +367,20 @@ async def test_boot_budget_prices_the_largest_memory_block(tmp_path, store):
 # ---- config -------------------------------------------------------------
 
 
-def test_shipped_config_leaves_memory_off():
+def test_shipped_config_runs_memory_in_shadow_never_injecting():
     raw = tomllib.loads((REPO / "configs" / "glados.toml").read_text(encoding="utf-8"))
-    assert GladosConfig(**raw).memory.enabled is False
+    memory = GladosConfig(**raw).memory
+    assert memory.enabled is True and memory.inject is False
+
+
+def test_memory_defaults_to_off_and_shadow():
+    assert (MemoryConfig().enabled, MemoryConfig().inject) == (False, False)
+
+
+def test_memory_files_default_outside_the_repo():
+    cfg = MemoryConfig()
+    for path in (cfg.db_path, cfg.review_path):
+        assert REPO not in path.resolve().parents
 
 
 def test_rooms_default_to_no_memory():
@@ -492,3 +503,74 @@ async def test_traces_record_the_size_of_injected_memory_not_the_facts(tmp_path,
     await memory.drain()
     dumped = str(trace_events(traces))
     assert "Is vegetarian." not in dumped and "speaker memory:" in dumped
+
+
+# ---- shadow mode --------------------------------------------------------
+
+
+async def test_shadow_mode_writes_but_never_feeds_a_turn(tmp_path, store):
+    seed(store, key=(ROOM_ID, "qcko"))
+    memory, _ = _memory(store, inject=False)
+    llm = ScriptedLLM("Lovely.")
+    async with desk_organizer(tmp_path, llm=llm, speaker_memory=memory) as h:
+        await _say(h, "I'm vegetarian")
+        await h.org.flush()
+        assert all("memory-notes" not in (m.content or "") for m in llm.prompts[0])
+        assert "Is vegetarian." not in str(llm.prompts)
+    await memory.drain()
+    assert store.staged_count() == 1, "still staged for tonight's batch"
+
+
+async def test_shadow_mode_adds_nothing_to_the_boot_budget(tmp_path, store):
+    memory, _ = _memory(store, inject=False)
+    async with desk_organizer(tmp_path, llm=ScriptedLLM(), speaker_memory=memory) as h:
+        shadow, _ = h.org.budget_inputs()
+    async with desk_organizer(tmp_path, llm=ScriptedLLM()) as h:
+        without, _ = h.org.budget_inputs()
+    assert shadow == without
+
+
+def test_the_lifespan_can_start_again_after_a_shutdown(tmp_path, monkeypatch):
+    """Every TestClient runs the module-level app's lifespan once more; the
+    store a previous shutdown closed must reopen."""
+    from fastapi.testclient import TestClient
+
+    from glados.core.server import build_app
+
+    configs = REPO / "configs"
+    for name in ("rooms.toml", "servers.example.toml"):
+        (tmp_path / name).write_text((configs / name).read_text(encoding="utf-8"), encoding="utf-8")
+    db = (tmp_path / "mem.sqlite").as_posix()
+    (tmp_path / "glados.toml").write_text(
+        f'[llm]\nbackend = "fake"\n\n[memory]\nenabled = true\ndb_path = "{db}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GLADOS_LLM_BACKEND", "fake")
+    app = build_app(tmp_path)
+    app.state.secrets = InMemorySecrets()
+    for _ in range(2):
+        with TestClient(app):
+            assert app.state.speaker_memory[0]._store.staged_count() == 0
+
+
+def test_memory_rooms_opt_a_room_in_without_a_rooms_row():
+    from glados.core.memory_wiring import _opted_in_rooms, _room_opted_in
+
+    rooms = RoomsConfig(
+        clients=[ClientBinding(client_id="k", room_id="kitchen", role="ui")],
+        rooms=[RoomPolicy(room_id="kitchen")],
+    )
+    mem = MemoryConfig(rooms=["desk"])
+    assert _room_opted_in(rooms, mem, "desk") and not _room_opted_in(rooms, mem, "kitchen")
+    assert _opted_in_rooms(rooms, mem) == ["desk"]
+
+
+def test_shipped_config_opts_every_room_in():
+    raw = tomllib.loads((REPO / "configs" / "glados.toml").read_text(encoding="utf-8"))
+    assert set(GladosConfig(**raw).memory.rooms) == {"desk", "desk2", "livingroom", "kitchen"}
+
+
+def test_staging_after_close_is_dropped_not_raised(tmp_path):
+    store = make_store(tmp_path / "mem.sqlite")
+    store.close()
+    assert store.stage_note((*KEY, "s"), "u", StagedNote(0, "hi", None)) is False

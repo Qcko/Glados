@@ -172,6 +172,19 @@ reply_language = "en"
 # server memory (ARCH section 14) is still appended on top of whichever base wins.
 # system_prompt = ""
 
+[memory]
+# Per-speaker memory (DESIGN-speaker-memory.md) in SHADOW mode: the nightly
+# batch runs and writes facts, but `inject = false` keeps every one of them out
+# of the turns; each add/drop/reaffirm is appended to `review_path` (default
+# $GLADOS_MEMORY_DIR or ~/.glados/memory/review.jsonl) with an empty "score"
+# for a human to fill in. Only voice-verified speakers are staged, so nothing
+# accrues until speaker ID ships its embedder. `rooms` opts rooms in here,
+# alongside any `[[rooms]] memory = true` row; review or purge livingroom facts
+# (TV and radio in earshot) before `inject = true`.
+enabled = true
+inject = false
+rooms = ["desk", "desk2", "livingroom", "kitchen"]
+
 [router]
 # v2.6 local multi-model router. Off by default -- GLaDOS runs every turn on
 # the single primary brain until you opt in. GLaDOS is all-local (ARCH section 12); the

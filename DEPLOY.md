@@ -192,3 +192,27 @@ To enable it:
 4. Deploy (or restart GLaDOS), then run the G1 check: one read and one write
    from GLaDOS while the calendar's `serve` is writing, and confirm in the
    trace that the results arrived wrapped in `<external>`.
+
+## Per-speaker memory (shadow mode)
+
+The shipped `configs/glados.toml` runs per-speaker memory in shadow
+(DESIGN-speaker-memory.md, Rollout): `enabled = true, inject = false`, with
+every room opted in through `[memory] rooms`. Nothing reaches a turn, but on
+prod this means:
+
+- **A writer task runs.** Once per local date, after the house has been idle
+  10 minutes, it uses the resident model for one call per chunk of staged
+  turns, then re-warms the organizer's prefix. A starting turn cancels it.
+- **A keyring key is created at first boot**, `glados.speaker_memory` /
+  `notes-key`, under `glados-svc`. Without it nothing is staged (logged once).
+- **Personal data lands in `$GLADOS_MEMORY_DIR`**, by default
+  `~\.glados\memory` of `glados-svc`: `speaker_memory.sqlite` (facts in
+  plaintext, staged turns encrypted) and `review.jsonl` (one line per fact the
+  batch added, dropped or reaffirmed, with `"score": null` to fill in). Back it
+  up or exclude it on purpose; never copy it into a repo.
+- **Nothing accrues until speaker ID ships its embedder**: only voice-verified
+  speakers are staged.
+
+Do not add `[[rooms]]` rows for memory to a box's `rooms.local.toml` if the
+tracked file has one for the same room; arrays append and a duplicate room
+policy refuses to boot. Use `[memory] rooms` instead.

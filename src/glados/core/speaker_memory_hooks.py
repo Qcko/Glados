@@ -35,23 +35,28 @@ class SpeakerMemory:
         writer: MemoryWriter,
         room_enabled: Callable[[str], bool],
         inject_chars: int,
+        inject: bool = False,
     ) -> None:
         self._store = store
         self._writer = writer
         self._room_enabled = room_enabled
         self._inject_chars = inject_chars
+        self._inject = inject
         self._staging: set[asyncio.Task] = set()
         self.staging_failed = 0
 
     def unlock(self, cipher: Fernet | None) -> None:
         """Hand the store its notes key. Until then, and for good if the
-        keyring gave none, nothing is staged."""
+        keyring gave none, nothing is staged. Reopens a store a previous
+        lifespan closed."""
+        self._store.open()
         self._store.set_cipher(cipher)
 
     def system_suffix(self, room_id: str, speaker: SpeakerIdentity | None) -> str:
-        """Text to append to this turn's system prompt, or "" for none."""
+        """Text to append to this turn's system prompt, or "" for none --
+        always "" in shadow mode, where memory is written but never fed back."""
         person = _verified_person(speaker)
-        if person is None or not self._room_enabled(room_id):
+        if not self._inject or person is None or not self._room_enabled(room_id):
             return ""
         block = render_block(
             f"speaker:{person}",
@@ -62,7 +67,10 @@ class SpeakerMemory:
 
     def worst_case_suffix(self) -> str:
         """The largest suffix `system_suffix` can produce, for the boot budget
-        proof: preamble, wrapper, a long speaker id and token-dense filler."""
+        proof: preamble, wrapper, a long speaker id and token-dense filler.
+        Nothing in shadow mode, which injects nothing."""
+        if not self._inject:
+            return ""
         filler = dense_payload(self._inject_chars)
         return f"\n{MEMORY_PREAMBLE}\n{wrap_block('speaker:' + 'x' * 64, filler)}"
 

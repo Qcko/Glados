@@ -181,13 +181,25 @@ class SpeakerMemoryStore:
         self._warned_no_key = False
         self._write_lock = threading.Lock()
         self._read_lock = threading.Lock()
+        self._cache: dict[Key, list[Fact]] = {}
+        self._seen_version: int | None = None
+        self._closed = True
+        self.open()
+
+    def open(self) -> None:
+        """(Re)connect. A no-op while open; after `close` it lets the server
+        lifespan start again on the same app, as every TestClient does. Runs
+        at lifespan start, before any staging or batch thread exists."""
+        if not self._closed:
+            return
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._write = self._connect()
         self._write.executescript(_SCHEMA)
         _restrict_to_owner(self._path)
         self._read = self._connect()
-        self._cache: dict[Key, list[Fact]] = {}
-        self._seen_version: int | None = None
+        self._cache.clear()
+        self._seen_version = None
+        self._closed = False
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, check_same_thread=False, isolation_level=None)
@@ -204,10 +216,12 @@ class SpeakerMemoryStore:
         return self._cipher is not None
 
     def close(self) -> None:
-        with self._read_lock:
+        with self._read_lock, self._write_lock:
+            if self._closed:
+                return
             self._read.close()
-        with self._write_lock:
             self._write.close()
+            self._closed = True
 
     # ---- facts: the turn-time read ----------------------------------------
 
@@ -263,6 +277,9 @@ class SpeakerMemoryStore:
             reply, int(note.untrusted), time.time() if now is None else now,
         )
         with self._write_lock:
+            if self._closed:
+                log.info("speaker memory: store closed, note not staged")
+                return False
             self._write.execute(
                 "INSERT INTO speaker_notes (room_id, person, session_id, utterance_id, "
                 "user_text, reply, untrusted, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

@@ -9,6 +9,7 @@ fixture *before* `import glados.core.server`.
 from __future__ import annotations
 
 import os
+import tempfile
 
 os.environ.setdefault("GLADOS_LLM_BACKEND", "fake")
 os.environ.setdefault("GLADOS_VAD_BACKEND", "fake")
@@ -19,6 +20,10 @@ os.environ.setdefault("GLADOS_TTS_BACKEND", "fake")
 # exact frame order and must not gain a `route_notice` just because routing is
 # enabled by default; routing itself is covered in test_router.py.
 os.environ.setdefault("GLADOS_ROUTER_ENABLED", "false")
+# The shipped config runs speaker memory (in shadow), and importing the server
+# builds the default app, which opens the memory db. Keep it, and the review
+# file, out of the developer's real ~/.glados/memory.
+os.environ["GLADOS_MEMORY_DIR"] = tempfile.mkdtemp(prefix="glados-memory-")
 
 import pytest
 
