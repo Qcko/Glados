@@ -177,6 +177,12 @@ class MemoryWriter:
 
     # ---- batch --------------------------------------------------------------
 
+    async def run_batch_now(self, run_date: str) -> None:
+        """The batch without the due gate: what the bake-off drives, so it
+        measures the real fold (chunk split, sequential facts, day caps)
+        rather than a copy of it. The per-chunk idle check still applies."""
+        await self._run_batch(run_date)
+
     async def _run_batch(self, run_date: str) -> None:
         started = self._clock()
         self.expire()

@@ -62,3 +62,15 @@ not work, so the next session does not relearn it.
 ## Ollama prompt pricing
 
 - **`num_predict: 0` is not a cap, and a system-only prompt is not a prompt on every template.** `price_prompt` sends the system message plus all tools with `num_predict: 0`. On Ollama 0.23.2 with mistral-nemo:12b, the chat template emits system and tools only before a user turn, so the request rendered to 1 token (`prompt_eval_count=1`). `num_predict: 0` was then treated as unlimited, and Nemo free-ran from BOS forever, hanging boot inside the price check (20-10-2026, prod). With a user turn, the same 41-tool payload priced at 7926 tokens and returned a correct `time__now` call in 8 s. Ministral's template keeps the system message, which is why 8b never showed this. The fix belongs in the harness, not the model choice: price with a trailing user stub and a hard `num_predict` of at least 1, and treat a `prompt_eval_count` far below the system prompt's size as a failed price.
+
+## Bake-offs and scorers
+
+- **A failed model call scores as a perfect empty day.** The first real
+  memory bake-off run had every writer call fail (HTTP 500, the model needed
+  6.7 GiB with 1.8 GiB free) and still printed `gate=pass`: no adds is exactly
+  what an empty day expects. A scorer must count failed calls and an empty
+  split as INVALID, never as a result (`scoring.Summary.gate`, 18-10-2026).
+- **Probe Ollama with the adapter's own payload.** A hand-built `/api/chat`
+  body sent `keep_alive: "-1"` as a string and got a 400 that the real adapter
+  never sees (`OllamaLLM._coerce_keep_alive` sends an int). Build probe bodies
+  from `_build_options()` / `_keep_alive`, or you debug a bug you made.

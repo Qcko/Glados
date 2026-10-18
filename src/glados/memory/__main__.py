@@ -21,8 +21,9 @@ from typing import Sequence
 from ..core.adapters import LLMText
 from ..core.config import load_glados_config
 from ..core.memory_facts import DayBudget, StagedNote, judge_writer_output, writer_messages
-from ..core.memory_wiring import build_writer_llm
+from ..core.memory_wiring import batch_policy, build_writer_llm
 from ..core.speaker_memory import SpeakerMemoryStore
+from . import bakeoff, scoring
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -49,6 +50,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_replay.add_argument("transcript", type=Path, help='JSON list of {"user": ..., "reply": ...}.')
     p_replay.add_argument("--model", default="", help="Writer model (default: [memory].writer_model).")
+    p_bake = sub.add_parser(
+        "bakeoff",
+        help="Score a writer model on the labelled corpus through the real "
+        "nightly fold (local ollama only, GLaDOS stopped).",
+    )
+    p_bake.add_argument("--model", default="", help="Writer model (default: [memory].writer_model or [llm].model).")
+    p_bake.add_argument("--cases", type=Path, action="append",
+                        help="Corpus file(s) (default: benchmarks/memory/cases.jsonl).")
+    p_bake.add_argument("--out", type=Path, help="Report dir (default: $GLADOS_LAB_DIR/glados/memory_bakeoff).")
     return p
 
 
@@ -56,6 +66,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.cmd == "replay":
         return asyncio.run(_replay(args.transcript, args.model))
+    if args.cmd == "bakeoff":
+        return asyncio.run(_bakeoff(args))
     store = SpeakerMemoryStore(args.db or _configured_db())
     try:
         return _run(store, args)
@@ -70,6 +82,44 @@ def _configured_db() -> Path:
 def _config():
     config_dir = Path(os.environ.get("GLADOS_CONFIG_DIR", "configs"))
     return load_glados_config(config_dir / "glados.toml")
+
+
+async def _bakeoff(args: argparse.Namespace) -> int:
+    cfg = _config()
+    mem = cfg.memory.model_copy(update={"writer_model": args.model}) if args.model else cfg.memory
+    model = mem.writer_model or cfg.llm.model
+    try:
+        bakeoff.check_local_ollama(cfg)
+        bakeoff.check_glados_stopped(cfg)
+        digest = bakeoff.model_digest(cfg.llm.host, model)
+    except bakeoff.BakeoffRefused as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
+    paths = args.cases or [bakeoff.default_cases()]
+    texts = [p.read_text(encoding="utf-8") for p in paths]
+    cases = [c for text in texts for c in scoring.load_cases(text)]
+    llm = build_writer_llm(cfg.llm, mem)
+    try:
+        scores = await bakeoff.run_cases(cases, llm, batch_policy(cfg))
+    finally:
+        aclose = getattr(llm, "aclose", None)
+        if aclose is not None:
+            await aclose()
+        bakeoff.unload_quietly(cfg.llm.host, model)
+    data = bakeoff.report(scores, {
+        "model": model, "digest": digest, "corpus_sha256": bakeoff.corpus_sha256(texts),
+        "settings": {"num_ctx": cfg.llm.num_ctx, "num_predict": mem.writer_num_predict,
+                     "think": cfg.llm.think, "daily_adds": mem.daily_adds,
+                     "max_notes_per_batch": mem.max_notes_per_batch},
+    })
+    json_path, md_path = bakeoff.write_report(data, args.out or bakeoff.default_out_dir())
+    test_summary = scoring.summarise([s for s in scores if s.split == "test"])
+    print(bakeoff.headline(test_summary))
+    print(f"report: {md_path}")
+    if any(s.failed_chunks for s in scores):
+        print("INVALID: writer calls failed; see the memory log for why", file=sys.stderr)
+        return 3
+    return 0 if test_summary.gate == "pass" else 4 if test_summary.gate == "pass" else 4
 
 
 async def _replay(transcript: Path, model: str) -> int:
