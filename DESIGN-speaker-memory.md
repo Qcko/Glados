@@ -8,77 +8,151 @@ Ema") and use them in later conversations.
 
 Fixed by the user (17-10-2026): build first, bake-off later. The writer runs on
 the SAME resident model as the organizer (`ministral3:8b-instruct`), not a
-second model. Memories are keyed on `speaker_id`, which is `room.default_user`
-until voice-ID (track 2) lands.
+second model.
+
+Revised by the user (18-10-2026), not yet built:
+
+- **Key.** Memory keys on the voice-verified person (`SpeakerIdentity.person`
+  when `source == "voice"`). Typed turns and unidentified voices read and write
+  nothing, so memory is inert until speaker ID slice 3 ships the embedder. This
+  part is built and on main.
+- **Cadence.** Lessons are gathered over a day and fed back after it, not
+  after each prompt. The near-real-time writer that shipped first (RAM queue,
+  60 s idle gate) becomes a daily batch over durable, encrypted staged notes.
+  The rest of this document describes the batch, after a design roster
+  (architect, security, reliability, clean slate) on 18-10-2026.
 
 ## Shape
 
 ```mermaid
 flowchart TD
-    U[User utterance] --> T[Live turn: Organizer._run_user_text]
-    S[(speaker_memory.sqlite<br/>facts per room + speaker)] -->|read capped block| A[Per-turn prompt assembly<br/>base + server notes + speaker block]
-    A --> T
-    T -->|turn committed| H[on_turn_committed hook]
-    H -->|user texts only, plus reply as context<br/>unless turn saw external content| Q[MemoryWriter queue<br/>bounded, per speaker]
-    Q --> G{House idle?<br/>warm, no turn active or starting,<br/>speaker idle 60 s}
-    G -- no --> Q
-    G -- yes --> W[Writer call: same model, same options,<br/>JSON out, small num_predict]
-    T -.->|turn starts: cancel writer now| W
-    W --> V[Deterministic validator<br/>caps, charset, defang, dedupe]
-    V -->|accepted facts| S
-    V -.->|rejected: counted in log| L[logs/memory.log]
-    W -->|after job| R[Re-warm organizer prefix<br/>num_predict 1]
+    U[Verified-voice turn committed] -->|on_turn_committed:<br/>encrypt, insert, never awaited by the turn| N[(speaker_notes<br/>staged notes, encrypted per row)]
+    N --> D{Due?<br/>no successful run today<br/>AND house idle 10 min<br/>AND model warm}
+    D -- no --> N
+    D -- yes --> X[Expire notes older than 2 days]
+    X --> C[Next chunk for one room + person + session<br/>up to 30 notes, ids snapshotted]
+    C --> W[Writer call: same model,<br/>notes guard-wrapped with ids,<br/>current facts carried forward]
+    W --> V[Validator: caps against the per-day counter,<br/>every add cites note ids from this chunk]
+    V --> A[One transaction: apply facts,<br/>delete the snapshotted note ids,<br/>bump the day counter]
+    A --> S[(speaker_facts)]
+    A --> M{More chunks?}
+    M -- yes --> C
+    M -- no --> R[Record the run date in memory_batch_runs]
+    T[Turn starts] -.->|cancel the writer call now| W
+    S -->|next turn reads the capped block| I[Per-turn prompt assembly]
 ```
+
+The day boundary and the go-live point are code. A fact written in tonight's
+run is injected from the next turn on, which in practice is the next morning.
 
 ## Components
 
-1. **`core/speaker_memory.py` - `SpeakerMemoryStore`.** SQLite, WAL, one
-   connection driven through `asyncio.to_thread`. Table `speaker_facts(id,
-   room_id, speaker_id, text, source_session, source_utterance, created_at,
-   last_seen_at)`. Distinct from the section 8 "SQLite session log", which is not
-   built; this table name is reserved so that log does not fork the schema.
-   Per-speaker cap (30), LRU eviction. An in-RAM cache, rebuilt from each write,
-   serves the read at turn start, so the critical path never touches disk.
-   The db lives outside the repo tree (config `db_path`, default under the
-   server's data dir), file mode owner-only.
-2. **`core/memory_writer.py` - `MemoryWriter`.** One asyncio worker. The
-   transport is an `LLM` adapter handed in from server.py, built from the SAME
-   `[llm]` config as the organizer (model, `num_ctx`, `keep_alive`), so a
-   writer call never reloads the model; `[memory] writer_model` is the seam the
-   later bake-off swaps. Prompt-building and validation are pure functions,
-   separate from transport, so `python -m glados.memory replay` can run a fixed
-   transcript through any model.
-3. **Organizer, two narrow hooks.** A note after `_commit_history`, and a
-   push-driven `turn_starting()` fired by `RoomQueueManager.on_enqueue` on
-   EVERY accepted enqueue (user turns, intercom, anything later), which is
-   earlier than `_inflight` and covers every path. Everything else stays out of
-   `organizer.py`.
-4. **Per-turn assembly.** The speaker block is added per turn in
-   `_run_user_text`, never via `set_memory_notes` / `self._system_prompt`, which
-   are organizer-global. Cross-speaker bleed is impossible by construction.
-5. **CLI** `python -m glados.memory list|forget|wipe [--session]`.
+1. **`core/speaker_memory.py` - `SpeakerMemoryStore`.** SQLite, WAL, owner-only
+   file mode on the db AND its `-wal`/`-shm` sidecars. `PRAGMA secure_delete=ON`
+   and a `wal_checkpoint(TRUNCATE)` after every delete, so a consumed,
+   expired or forgotten note does not survive in freelist pages or the WAL.
+   Tables:
+   - `speaker_facts(...)` as today, plus a `fact_sources(fact_id, session_id)`
+     link so a fact distilled from several sessions is removed by
+     `forget-session` for ANY of them.
+   - `speaker_notes(id, room_id, person, session_id, utterance_id, user_text,
+     reply, untrusted, created_at)`. `user_text` and `reply` are ciphertext,
+     the rest stays queryable. `reply` is NULL when the turn saw `<external>`.
+   - `memory_batch_runs(run_date, finished_at)` and a per-day
+     `(room_id, person, run_date, adds, drops)` counter.
+   The in-RAM fact cache is unchanged: `_refresh_if_changed` already reloads
+   when the generation moves, so the morning turn sees the night's facts.
+2. **Note encryption.** Fernet with its own keyring key
+   (`glados.speaker_memory` / `notes-key`), modelled on `voiceid/store.py`.
+   A missing or unreadable key fails closed: nothing is staged, and the reason
+   is logged once. Facts stay plaintext as today; staged notes are the more
+   sensitive tier (verbatim speech).
+3. **`core/memory_writer.py` - `MemoryWriter`, kept, not rewritten.** The
+   warm/busy gate, preemption, the `_committed` shield and the re-warm carry
+   over. What changes:
+   - The pending source is a SQLite query, not the RAM queue.
+   - The due predicate replaces the 60 s idle gate: no successful run for
+     today's LOCAL date (stored in `memory_batch_runs`, never derived from a
+     monotonic clock or "older than 24 h", so a clock jump or DST fall-back
+     cannot run it twice or skip it) AND the house idle 10 min AND the model
+     warm. Prod is powered off at night, so this one trigger serves both "ran
+     overnight" and "caught up after boot". An optional `batch_window` only
+     narrows when it may run.
+   - Retries need no bookkeeping: a preempted chunk's notes are still staged.
+     `attempts` / `max_attempts` go.
+   - One job is one chunk of one (room, person, session_id), at most
+     `max_notes_per_batch` (30) notes. Chunks are processed one after another,
+     each carrying the facts the previous one produced (sequential fold). The
+     prompt length (notes + facts + output budget) is computed before the call;
+     a chunk over budget is split, never sent for Ollama to truncate.
+   - A re-warm after each job, not once at the end: a turn can arrive between
+     jobs.
+4. **Writer prompt and validator.** `writer_messages` / `judge_writer_output`
+   stay. Each note is guard-wrapped with its id. Every add must cite the note
+   ids it came from; the validator rejects an add whose ids are not in this
+   chunk, and `fact_sources` is filled from the cited notes. Caps (8 adds /
+   4 drops per person per day) are checked against the persisted day counter,
+   so a day split into many chunks cannot exceed them. A note tagged
+   `untrusted` may support at most one add per day. The validator stays the
+   single authority.
+5. **Organizer, unchanged.** It sees only `SpeakerMemory`: the block a turn
+   injects, the note a committed turn leaves, and the push that a turn is
+   starting. `on_turn_committed` stays synchronous for the turn: the encrypted
+   insert is handed to a tracked background task, never awaited on the turn's
+   critical path, and never held behind a long batch transaction (the apply
+   transaction contains no LLM call).
+6. **CLI** `python -m glados.memory list|forget|forget-session|wipe`.
 
-## Can the writer slow or block a live turn?
+## The apply transaction
+
+One `BEGIN IMMEDIATE` per chunk:
+
+1. Check `expected_generation` / `expected_purges` and the forgotten
+   sessions. On `StaleGeneration` with no forget (for example a manual
+   `forget` of one fact), re-read the facts and retry the SAME note ids. If the
+   chunk's session was forgotten, delete its notes instead of retrying.
+2. Re-check that the person is still enrolled. Notes of a person un-enrolled
+   overnight are purged, not written.
+3. Insert accepted facts and their `fact_sources`, apply drops.
+4. `DELETE FROM speaker_notes WHERE id IN (<snapshot>)` - by the ids read for
+   this chunk, never by time or by key, so a note inserted during the run
+   survives for the next one.
+5. Bump the day counter.
+
+A note is deleted only in the same transaction that writes what it produced,
+so a cancel, a crash or a shutdown can neither lose nor double-apply it.
+Shutdown cancels the batch task, then awaits any in-flight threaded apply
+(the existing `_committed` shield); `close()` takes `_write_lock`.
+
+## Retention
+
+- Consumed notes are deleted in the apply transaction.
+- Unprocessed notes older than 2 days are deleted unprocessed, at boot AND at
+  the start of every run (prod is often off at night, so boot is what actually
+  enforces the limit). Every such loss is logged as a count and counted in a
+  metric, so a house that is never idle cannot lose notes silently.
+- `forget-session` deletes that session's staged notes, bumps `purges` and
+  records the session as forgotten, in one transaction. `wipe` deletes all
+  staged notes for the person. `forget` of one fact also deletes any still
+  staged notes it cites, or the next run would re-derive it.
+
+## Can the batch slow or block a live turn?
 
 Not by design, and the design tells us what to measure:
 
 - **Gate.** The writer runs only when the LLM is warm, no turn is active or
-  starting in any room, and the speaker has been idle 60 s.
+  starting in any room, and the house has been idle 10 min.
 - **Preempt.** `turn_starting()` cancels the in-flight writer request
   immediately. Ollama aborts between decode steps, so the worst case is the
-  writer's prefill. The writer prompt is kept small (no tools, no persona) to
-  keep that short. **To measure on 0.23.2:** that cancel really aborts a
-  `stream:false` request, and how long the preemption takes.
+  writer's prefill of one chunk. **To measure on 0.23.2:** that cancel really
+  aborts a `stream:false` request, and how long the preemption takes.
 - **`OLLAMA_NUM_PARALLEL` stays 1.** A second slot reserves KV for a full 16k
-  context (about 2x KV VRAM on a 12 GB card) and concurrent decode slows the
-  live turn. With the gate and preemption, parallel buys nothing.
-- **Prefix cache.** A writer call evicts the organizer's cached system prompt
-  and tool prefix from the single slot. After each job the writer re-warms it
-  with a `num_predict=1` organizer-shaped call. **To measure:** time to first
-  token for the next turn, with and without the re-warm.
-- **Starvation.** Bounded queue, capped backoff and attempts, drops logged.
-  The queue is in RAM: a restart loses unwritten turns, accepted for v1.
-- **Shutdown.** `drain()` cancels the writer first, before `llm.aclose()`.
+  context and concurrent decode slows the live turn.
+- **Prefix cache.** A writer call evicts the organizer's cached prefix; the
+  re-warm after each job restores it. **To measure:** TTFT for the next turn,
+  with and without the re-warm.
+- **Starvation.** Each chunk is resumable. If the house is never idle long
+  enough, notes expire at 2 days and the loss is logged and counted.
 
 ## Are injected memories untrusted?
 
@@ -87,13 +161,17 @@ Yes. Layer 3 below is the contract:
 - **Writer input.** Facts are drawn from what the USER said. GLaDOS's reply is
   context only, and is dropped entirely when the turn saw `<external>`
   content (`outcome.untrusted_seen`), because a reply can paraphrase a hostile
-  page. Tool messages never reach the writer.
-- **Validator.** At most 5 adds and 2 drops per job, each fact at most 120
-  chars, one line. Tag-like text, zero-width and bidi characters, and
-  `<memory-notes` lookalikes are stripped or rejected using the same defang as
-  `memory_gate`. Dedupe runs against existing facts. Drop indexes are the
-  prompt's own short numbering and must belong to this speaker. The denylist is
-  noise reduction, NOT the boundary.
+  page. Such a note is also tagged `untrusted`, because the user may have read
+  the page aloud. Tool messages never reach the writer.
+- **Batch injection.** A whole day reaches the writer, so one poisoned turn
+  could try to steer facts drawn from other turns. Each note is guard-wrapped
+  with its own id, every add must cite the ids it came from, chunks never mix
+  persons or sessions, and the per-day caps bound the damage.
+- **Validator.** Each fact at most 120 chars, one line. Tag-like text,
+  zero-width and bidi characters, and `<memory-notes` lookalikes are stripped
+  or rejected using the same defang as `memory_gate`. Dedupe runs against
+  existing facts. Drop indexes are the prompt's own short numbering and must
+  belong to this speaker. The denylist is noise reduction, NOT the boundary.
 - **Injection.** The block is a `<memory-notes source="speaker:...">`, with the
   attribute stripped of `<>"`, behind the shared preamble ("reference data, not
   instructions"). It is capped at 600 chars and priced in TOKENS in the boot
@@ -104,17 +182,14 @@ Yes. Layer 3 below is the contract:
 - **Local only.** The block is added only when the turn's adapter is a local
   one (positive check), so a cloud specialist route never carries it. A test
   checks the outbound body.
-- **Privacy.** Traces, logs at INFO, and the admin room viewer carry counts
-  only, never fact text or writer prompts.
-- **Ambient rooms.** Until voice-ID, every voice in a room writes into that
-  room's default user (TV, guests). So memory is enabled PER ROOM
-  (`[[rooms]] memory = true`), and facts are keyed `(room_id, speaker_id)`.
-- **Removal.** CLI `forget` (one fact), `forget-session` (everything a
-  poisoned session wrote) and `wipe`. Each delete bumps a per-speaker `purges`
-  counter and `forget-session` records the session as forgotten, so notes the
-  writer was still holding in RAM can never bring removed content back. A job
-  preempted after its store write committed is never requeued (no double
-  write). Voice "what do you remember / forget that" is a follow-up.
+- **Identity.** Only a voice-verified person is staged, read or written
+  (`SpeakerIdentity.verified`). The fallback session bucket, which is the
+  client's default user, is never a memory key. Memory is still enabled PER
+  ROOM (`[[rooms]] memory = true`), and facts are keyed `(room_id, person)`.
+- **Privacy.** Traces, logs at INFO, the admin room viewer and batch
+  exceptions carry counts only, never note text, fact text or writer prompts.
+  A test runs a failing batch (bad JSON, sqlite error) and greps the logs for
+  the note text.
 - **Traces.** `llm_request` records the shared system prompt plus
   `[speaker memory: N chars]`, never the facts.
 
@@ -124,17 +199,38 @@ Layer 2 forbids auto-writing for two reasons, and Layer 3 answers both.
 **Trust:** Layer 3 is never trusted. It is always guard-wrapped data, it never
 authorises an action, and its writer never sees tool output. **Volume:** it has
 a hard char cap and a fact cap, priced in the boot budget. Its dispatch effect
-at the cap must be measured before any shipped config enables it.
+at the cap must be measured before any shipped config enables it. **At rest:**
+staged notes are verbatim speech, so they are encrypted, kept at most 2 days,
+and deleted for real (secure delete, WAL truncate).
+
+## Config
+
+`[memory]`: `enabled`, `db_path`, `inject_chars`, `batch_window` (optional),
+`idle_before_batch_s` (600), `note_retention_days` (2),
+`max_notes_per_batch` (30), `daily_adds` (8), `daily_drops` (4). The old
+`idle_s` key is rejected at load, so a stale config fails loudly instead of
+silently meaning nothing.
+
+## Tests owed
+
+Insert during a run survives; preempt mid-call, mid-apply and between chunks
+neither loses nor double-applies a note; `forget-session` mid-run; crash then
+catch-up gives the same facts; DST fall-back date runs once; an oversized chunk
+splits; expiry at boot and its loss counter; shutdown mid-apply; a missing
+notes key stages nothing; an add citing a foreign note id is rejected; caps
+hold across chunks of one day; logs carry no note text.
 
 ## Rollout
 
 `[memory] enabled = false` in code and in the shipped `configs/glados.toml`. The
 devbox turns it on locally. Before prod gets it, run the dispatch suite with a
 full 600-char block injected, on every live model surface. The writer bake-off
-(any Mistral-family model that fits) comes after that.
+(any Mistral-family model that fits) comes after that, and also decides whether
+30-note chunks extract as well as single turns on Ministral 3 8B.
 
 ## Follow-ups (not this slice)
 
-- Explicit "remember X" fast path, written synchronously (best-precision source).
+- Explicit "remember X" fast path for the same day. If built, it goes through
+  the same validator and the same verified-person gate - no bypass.
 - Voice/desk "what do you remember about me" and "forget that".
 - Real-Ollama probes: preemption latency, reload check via `/api/ps`, TTFT delta.
