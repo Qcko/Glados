@@ -1,23 +1,30 @@
-"""Async per-speaker memory writer (DESIGN-speaker-memory.md).
+"""Nightly per-speaker memory batch (DESIGN-speaker-memory.md).
 
 Runs on the SAME resident model as the organizer and must never slow a live
 turn. Three mechanisms, in order of how much they carry:
 
-1. Gate: a job starts only when the LLM is warm, no room has a turn active or
-   queued, and the session has been quiet for `idle_s`.
+1. Gate: a batch starts only when no run has finished for today's LOCAL date,
+   the house has been idle `idle_before_batch_s`, no room has a turn active or
+   queued, and the LLM is warm. The date is stored, never derived from a
+   monotonic clock, so a clock jump or a DST fall-back cannot run it twice or
+   skip it. Prod is often off at night, so the same trigger is the catch-up
+   after boot.
 2. Preempt: `turn_starting()` is pushed by the organizer the moment a turn is
-   enqueued and cancels the in-flight writer call. The call is a streamed chat,
-   so cancelling closes the HTTP stream and Ollama stops generating
-   (tests/test_ollama_cancel.py). A preempted job is requeued, bounded by
-   `max_attempts`.
+   enqueued and cancels the in-flight writer call. The batch stops there; the
+   preempted chunk's notes are still staged, so the next idle window resumes
+   it with no retry bookkeeping.
 3. Re-warm: a writer call evicts the organizer's cached prompt prefix from
-   Ollama's single slot, so after each job `rewarm` replays an
-   organizer-shaped prompt. Preemptible like the job.
+   Ollama's single slot, so after EACH chunk `rewarm` replays an
+   organizer-shaped prompt -- a turn can arrive between chunks. Preemptible
+   like the chunk.
+
+One job is one chunk of one (room, person, session), at most
+`max_notes_per_batch` notes, run one after another so each sees the facts the
+previous one produced. A chunk whose prompt would not fit the window is split
+before it is sent, never left for Ollama to truncate from the front.
 
 `OLLAMA_NUM_PARALLEL` stays 1: a second slot reserves KV for a full context
 and concurrent decode slows the live turn, and the gate makes it unnecessary.
-
-The queue lives in RAM. A restart loses turns not yet written; accepted.
 """
 
 from __future__ import annotations
@@ -27,29 +34,48 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime
+from datetime import time as clock_time
 
 from .adapters import LLM, LLMMessage, LLMText
-from .memory_facts import TurnNote, judge_writer_output, writer_messages
-from .speaker_memory import Key, SpeakerMemoryStore, StaleGeneration
+from .memory_facts import DayBudget, Fact, WriterVerdict, judge_writer_output, writer_messages
+from .speaker_memory import (
+    Chunk,
+    ChunkWrite,
+    Group,
+    SpeakerMemoryStore,
+    StaleGeneration,
+)
 
 log = logging.getLogger(__name__)
 
-MAX_NOTES_PER_JOB = 8
-MAX_PENDING_JOBS = 32
+# Pessimistic for speech (English prose runs about 4), so a chunk is split
+# well before the window could truncate it.
+_CHARS_PER_TOKEN = 2
+_STALE_RETRIES = 3
+_DAY_S = 86400.0
 
-# One pending job per (room, speaker, session), so every stored fact names the
-# single session it came from and `forget --session` purges exactly that.
-JobKey = tuple[str, str, str]
+
+class EnrollmentUnknown(Exception):
+    """Who is enrolled cannot be read now; the chunk fails and its notes stay."""
 
 
-@dataclass
-class _Pending:
-    purges: int
-    notes: list[TurnNote] = field(default_factory=list)
-    last_at: float = 0.0
-    attempts: int = 0
-    committed: bool = False
+def _enrollment_unbound(person: str) -> bool:
+    raise EnrollmentUnknown("enrollment check not bound yet")
+
+
+@dataclass(frozen=True)
+class BatchPolicy:
+    idle_before_batch_s: float = 600.0
+    retention_days: float = 2.0
+    max_notes_per_batch: int = 30
+    daily_adds: int = 8
+    daily_drops: int = 4
+    daily_untrusted_adds: int = 1
+    context_tokens: int = 12288
+    output_tokens: int = 256
+    window: tuple[clock_time, clock_time] | None = None
 
 
 class MemoryWriter:
@@ -61,39 +87,35 @@ class MemoryWriter:
         is_busy: Callable[[], bool],
         is_warm: Callable[[], bool],
         rewarm: Callable[[], Awaitable[None]] | None = None,
-        idle_s: float = 60.0,
-        poll_s: float = 1.0,
-        max_attempts: int = 3,
+        is_enrolled: Callable[[str], bool] = _enrollment_unbound,
+        policy: BatchPolicy = BatchPolicy(),
+        poll_s: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
+        local_now: Callable[[], datetime] = datetime.now,
     ) -> None:
         self._llm = llm
         self._store = store
         self._is_busy = is_busy
         self._is_warm = is_warm
         self._rewarm = rewarm
-        self._idle_s = idle_s
+        self._is_enrolled = is_enrolled
+        self._policy = policy
         self._poll_s = poll_s
-        self._max_attempts = max_attempts
         self._clock = clock
-        self._pending: dict[JobKey, _Pending] = {}
+        self._local_now = local_now
+        self._last_activity = clock()
         self._job: asyncio.Task | None = None
         self._wake = asyncio.Event()
-        self.jobs_done = 0
-        self.jobs_preempted = 0
-        self.jobs_dropped = 0
+        self.batches_done = 0
+        self.chunks_done = 0
+        self.chunks_preempted = 0
+        self.chunks_failed = 0
 
-    def note_turn(self, key: Key, session_id: str, note: TurnNote) -> None:
-        job_key = (*key, session_id)
-        pending = self._pending.pop(job_key, None) or _Pending(
-            purges=self._store.purges(*key)
-        )
-        if len(self._pending) >= MAX_PENDING_JOBS:
-            self._drop(next(iter(self._pending)), "queue full")
-        pending.notes = (pending.notes + [note])[-MAX_NOTES_PER_JOB:]
-        pending.last_at = self._clock()
-        self._pending[job_key] = pending
+    def set_enrollment(self, is_enrolled: Callable[[str], bool]) -> None:
+        self._is_enrolled = is_enrolled
 
     def turn_starting(self) -> None:
+        self._last_activity = self._clock()
         job = self._job
         if job is not None and not job.done():
             job.cancel()
@@ -109,89 +131,187 @@ class MemoryWriter:
             except asyncio.TimeoutError:
                 pass
             self._wake.clear()
-            job_key = self._due_job()
-            if job_key is not None:
-                await self._run_job(job_key)
+            run_date = self._run_date()
+            if self._due(run_date):
+                await self._run_batch(run_date)
 
     async def close(self) -> None:
+        """Cancel the chunk in flight and wait for it, which includes any
+        threaded apply that had already started: it commits regardless."""
+        job = self._job
         self.turn_starting()
-        if self._job is not None:
-            await asyncio.wait({self._job})
+        if job is not None:
+            await asyncio.wait({job})
 
-    def _due_job(self) -> JobKey | None:
-        if not self._is_warm() or self._is_busy():
-            return None
-        now = self._clock()
-        due = [k for k, p in self._pending.items() if now - p.last_at >= self._idle_s]
-        return min(due, key=lambda k: self._pending[k].last_at) if due else None
+    # ---- gate ---------------------------------------------------------------
 
-    async def _run_job(self, job_key: JobKey) -> None:
-        pending = self._pending.pop(job_key)
-        started = self._clock()
-        log.info(
-            "memory job start room=%s speaker=%s turns=%d",
-            *job_key[:2], len(pending.notes),
+    def _run_date(self) -> str:
+        return self._local_now().date().isoformat()
+
+    def _due(self, run_date: str) -> bool:
+        return (
+            self._house_idle()
+            and self._in_window()
+            and self._store.can_read()
+            and not self._store.ran_on(run_date)
         )
-        self._job = asyncio.create_task(self._write_then_rewarm(job_key, pending))
-        await asyncio.wait({self._job})
-        job, self._job = self._job, None
-        elapsed_ms = int((self._clock() - started) * 1000)
-        if job.cancelled() and not pending.committed:
-            self._requeue(job_key, pending, elapsed_ms)
-        elif job.exception() is not None:
-            self._drop(job_key, f"error {job.exception()!r} elapsed_ms={elapsed_ms}")
 
-    async def _write_then_rewarm(self, job_key: JobKey, pending: _Pending) -> None:
-        await self._write(job_key, pending)
-        pending.committed = True
-        if self._rewarm is not None:
+    def _house_idle(self) -> bool:
+        now = self._clock()
+        if self._is_busy():
+            self._last_activity = now
+            return False
+        return self._is_warm() and now - self._last_activity >= self._policy.idle_before_batch_s
+
+    def _in_window(self) -> bool:
+        window = self._policy.window
+        if window is None:
+            return True
+        start, end = window
+        now = self._local_now().time()
+        return start <= now < end if start <= end else now >= start or now < end
+
+    # ---- batch --------------------------------------------------------------
+
+    async def _run_batch(self, run_date: str) -> None:
+        started = self._clock()
+        self.expire()
+        failed: set[Group] = set()
+        while True:
+            if not self._house_idle():
+                log.info("memory batch paused: house busy")
+                return
+            group = next((g for g in self._store.pending_groups() if g not in failed), None)
+            if group is None:
+                break
+            outcome = await self._run_job(group, run_date)
+            if outcome == "preempted":
+                return
+            if outcome == "failed":
+                failed.add(group)
+        self._store.record_run(run_date)
+        self.batches_done += 1
+        log.log(
+            logging.WARNING if failed else logging.INFO,
+            "memory batch done date=%s failed_groups=%d elapsed_ms=%d",
+            run_date, len(failed), int((self._clock() - started) * 1000),
+        )
+
+    def expire(self) -> int:
+        """Drop notes past retention, unprocessed. At boot and at run start."""
+        cutoff = time.time() - self._policy.retention_days * _DAY_S
+        return self._store.expire_notes(cutoff)
+
+    async def _run_job(self, group: Group, run_date: str) -> str:
+        started = self._clock()
+        job = self._job = asyncio.create_task(self._chunk_then_rewarm(group, run_date))
+        try:
+            await asyncio.wait({job})
+        except asyncio.CancelledError:
+            job.cancel()
+            await asyncio.wait({job})
+            raise
+        finally:
+            self._job = None
+        elapsed_ms = int((self._clock() - started) * 1000)
+        if job.cancelled():
+            self.chunks_preempted += 1
+            log.info("memory chunk preempted room=%s person=%s elapsed_ms=%d", *group[:2], elapsed_ms)
+            return "preempted"
+        if job.exception() is not None:
+            self.chunks_failed += 1
+            log.warning(
+                "memory chunk failed room=%s person=%s: %s elapsed_ms=%d",
+                *group[:2], type(job.exception()).__name__, elapsed_ms,
+            )
+            return "failed"
+        return job.result()
+
+    async def _chunk_then_rewarm(self, group: Group, run_date: str) -> str:
+        outcome, called_llm = await self._write_chunk(group, run_date)
+        if called_llm and self._rewarm is not None:
             started = self._clock()
             await self._rewarm()
             log.info("memory rewarm done elapsed_ms=%d", int((self._clock() - started) * 1000))
+        return outcome
 
-    async def _write(self, job_key: JobKey, pending: _Pending) -> None:
-        room_id, speaker_id, session_id = job_key
-        started = self._clock()
-        generation = self._store.generation(room_id, speaker_id)
-        known = self._store.facts(room_id, speaker_id)
-        raw = await self._collect(writer_messages(known, pending.notes))
-        verdict = judge_writer_output(raw, known)
-        apply = asyncio.ensure_future(
-            self._store.apply(
-                (room_id, speaker_id),
-                adds=verdict.adds,
-                drop_ids=verdict.drop_ids,
-                expected_generation=generation,
-                expected_purges=pending.purges,
-                source_session=session_id,
-                source_utterance=" | ".join(n.user_text for n in pending.notes),
+    async def _write_chunk(self, group: Group, run_date: str) -> tuple[str, bool]:
+        """One chunk to its apply. A stale generation (a fact forgotten
+        meanwhile) re-reads the facts and the chunk and retries; the notes are
+        still staged, so the retry starts from the same oldest note."""
+        called_llm = False
+        for _ in range(_STALE_RETRIES):
+            stamp = self._store.stamp(*group[:2])
+            known = self._store.facts(*group[:2])
+            chunk = self._fit_chunk(group, known)
+            if not chunk.ids:
+                return "done", called_llm
+            called_llm = called_llm or bool(chunk.notes)
+            verdict = await self._judge(chunk, known, run_date)
+            write = ChunkWrite(
+                group=group, run_date=run_date, note_ids=chunk.ids, expected=stamp,
+                adds=tuple(verdict.adds), drop_ids=tuple(verdict.drop_ids),
+                reaffirmed=verdict.reaffirmed,
             )
-        )
-        try:
-            await self._committed(apply, pending)
-        except StaleGeneration:
-            log.info(
-                "memory job discarded room=%s speaker=%s: facts changed meanwhile",
-                room_id, speaker_id,
-            )
-            return
-        self.jobs_done += 1
+            try:
+                outcome = await self._committed(self._store.apply_chunk(write, self._is_enrolled))
+            except StaleGeneration:
+                log.info("memory chunk stale room=%s person=%s: retrying", *group[:2])
+                continue
+            self._log_applied(chunk, verdict, outcome)
+            return outcome, called_llm
+        return "failed", called_llm
+
+    def _log_applied(self, chunk: Chunk, verdict: WriterVerdict, outcome: str) -> None:
+        self.chunks_done += 1
         log.info(
-            "memory job done room=%s speaker=%s added=%d dropped=%d rejected=%d elapsed_ms=%d",
-            room_id, speaker_id, len(verdict.adds), len(verdict.drop_ids),
-            verdict.rejected, int((self._clock() - started) * 1000),
+            "memory chunk %s room=%s person=%s notes=%d added=%d dropped=%d rejected=%d",
+            outcome, *chunk.group[:2], len(chunk.ids), len(verdict.adds),
+            len(verdict.drop_ids), verdict.rejected,
+        )
+
+    def _fit_chunk(self, group: Group, known: list[Fact]) -> Chunk:
+        """The largest leading slice of the group that fits the window. A
+        single note too big to fit is consumed with nothing derived."""
+        limit = self._policy.max_notes_per_batch
+        while True:
+            chunk = self._store.read_chunk(group, limit)
+            if self._fits(writer_messages(known, chunk.notes)):
+                return chunk
+            if limit == 1:
+                log.warning("memory chunk room=%s person=%s: one note over budget, dropped", *group[:2])
+                return Chunk(group=group, notes=[], ids=chunk.ids)
+            limit = max(1, min(limit, len(chunk.ids)) // 2)
+
+    def _fits(self, messages: list[LLMMessage]) -> bool:
+        chars = sum(len(m.content or "") for m in messages)
+        budget = self._policy.context_tokens - self._policy.output_tokens
+        return chars // _CHARS_PER_TOKEN <= budget
+
+    async def _judge(self, chunk: Chunk, known: list[Fact], run_date: str) -> WriterVerdict:
+        if not chunk.notes:
+            return WriterVerdict(adds=[], drop_ids=[], rejected=0)
+        raw = await self._collect(writer_messages(known, chunk.notes))
+        return judge_writer_output(raw, known, chunk.notes, self._budget(chunk.group, run_date))
+
+    def _budget(self, group: Group, run_date: str) -> DayBudget:
+        used = self._store.day_counts(group[1], run_date)
+        return DayBudget(
+            adds=self._policy.daily_adds - used.adds,
+            drops=self._policy.daily_drops - used.drops,
+            untrusted_adds=self._policy.daily_untrusted_adds - used.untrusted_adds,
         )
 
     @staticmethod
-    async def _committed(apply: asyncio.Future, pending: _Pending) -> None:
+    async def _committed(apply: Awaitable[str]) -> str:
         """Await the store write to its end even if preempted meanwhile: the
-        thread commits regardless, and a job requeued after its own commit
-        would write the same facts twice."""
+        thread commits regardless, and the batch must not move on, or shut
+        down, while it is still writing."""
+        future = asyncio.ensure_future(apply)
         try:
-            await asyncio.shield(apply)
+            return await asyncio.shield(future)
         except asyncio.CancelledError:
-            await asyncio.wait({apply})
-            pending.committed = not apply.cancelled() and apply.exception() is None
+            await asyncio.wait({future})
             raise
 
     async def _collect(self, messages: list[LLMMessage]) -> str:
@@ -201,31 +321,3 @@ class MemoryWriter:
                 if isinstance(event, LLMText):
                     parts.append(event.text)
         return "".join(parts)
-
-    def _requeue(self, job_key: JobKey, pending: _Pending, elapsed_ms: int) -> None:
-        self.jobs_preempted += 1
-        pending.attempts += 1
-        log.info(
-            "memory job preempted room=%s speaker=%s attempt=%d elapsed_ms=%d",
-            *job_key[:2], pending.attempts, elapsed_ms,
-        )
-        if pending.attempts >= self._max_attempts:
-            self.jobs_dropped += 1
-            log.warning(
-                "memory job dropped room=%s speaker=%s: preempted %d times",
-                *job_key[:2], pending.attempts,
-            )
-            return
-        newer = self._pending.pop(job_key, None)
-        if newer is not None:
-            pending.notes = (pending.notes + newer.notes)[-MAX_NOTES_PER_JOB:]
-        # A fresh idle window, not an immediate retry: the house was just
-        # active, and a retry the moment that turn ends would sit in front
-        # of the follow-up utterance that usually comes next.
-        pending.last_at = self._clock()
-        self._pending[job_key] = pending
-
-    def _drop(self, job_key: JobKey, reason: str) -> None:
-        self._pending.pop(job_key, None)
-        self.jobs_dropped += 1
-        log.warning("memory job dropped room=%s speaker=%s: %s", *job_key[:2], reason)

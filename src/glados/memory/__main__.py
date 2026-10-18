@@ -3,7 +3,7 @@
 Shell access on the server is the only way in, by design: this is how a fact
 that should not be there gets removed until a voice "forget that" exists.
 Safe to run while GLaDOS is up -- every delete bumps the speaker's generation,
-so an in-flight writer job cannot re-add what was just removed, and the
+so an in-flight batch chunk cannot re-add what was just removed, and the
 server's cache reloads on its next turn.
 """
 
@@ -20,7 +20,7 @@ from typing import Sequence
 
 from ..core.adapters import LLMText
 from ..core.config import load_glados_config
-from ..core.memory_facts import TurnNote, judge_writer_output, writer_messages
+from ..core.memory_facts import DayBudget, StagedNote, judge_writer_output, writer_messages
 from ..core.memory_wiring import build_writer_llm
 from ..core.speaker_memory import SpeakerMemoryStore
 
@@ -33,13 +33,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", type=Path, help="Database path (default: [memory].db_path).")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="Print every stored fact.")
-    p_forget = sub.add_parser("forget", help="Delete one fact by id.")
+    p_forget = sub.add_parser("forget", help="Delete one fact by id, and any staged note it cites.")
     p_forget.add_argument("fact_id", type=int)
     p_session = sub.add_parser(
-        "forget-session", help="Delete everything one session wrote."
+        "forget-session", help="Delete every fact one session backed, and its staged notes."
     )
     p_session.add_argument("session_id")
-    p_wipe = sub.add_parser("wipe", help="Delete every fact for a room's speaker.")
+    p_wipe = sub.add_parser("wipe", help="Delete every fact and staged note for a room's speaker.")
     p_wipe.add_argument("room_id")
     p_wipe.add_argument("speaker_id")
     p_replay = sub.add_parser(
@@ -77,8 +77,8 @@ async def _replay(transcript: Path, model: str) -> int:
     mem = cfg.memory.model_copy(update={"writer_model": model}) if model else cfg.memory
     llm = build_writer_llm(cfg.llm, mem)
     notes = [
-        TurnNote(user_text=t["user"], reply=t.get("reply"))
-        for t in json.loads(transcript.read_text(encoding="utf-8"))
+        StagedNote(id=i, user_text=t["user"], reply=t.get("reply"))
+        for i, t in enumerate(json.loads(transcript.read_text(encoding="utf-8")), start=1)
     ]
     parts: list[str] = []
     try:
@@ -91,8 +91,9 @@ async def _replay(transcript: Path, model: str) -> int:
         if aclose is not None:
             await aclose()
     raw = "".join(parts)
-    verdict = judge_writer_output(raw, [])
-    print(json.dumps({"raw": raw, "adds": verdict.adds, "rejected": verdict.rejected}, indent=2))
+    verdict = judge_writer_output(raw, [], notes, DayBudget(adds=mem.daily_adds, drops=0, untrusted_adds=0))
+    adds = [{"fact": a.text, "notes": list(a.note_ids)} for a in verdict.adds]
+    print(json.dumps({"raw": raw, "adds": adds, "rejected": verdict.rejected}, indent=2))
     return 0
 
 
@@ -107,7 +108,7 @@ def _run(store: SpeakerMemoryStore, args: argparse.Namespace) -> int:
         removed = store.forget_session(args.session_id)
     else:
         removed = store.wipe(args.room_id, args.speaker_id)
-    print(f"removed {removed}")
+    print(f"removed {removed.facts} facts, {removed.notes} staged notes")
     return 0
 
 

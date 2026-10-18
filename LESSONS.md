@@ -39,10 +39,15 @@ not work, so the next session does not relearn it.
   under `TestClient`.** The app is built in one thread and the lifespan runs on
   a portal thread, so `check_same_thread=True` raises on the first turn. Open
   with `check_same_thread=False` and guard each connection with its own lock.
-- **A RAM queue outlives an out-of-process delete.** The operator CLI deleting
-  a fact does nothing to notes the writer still holds, so the store has to
-  remember deletes (`purges` counter, forgotten sessions) and refuse writes
-  based on notes older than them.
+- **Notes in flight outlive an out-of-process delete.** The operator CLI deleting
+  a fact does nothing to notes a writer call is already holding, so the store has
+  to remember deletes (`purges` counter, forgotten sessions) and refuse writes
+  based on notes read before them. Found with the RAM queue (17-10-2026); still
+  true for the nightly batch, whose chunk is read before its LLM call.
+- **"Can't read who is enrolled" is not "nobody is enrolled".** An unreadable
+  voiceprint store returned no people, and the batch purged every staged note
+  as un-enrolled. An empty or unreadable source of truth must fail toward
+  keeping data (`EnrollmentUnknown`, 18-10-2026).
 
 ## Speaker identity
 

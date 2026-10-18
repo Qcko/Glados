@@ -70,7 +70,7 @@ from .reader import READER_NUM_PREDICT, READER_NUM_PREDICT_THINKING
 from . import memory_gate
 from .ollama_lifecycle import OllamaLifecycle
 from .cart_verifier import CartVerifier
-from .memory_wiring import build_speaker_memory
+from .memory_wiring import build_speaker_memory, open_speaker_memory
 from .organizer import Organizer
 from .wake import Admission, WakeGate, WakeTimings
 from .prompt_budget import measure_boot_budget
@@ -419,6 +419,7 @@ async def _stop_memory_writer(memory, memory_task: asyncio.Task | None) -> None:
     writer_aclose = getattr(writer_llm, "aclose", None)
     if writer_aclose is not None:
         await writer_aclose()
+    await _memory.drain()
     _memory.close()
 
 
@@ -990,6 +991,10 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             else None
         )
         memory = _app.state.speaker_memory
+        if memory is not None:
+            await asyncio.to_thread(
+                open_speaker_memory, memory, _app.state.glados_cfg, _app.state.secrets
+            )
         memory_task: asyncio.Task | None = (
             asyncio.create_task(memory[1].run(), name="memory-writer")
             if memory is not None
