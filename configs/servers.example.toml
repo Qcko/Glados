@@ -382,20 +382,28 @@ timeout_s = 400.0
 # `trusted` stays false: that is the separate gate for injecting the server's
 # own memory://lessons into the SYSTEM prompt, and it is not needed here.
 #
+# Transport (calendar-mcp DESIGN.md "Slice K1"): on prod the calendar's data
+# belongs to calendar-svc, which GLaDOS's account cannot and should not open.
+# So GLaDOS does not run calendar code at all. The calendar's own `serve`
+# hosts the MCP server on \\.\pipe\calendar-mcp, and this entry spawns
+# glados.mcp.pipe_shim, which relays stdio to that pipe. The shim refuses a
+# pipe not owned by --server-sid (calendar-svc's SID), so a process that
+# squats the name cannot feed GLaDOS a forged calendar. The host ends a
+# session after 30 idle minutes, hence lazy = true. See DEPLOY.md, "The
+# calendar server".
+#
 # Before enabling: run the G1 live verification -- start GLaDOS with this entry
 # on, ask for today's agenda, and confirm in the trace that the tool result
 # arrived wrapped in <external>.
 
 [[server]]
 id = "calendar"
-command = "uv"
-args = ["run", "--project", "<path-to>/calendar-mcp", "calendar-mcp"]
+command = "<root>/current/.venv/Scripts/python.exe"
+args = ["-m", "glados.mcp.pipe_shim", "--pipe", "calendar-mcp", "--server-sid", "<calendar-svc SID>"]
 autostart = false
 untrusted = true
 trusted = false
-# The calendar is a "what's on today" server: cheap to keep resident, and asked
-# about often enough that lazy spawning would just add latency.
-lazy = false
+lazy = true
 # Distinctive nouns only. "today"/"tomorrow"/"week" are matched whole-word
 # against the entire utterance, so they would pull the calendar into scope on
 # "what's the weather today" and a large fraction of other turns -- which
