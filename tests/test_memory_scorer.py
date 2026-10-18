@@ -176,7 +176,7 @@ async def test_the_runner_scores_adds_drops_and_the_day_caps():
         _case(id="veg", notes=[{"said": "I've gone vegetarian"}], expect_add=[{"all": ["vegetarian"]}]),
         _case(id="moved", known=["Lives in Galway."], notes=[{"said": "We moved to Cork"}],
               expect_drop=["Lives in Galway."]),
-        _case(id="cap", notes=[{"said": "a recipe", "untrusted": True}, {"said": "more", "untrusted": True}],
+        _case(id="cap", notes=[{"said": "a recipe for Thai food", "untrusted": True}, {"said": "more baking", "untrusted": True}],
               expect_add=[{"any": ["thai", "baking"]}]),
     ]
     scores = await bakeoff.run_cases(cases, ScriptedLLM(reply), BatchPolicy())

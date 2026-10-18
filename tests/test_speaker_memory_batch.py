@@ -434,7 +434,7 @@ async def test_one_untrusted_backed_add_per_day_across_chunks(store):
 
     writer, _ = make_writer(store, ScriptedLLM(reply), clock=clock)
     for session in ("s1", "s2"):
-        stage(store, "read this page aloud", group=(*KEY, session), untrusted=True)
+        stage(store, "this band is great", group=(*KEY, session), untrusted=True)
     await run_idle(writer, clock)
     assert len(store.facts(*KEY)) == 1 and store.staged_count() == 0
 

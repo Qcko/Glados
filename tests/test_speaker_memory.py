@@ -9,6 +9,7 @@ history)? The nightly batch itself is in test_speaker_memory_batch.py.
 from __future__ import annotations
 
 import asyncio
+import json
 import tomllib
 from pathlib import Path
 
@@ -101,13 +102,14 @@ def test_adds_and_drops_are_capped_by_the_days_budget_and_drops_must_name_known_
     known = [Fact(id=10 + i, text=f"Fact {i}.") for i in range(4)]
     adds = ", ".join('{"fact": "New fact number %d.", "notes": [1]}' % i for i in range(6))
     raw = '{"add": [%s], "drop": [1, 2, 3, 99, 0, true]}' % adds
-    verdict = _judge(raw, known, budget=DayBudget(adds=3, drops=2, untrusted_adds=1))
+    notes = [StagedNote(1, "here is a new fact, number one of many", None)]
+    verdict = _judge(raw, known, notes=notes, budget=DayBudget(adds=3, drops=2, untrusted_adds=1))
     assert len(verdict.adds) == 3
     assert verdict.drop_ids == [10, 11]
 
 
 def test_an_untrusted_note_backs_at_most_the_days_one_untrusted_add():
-    notes = [StagedNote(1, "read aloud", None, untrusted=True), StagedNote(2, "plain", None)]
+    notes = [StagedNote(1, "jazz and rock", None, untrusted=True), StagedNote(2, "rock and folk", None)]
     raw = (
         '{"add": [{"fact": "Likes jazz.", "notes": [1]}, {"fact": "Likes rock.", "notes": [1, 2]},'
         ' {"fact": "Likes folk.", "notes": [2]}]}'
@@ -116,12 +118,13 @@ def test_an_untrusted_note_backs_at_most_the_days_one_untrusted_add():
     assert [(a.text, a.untrusted) for a in verdict.adds] == [("Likes jazz.", True)]
     spent = _judge(raw, notes=notes, budget=DayBudget(adds=8, drops=4, untrusted_adds=0))
     assert spent.adds == []
-    clean = _judge(raw, notes=[StagedNote(1, "a", None), StagedNote(2, "b", None)])
+    clean = _judge(raw, notes=[StagedNote(1, "jazz and rock", None), StagedNote(2, "rock and folk", None)])
     assert [a.untrusted for a in clean.adds] == [False, False, False]
 
 
 def test_a_restated_known_fact_is_reaffirmed_not_added():
-    verdict = _judge('{"add": [{"fact": "is  vegetarian", "notes": [2]}]}', [Fact(7, "Is vegetarian.")])
+    notes = [StagedNote(1, "hello", None), StagedNote(2, "still vegetarian", None)]
+    verdict = _judge('{"add": [{"fact": "is  vegetarian", "notes": [2]}]}', [Fact(7, "Is vegetarian.")], notes=notes)
     assert verdict.adds == [] and verdict.reaffirmed == {7: (2,)}
 
 
@@ -574,3 +577,80 @@ def test_staging_after_close_is_dropped_not_raised(tmp_path):
     store = make_store(tmp_path / "mem.sqlite")
     store.close()
     assert store.stage_note((*KEY, "s"), "u", StagedNote(0, "hi", None)) is False
+
+
+# ---- grounding: facts come from what the person said -------------------------
+
+
+def _one(fact, notes):
+    raw = json.dumps({"add": [{"fact": fact, "notes": [n.id for n in notes]}]})
+    return judge_writer_output(raw, [], notes, ROOMY).adds
+
+
+def test_a_fact_only_the_reply_stated_is_rejected():
+    notes = [StagedNote(1, "Play some music", "Playing jazz, since you love jazz.")]
+    for fact in ("Enjoys listening to jazz.", "Loves jazz.", "Loves jazz music."):
+        assert _one(fact, notes) == [], fact
+
+
+def test_a_reply_word_from_another_note_in_the_chunk_is_rejected_too():
+    notes = [StagedNote(1, "I like music", None), StagedNote(2, "thanks", "You love jazz.")]
+    raw = json.dumps({"add": [{"fact": "Likes jazz music.", "notes": [1]}]})
+    assert judge_writer_output(raw, [], notes, ROOMY).adds == []
+
+
+@pytest.mark.parametrize(
+    "said, fact",
+    [
+        ("I've gone vegetarian", "Is vegetarian."),
+        ("I'm allergic to peanuts", "Has a peanut allergy."),
+        ("I work night shifts at the hospital", "Works night shifts at the hospital."),
+        ("I can't stand coriander", "Dislikes coriander."),
+        ("My son Alex starts school in September", "Has a son called Alex."),
+    ],
+)
+def test_ordinary_paraphrases_of_what_was_said_still_pass(said, fact):
+    assert [a.text for a in _one(fact, [StagedNote(1, said, "Noted.")])] == [fact]
+
+
+def test_a_fact_with_nothing_from_the_cited_speech_is_rejected():
+    notes = [StagedNote(1, "Set a timer", None), StagedNote(2, "I'm vegetarian", None)]
+    raw = json.dumps({"add": [{"fact": "Is vegetarian.", "notes": [1]}]})
+    assert judge_writer_output(raw, [], notes, ROOMY).adds == []
+
+
+def test_a_word_both_said_and_replied_is_still_the_persons():
+    notes = [StagedNote(1, "I'm vegetarian now", "Vegetarian it is.")]
+    assert [a.text for a in _one("Is vegetarian.", notes)] == ["Is vegetarian."]
+
+
+@pytest.mark.parametrize(
+    "said, fact",
+    [
+        ("I have two kids", "Has 2 children."),
+        ("I go running every morning", "Runs every morning."),
+        ("I collect old shoes", "Collects shoes."),
+        ("I need my glasses to read", "Wears glasses."),
+    ],
+)
+def test_the_word_folding_meets_common_variants(said, fact):
+    assert [a.text for a in _one(fact, [StagedNote(1, said, None)])] == [fact]
+
+
+def test_a_hyphenated_reply_echo_does_not_reject_a_said_fact():
+    notes = [StagedNote(1, "My wife can't eat gluten", "Gluten-free it is.")]
+    assert _one("Wife eats gluten-free.", notes)
+
+
+def test_known_limit_a_reply_word_someone_also_said_passes():
+    """Pinned so a change to it is deliberate: the check is per chunk."""
+    notes = [StagedNote(1, "Play some music", "Playing jazz, since you love jazz."),
+             StagedNote(2, "turn off that jazz later", None)]
+    raw = json.dumps({"add": [{"fact": "Loves jazz music.", "notes": [1]}]})
+    assert judge_writer_output(raw, [], notes, ROOMY).adds
+
+
+def test_a_fact_citing_the_note_whose_reply_made_it_up_is_rejected():
+    notes = [StagedNote(1, "I like music", None), StagedNote(2, "thanks", "You love jazz.")]
+    raw = json.dumps({"add": [{"fact": "Likes jazz music.", "notes": [1, 2]}]})
+    assert judge_writer_output(raw, [], notes, ROOMY).adds == []

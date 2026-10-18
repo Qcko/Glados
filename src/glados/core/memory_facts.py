@@ -56,6 +56,20 @@ _DENYLIST = re.compile(
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 _WHITESPACE = re.compile(r"\s+")
 _NOT_ALNUM = re.compile(r"[^a-z0-9]+")
+_WORD = re.compile(r"[a-z0-9]+")
+# Words a fact is framed with, which say nothing about where it came from.
+_FRAME_WORDS = frozenset(
+    "the and are was were has have had his her their they them she him who "
+    "with for from that this called named likes like loves love enjoys enjoy "
+    "prefers prefer dislikes dislike hates hate lives live does not doesn "
+    "very really always usually also person user free".split()
+)
+# Words that name the same thing, folded before comparing.
+_SAME = {
+    "kid": "child", "kids": "child", "children": "child",
+    **{w: str(i) for i, w in enumerate(
+        "zero one two three four five six seven eight nine ten".split())},
+}
 
 
 @dataclass(frozen=True)
@@ -216,7 +230,47 @@ def _candidate(
     fact = clean_fact(item["fact"])
     if fact is None or cited is None:
         return None
+    if not _grounded(fact, [by_id[i] for i in cited], list(by_id.values())):
+        return None
     return _dedupe_key(fact), fact, cited
+
+
+def _grounded(fact: str, cited: list[StagedNote], chunk: list[StagedNote]) -> bool:
+    """The fact's SUBJECT must come from what the person said, not a reply.
+    It needs a content word in common with the cited notes' speech, and no
+    content word that only a reply in this chunk supplied -- the reply is
+    context, and a writer that copies "since you love jazz" into a fact is
+    learning from GLaDOS, not from the person.
+
+    Known limits, by design of a word check: polarity rides on frame words
+    ("hates", "not") and is not checked; a reply word that any note in the
+    chunk also SAID passes; words of two letters are invisible."""
+    words = _content_words(fact)
+    said = set().union(*(_content_words(n.user_text) for n in chunk))
+    replied = set().union(*(_content_words(n.reply or "") for n in chunk))
+    cited_said = set().union(*(_content_words(n.user_text) for n in cited))
+    return bool(words & cited_said) and not (words & (replied - said))
+
+
+def _content_words(text: str) -> set[str]:
+    words = (_SAME.get(w, w) for w in _WORD.findall(text.lower()) if w not in _FRAME_WORDS)
+    return {_stem(w) for w in words if len(w) > 2 or w.isdigit()}
+
+
+def _stem(word: str) -> str:
+    """Just enough folding that "peanuts"/"peanut", "works"/"work" and
+    "running"/"run" meet. Not a real stemmer: a miss costs a rejected fact,
+    and rule 1 needs only one shared word."""
+    if word.endswith(("ses", "xes", "zes", "ches", "shes")) and len(word) > 5:
+        return word[:-2]
+    for suffix in ("ing", "ed", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return _undouble(word[: -len(suffix)]) if suffix != "s" else word[:-1]
+    return word
+
+
+def _undouble(stem: str) -> str:
+    return stem[:-1] if len(stem) > 3 and stem[-1] == stem[-2] and stem[-1] not in "aeiouls" else stem
 
 
 def _cited_ids(raw: object, by_id: dict[int, StagedNote]) -> tuple[int, ...] | None:
