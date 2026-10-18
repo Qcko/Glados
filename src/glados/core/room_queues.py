@@ -48,6 +48,7 @@ class RoomQueueManager:
         # forward the signal -- see close() for the rationale).
         self._active_actions: dict[str, asyncio.Task] = {}
         self._draining = False
+        self._enqueue_listeners: list[Callable[[], None]] = []
 
     @property
     def draining(self) -> bool:
@@ -91,7 +92,15 @@ class RoomQueueManager:
                 name=f"room-worker:{room_id}",
             )
         queue.put_nowait(action)
+        for listener in self._enqueue_listeners:
+            listener()
         return True
+
+    def on_enqueue(self, listener: Callable[[], None]) -> None:
+        """Call `listener` on every accepted enqueue -- the earliest moment a
+        turn of any kind is known to be coming (the memory writer yields the
+        model here)."""
+        self._enqueue_listeners.append(listener)
 
     def clear(self, room_id: str) -> int:
         """Drop pending actions from a room's queue. Returns the number
@@ -110,6 +119,12 @@ class RoomQueueManager:
             queue.task_done()
             n += 1
         return n
+
+    def busy(self) -> bool:
+        """Some room has an action running or waiting."""
+        return bool(self._active_actions) or any(
+            q.qsize() for q in self._queues.values()
+        )
 
     def queue_depth(self, room_id: str) -> int:
         queue = self._queues.get(room_id)

@@ -37,6 +37,9 @@ log = logging.getLogger(__name__)
 
 
 class OllamaLLM:
+    # A local runtime (ARCH section 9): turns on it may carry speaker memory.
+    is_local = True
+
     def __init__(
         self,
         *,

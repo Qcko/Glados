@@ -67,6 +67,8 @@ from .protocols import (
 )
 from .room_queues import RoomQueueManager
 from .sessions import SessionRegistry
+from .speaker_memory_hooks import SpeakerMemory
+from .speaker import NO_IDENTIFIER, SpeakerMatch, resolve_identity
 from .wake import Admission, Drop, SegmentFacts, WakeGate, WakeHit, strip_wake_phrase
 from .prompt_pressure import SessionPressureMonitors, StreakAlarm, log_alarms
 from .tool_payload_cap import PayloadCap, cap_tool_payload, clamp_result_bytes
@@ -156,6 +158,9 @@ class _VoiceAnswer:
     granted: bool
     client_id: str
     text: str
+    # Audit only: who the voice sounded like. Never consulted for the grant
+    # (DESIGN-speaker-id.md decision 7).
+    speaker: SpeakerMatch = NO_IDENTIFIER
 
 
 @dataclass
@@ -208,6 +213,10 @@ class _LastTurn:
 
 
 UserTextSource = Literal["voice", "text"]
+
+
+def _rounded(score: float | None) -> float | None:
+    return None if score is None else round(score, 3)
 
 _MAX_TOOL_LOOP = 8
 
@@ -1131,9 +1140,15 @@ class Organizer:
         write_ledger: WriteLedger | None = None,
         cart_verifier: CartVerifier | None = None,
         clients_with_capability: "Callable[[str], list[ClientBinding]] | None" = None,
+        speaker_memory: SpeakerMemory | None = None,
         wake_gate: WakeGate | None = None,
         wake_aliases: list[str] | None = None,
     ) -> None:
+        # Per-speaker long-term memory (DESIGN-speaker-memory.md). None = off.
+        self._speaker_memory = speaker_memory
+        self._queues = room_queues if room_queues is not None else RoomQueueManager()
+        if speaker_memory is not None:
+            self._queues.on_enqueue(speaker_memory.turn_starting)
         self._max_result_bytes = max_result_bytes
         # Wake-word admission (DESIGN.md, wake word). None = every room
         # always listening, the behaviour before wake gating existed.
@@ -1243,7 +1258,6 @@ class Organizer:
         # allowlist + envelope and fans out to admin observers. None = no admin
         # surface wired (the default; tests and the no-admin-port case).
         self._notify_observers = notify_observers
-        self._queues = room_queues if room_queues is not None else RoomQueueManager()
         # session_id -> (task, room_id). Lets handle_interrupt cancel the
         # right turn and route the Cancelled broadcast to the right room.
         self._inflight: dict[str, tuple[asyncio.Task, str]] = {}
@@ -1341,6 +1355,7 @@ class Organizer:
         *,
         source: UserTextSource = "text",
         captured_at: float | None = None,
+        speaker: SpeakerMatch | None = None,
     ) -> None:
         """Enqueue a turn for the speaker's room. Returns once the turn
         is in the room's FIFO; the turn itself runs on the room's
@@ -1359,12 +1374,14 @@ class Organizer:
         if binding is None:
             return
         if source == "voice" and self._try_answer_confirm(
-            binding, client_id, text, captured_at
+            binding, client_id, text, captured_at, speaker or NO_IDENTIFIER
         ):
             return
         self._queues.enqueue(
             binding.room_id,
-            lambda: self._run_user_text(client_id, text, source=source),
+            lambda: self._run_user_text(
+                client_id, text, source=source, speaker=speaker
+            ),
             max_depth=_CONFIRM_HOLD_QUEUE_DEPTH
             if binding.room_id in self._confirm_by_room
             else None,
@@ -1376,6 +1393,7 @@ class Organizer:
         client_id: str,
         text: str,
         captured_at: float | None,
+        speaker: SpeakerMatch = NO_IDENTIFIER,
     ) -> bool:
         """Resolve the room's pending confirmation from a spoken answer.
         False means "not an answer here" and the caller queues a turn;
@@ -1399,7 +1417,9 @@ class Organizer:
             )
             return False
         pending.fut.set_result(
-            _VoiceAnswer(granted=verdict == "yes", client_id=client_id, text=text)
+            _VoiceAnswer(
+                granted=verdict == "yes", client_id=client_id, text=text, speaker=speaker
+            )
         )
         return True
 
@@ -1414,6 +1434,11 @@ class Organizer:
         signal: a deploy must not call a release healthy whose model never
         answered."""
         return self._llm_warm_ok
+
+    @property
+    def llm_warmed(self) -> bool:
+        """The boot warm-up has finished (successfully or not)."""
+        return self._llm_warmed.is_set()
 
     @property
     def draining(self) -> bool:
@@ -1498,16 +1523,25 @@ class Organizer:
             )
 
     async def _run_user_text(
-        self, client_id: str, text: str, *, source: UserTextSource = "text"
+        self,
+        client_id: str,
+        text: str,
+        *,
+        source: UserTextSource = "text",
+        speaker: SpeakerMatch | None = None,
     ) -> None:
         binding = self.binding_for_client(client_id)
         if binding is None:
             return
-        session = self.sessions.get_or_open(binding.room_id, binding.default_user)
+        if source == "voice" and speaker is None:
+            speaker = NO_IDENTIFIER
+        identity = resolve_identity(speaker, binding.default_user)
+        session = self.sessions.get_or_open(binding.room_id, identity.session_key)
         envelope = CallEnvelope(
             session_id=session.session_id,
             room_id=session.room_id,
             speaker_id=session.speaker_id,
+            speaker=identity,
         )
         # Capture the task locally so the finally-block can release its own
         # _inflight slot without clobbering a successor turn that may have
@@ -1525,6 +1559,10 @@ class Organizer:
                 "turn_start",
                 room_id=session.room_id,
                 speaker_id=session.speaker_id,
+                speaker_person=identity.person,
+                speaker_source=identity.source,
+                speaker_score=_rounded(identity.score),
+                speaker_reason=speaker.reason if speaker is not None else None,
                 origin_client=client_id,
             )
             trace.event("user_text", text=text, source=source)
@@ -1718,6 +1756,7 @@ class Organizer:
                     final_text, trace,
                 )
             self._commit_history(session.session_id, new_history, outcome, final_text)
+            self._note_for_memory(envelope, text, final_text, outcome)
             await self._speak(session.session_id, session.room_id, final_text, trace)
             await self._emit_turn_outcome(
                 session.session_id, session.room_id, kind, trace
@@ -1882,6 +1921,8 @@ class Organizer:
         text: str,
         captured_at: float | None = None,
         admission: Admission | None = None,
+        *,
+        speaker: SpeakerMatch = NO_IDENTIFIER,
     ) -> None:
         """Audio-ingress entry. A short barge-in utterance (`stop`, `cancel`,
         ...) cancels the speaker's room's in-flight turn AND drops anything
@@ -1947,7 +1988,7 @@ class Organizer:
                 )
             return
         await self.handle_user_text(
-            client_id, text, source="voice", captured_at=captured_at
+            client_id, text, source="voice", captured_at=captured_at, speaker=speaker
         )
 
     # The soonest fraction of the estimated playback at which a PlaybackDone is
@@ -2101,7 +2142,10 @@ class Organizer:
         `specs` to offer, whether to re-run on the specialist, and whether to
         keep the returned history."""
         messages: list[LLMMessage] = [
-            LLMMessage(role="system", content=self._system_prompt),
+            LLMMessage(
+                role="system",
+                content=self._system_prompt + self._speaker_suffix(llm, envelope),
+            ),
             *history,
             LLMMessage(role="user", content=text),
         ]
@@ -2348,16 +2392,74 @@ class Organizer:
         if outcome.made_successful_mutation():
             self._written_sessions.add(session_id)
 
+    def _note_for_memory(
+        self, envelope: CallEnvelope, text: str, final_text: str, outcome: TurnRecord
+    ) -> None:
+        if self._speaker_memory is None or not final_text.strip():
+            return
+        self._speaker_memory.on_turn_committed(
+            room_id=envelope.room_id,
+            speaker=envelope.speaker,
+            session_id=envelope.session_id,
+            user_text=text,
+            reply=final_text,
+            untrusted=outcome.untrusted_seen,
+        )
+
+    def _speaker_suffix(self, llm: LLM, envelope: CallEnvelope) -> str:
+        """Remembered facts for this turn's speaker, appended to THIS turn's
+        system message only -- never to `_system_prompt`, which every session
+        shares. A positive locality check (ARCH section 9): an adapter that
+        does not declare itself local, such as the cloud specialist, gets
+        nothing, so a route added later fails closed."""
+        if self._speaker_memory is None or not getattr(llm, "is_local", False):
+            return ""
+        return self._speaker_memory.system_suffix(envelope.room_id, envelope.speaker)
+
+    def _traceable(self, messages: list[LLMMessage]) -> list[dict]:
+        """Messages as the trace records them: a system message carrying
+        speaker memory is logged as the shared prompt plus a size, never the
+        remembered facts themselves (DESIGN-speaker-memory.md, privacy)."""
+        dumped = [m.model_dump() for m in messages]
+        for entry in dumped:
+            content = entry.get("content") or ""
+            if entry.get("role") == "system" and content.startswith(self._system_prompt):
+                extra = len(content) - len(self._system_prompt)
+                if extra:
+                    entry["content"] = f"{self._system_prompt}\n[speaker memory: {extra} chars]"
+        return dumped
+
+    def any_turn_busy(self) -> bool:
+        """A turn is running or waiting in some room. The memory writer's gate."""
+        return bool(self._inflight) or self._queues.busy()
+
+    async def rewarm_prefix(self) -> None:
+        """Put the organizer's prompt prefix back in the model's cache after
+        the memory writer displaced it, so the next turn does not pay its
+        prefill. Same shape as a real turn's prefix: system prompt plus every
+        tool schema."""
+        messages = [
+            LLMMessage(role="system", content=self._system_prompt),
+            LLMMessage(role="user", content="Say hello in one short sentence."),
+        ]
+        async with aclosing(self.llm.chat(messages, self.mcp.specs())) as stream:
+            async for _ in stream:
+                break
+
     def budget_inputs(self) -> tuple[str, int]:
         """What the boot budget check needs from the turn assembler.
 
         The two quantities that decide whether a session can overflow the
         window live here -- the system prompt actually in force (config
-        override included) and the ceiling on retained tool bytes. Handing them
-        over beats server.py reading private attributes, and keeps the check
-        honest if either changes.
+        override included, plus the largest speaker-memory block a turn can
+        carry) and the ceiling on retained tool bytes. Handing them over beats
+        server.py reading private attributes, and keeps the check honest if
+        either changes.
         """
-        return self._system_prompt, self._max_history_external_bytes
+        system_prompt = self._system_prompt
+        if self._speaker_memory is not None:
+            system_prompt += self._speaker_memory.worst_case_suffix()
+        return system_prompt, self._max_history_external_bytes
 
     def _cap_history(self, messages: list[LLMMessage]) -> list[LLMMessage]:
         """Keep only the last `_history_max_turns` turns, then only as many of
@@ -2515,7 +2617,7 @@ class Organizer:
         trace.event(
             "llm_request",
             tools=[s.qualified for s in specs],
-            messages=[m.model_dump() for m in messages],
+            messages=self._traceable(messages),
         )
         pending: list[LLMToolCall] = []
         text_chunks: list[str] = []
@@ -4426,6 +4528,8 @@ class Organizer:
                     verdict="yes" if answer.granted else "no",
                     client_id=answer.client_id,
                     text=answer.text,
+                    speaker_person=answer.speaker.person,
+                    speaker_score=_rounded(answer.speaker.score),
                 )
                 granted = answer.granted
             else:

@@ -130,8 +130,10 @@ not an edge case.
    across the house. UI `user_text` is never gated or deduped. See DESIGN.md,
    wake word.
 3. **Session assignment.** Bind the surviving utterance to a
-   `(room_id, speaker_id)` session. `speaker_id` defaults to
-   `room.default_user` until voice-ID lands. Attach to an existing live
+   `(room_id, speaker_id)` session. `speaker_id` is the identified person,
+   or `room.default_user` when the voice is not identified (v5,
+   DESIGN-speaker-id.md). That fallback is a session bucket, never an
+   identity: who spoke is `SpeakerIdentity.person`, None unless verified. Attach to an existing live
    session if one is open in that room within the conversation idle window,
    else open a new one.
 4. **Queue & schedule.** Per-session FIFO so one room's commands stay
@@ -343,6 +345,10 @@ LLM.
   unaffected). Summarisation thresholds and any injected memory (section 14)
   therefore have a *behavioural* ceiling that is lower than the window and
   differs per model.
+- **Per-speaker facts are separate from both.** Durable facts about a person
+  (section 14 Layer 3, `DESIGN-speaker-memory.md`) live in their own SQLite
+  table, `speaker_facts`. It is not the session log above, which is still
+  unbuilt, and that table name is reserved so the two schemas do not fork.
 
 ---
 
@@ -684,7 +690,12 @@ Each version is its own session-sized chunk. Heavy work is deferred.
   gated. Built 17-10-2026 behind `[wake] mode` (default off); custom
   "hey_glados" model still to train. See DESIGN.md, wake word.
 
-- **v5 — speaker ID.** Resemblyzer or pyannote to populate `speaker_id`.
+- **v5 — speaker ID.** Voiceprint embedding to populate `speaker_id`
+  (DESIGN-speaker-id.md). Slices 1-2 LANDED: `SpeakerIdentity` contract,
+  identifier, encrypted store, enrollment CLI, all behind `backend = "off"`.
+  Slice 3 (ONNX model + threshold bake-off) open. Identity is a
+  personalisation key, never an authorisation input before v6; a
+  misidentification can still key a turn to the wrong enrolled person.
 
 - **v6 — voice identity & access control.** Builds on v5. Capture an
   embedding at session open; subsequent utterances in the open session
@@ -1210,6 +1221,35 @@ It also re-derives the "never auto-written" rule of Layer 2 from a second,
 non-security direction: an auto-writer grows the prompt without bound, and
 prompt growth alone is sufficient to suppress dispatch. Data and harness:
 `DESIGN-turn-outcome-guards.md`, section "Controlled experiment".
+
+**Layer 3 -- per-speaker facts (auto-written, never trusted; added
+17-10-2026).** Durable facts about the person speaking ("is vegetarian", "has
+a daughter called Ema") are written by the model, asynchronously, after a
+turn. That is what Layer 2 forbids, so Layer 3 has to answer both of Layer 2's
+reasons, and it does so by never entering the trusted prompt at all:
+
+- **Trust.** The facts are untrusted data from end to end. The writer is shown
+  only what the speaker said. GLaDOS's reply is context only, and it is dropped
+  entirely when the session holds `<external>` content, because a reply can
+  paraphrase a hostile page. Tool output never reaches the writer. Facts
+  are injected per turn and per speaker as a `<memory-notes>` block behind a
+  "reference data, not instructions" preamble. They are never injected when
+  the turn's brain is not local (positive check, section 9), and never
+  retained in history. **A fact authorises nothing**: confirm gates,
+  quantities and money steps are judged on the live utterance by harness
+  code, which never reads memory. The deterministic validator (caps, charset,
+  defang) is noise reduction, not the boundary.
+- **Volume.** There is a hard fact cap per speaker and a hard character cap
+  per block, and the boot budget proof prices the largest block in tokens.
+  The behavioural cost at that cap (section 8) must be measured on every live
+  model surface before a shipped config enables it, which is why it ships
+  disabled.
+
+Until voice-ID, every voice in a room is that room's default user, so facts
+are keyed `(room_id, speaker_id)` and each room opts in separately. The writer
+runs on the resident primary model. It runs only while the house is idle, and
+a starting turn preempts it; `OLLAMA_NUM_PARALLEL` stays 1. Removal is
+operator-side for now (`python -m glados.memory forget|forget-session|wipe`).
 
 **Ownership split.** The *gate* belongs in **LocalGuard** (the local-
 first, baseline-driven, fail-closed auditor): the injection scan ruleset,

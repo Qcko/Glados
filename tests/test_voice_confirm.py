@@ -21,6 +21,7 @@ from glados.core.confirm_phrase import render_confirm_question
 from glados.core.organizer import Organizer
 from glados.core.protocols import ToolConfirmResponse
 from glados.core.sessions import SessionRegistry
+from glados.core.speaker import SpeakerMatch
 from glados.core.traces import TraceStore
 from glados.core.turn_outcome import TurnRecord, classify
 from glados.core.utterance import classify_confirm_answer
@@ -575,3 +576,25 @@ def test_a_refused_confirm_does_not_excuse_a_false_claim() -> None:
         final_text="Added tomatoes to your cart.", action_intent=True, confirm_refused=True
     )
     assert classify(turn) == "confabulated"
+
+
+@pytest.mark.parametrize(
+    "speaker",
+    [SpeakerMatch("someone-else", 0.93, "accepted"), SpeakerMatch.none("too_short")],
+)
+async def test_who_said_yes_is_audited_but_never_gates_the_grant(
+    tmp_path: Path, speaker: SpeakerMatch
+) -> None:
+    """DESIGN-speaker-id.md decision 7: identity is not an authorisation input
+    before v6. Any voice in the room may answer; the trace records whose."""
+    tts = _FakeTts()
+    async with _make_org(tmp_path, [MIC, SPEAKER], tts=tts) as (org, _, tool):
+        await org.handle_user_text("k-mic", "do it")
+        await _wait_until_asked(org, "kitchen")
+        await org.handle_audio_text(
+            "k-mic", "Yes.", asyncio.get_running_loop().time(), speaker=speaker
+        )
+        await org.flush()
+        assert tool.calls == [{"x": 1}]
+        voice = next(e for e in _events(tmp_path) if e["event"] == "tool_confirm_voice")
+        assert voice["speaker_person"] == speaker.person

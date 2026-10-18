@@ -44,6 +44,8 @@ from ..servers.time_server import NowTool
 from ..servers.toy_server import TOY_TOOLS
 from .adapters import LLM, STT, TTS, VAD, WakeWord
 from .audio_sink import AudioSink, FrameTooShort
+from .speaker import Utterance
+from ..voiceid import SpeakerIdentifier, build_identifier
 from .config import (
     local_config_dir,
     ClientBinding,
@@ -67,6 +69,7 @@ from .reader import READER_NUM_PREDICT, READER_NUM_PREDICT_THINKING
 from . import memory_gate
 from .ollama_lifecycle import OllamaLifecycle
 from .cart_verifier import CartVerifier
+from .memory_wiring import build_speaker_memory
 from .organizer import Organizer
 from .wake import Admission, WakeGate, WakeTimings
 from .prompt_budget import measure_boot_budget
@@ -379,6 +382,21 @@ def _build_reader_llm(cfg: LLMConfig, primary: LLM) -> LLM:
     return primary
 
 
+async def _stop_memory_writer(memory, memory_task: asyncio.Task | None) -> None:
+    _memory, writer, writer_llm = memory
+    await writer.close()
+    if memory_task is not None and not memory_task.done():
+        memory_task.cancel()
+        try:
+            await memory_task
+        except asyncio.CancelledError:
+            pass
+    writer_aclose = getattr(writer_llm, "aclose", None)
+    if writer_aclose is not None:
+        await writer_aclose()
+    _memory.close()
+
+
 def _build_specialist_llm(
     cfg: RouterConfig, llm_cfg: LLMConfig, primary_llm: LLM
 ) -> LLM | None:
@@ -667,6 +685,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     notify_observers = _make_notify_observers(admin_conns, admin_observed)
 
     sessions = SessionRegistry(idle_window_s=glados_cfg.session.idle_window_s)
+    speaker_memory = build_speaker_memory(glados_cfg, rooms_cfg, lambda: organizer)
     wake = _build_wake(glados_cfg, rooms_cfg, cfg_dir)
     organizer = Organizer(
         wake_gate=wake.gate if wake is not None else None,
@@ -694,6 +713,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
         tool_router=tool_router,
         reader_llm=reader_llm,
         cart_verifier=_build_cart_verifier(glados_cfg, servers_cfg, mcp),
+        speaker_memory=speaker_memory[0] if speaker_memory else None,
     )
 
     async def _assert_prompt_budget(_app: FastAPI, cfg) -> None:
@@ -936,9 +956,19 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             if lazy_servers
             else None
         )
+        memory = _app.state.speaker_memory
+        memory_task: asyncio.Task | None = (
+            asyncio.create_task(memory[1].run(), name="memory-writer")
+            if memory is not None
+            else None
+        )
         try:
             yield
         finally:
+            # First, and without waiting on a job: the writer must stop using
+            # the model before the room workers and the LLM client go away.
+            if memory is not None:
+                await _stop_memory_writer(memory, memory_task)
             if reaper_task is not None and not reaper_task.done():
                 reaper_task.cancel()
                 try:
@@ -1021,6 +1051,8 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     app.state.llm = llm
     app.state.specialist_llm = specialist_llm
     app.state.reader_llm = reader_llm
+    # (SpeakerMemory, MemoryWriter, writer LLM) or None when memory is off.
+    app.state.speaker_memory = speaker_memory
     app.state.router = router
     # Only manage the daemon when we're actually pointed at one. Fakes don't
     # need it; tests run with backend="fake" and get None here, so the
@@ -1037,6 +1069,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
     # Secrets store: defaults to the real OS keyring. Tests inject
     # InMemorySecrets via `app.state.secrets = ...` after build_app().
     app.state.secrets = KeyringSecrets()
+    app.state.identifier = build_identifier(glados_cfg.speaker_id, app.state.secrets)
     app.state.release = describe_release(_REPO_ROOT)
     # How /admin/shutdown ends the process once drained. `glados.main` points
     # it at the running uvicorn servers' `should_exit`, which runs the full
@@ -1322,6 +1355,7 @@ def _register_routes(app: FastAPI) -> None:
                 client_id,
                 state.vad_factory,
                 _wake_hook(state.wake, state.organizer, binding),
+                identifier=state.identifier,
             )
             await _serve(ws, client_id, pipeline, state.organizer)
         except WebSocketDisconnect:
@@ -1349,6 +1383,7 @@ def _build_pipeline(
     client_id: str,
     vad_factory: Callable[[VADConfig], VAD],
     wake: "_PipelineWakeHook | None" = None,
+    identifier: SpeakerIdentifier | None = None,
 ) -> AudioPipeline:
     # No WAV trace in a wake-gated room: it would write un-woken speech to
     # disk, which the gate exists to prevent (ARCH section 9).
@@ -1358,16 +1393,21 @@ def _build_pipeline(
         else None
     )
 
-    async def on_utterance(
-        text: str, captured_at: float, admission: Admission | None = None
-    ) -> None:
-        await organizer.handle_audio_text(client_id, text, captured_at, admission)
+    async def on_utterance(utterance: Utterance) -> None:
+        await organizer.handle_audio_text(
+            client_id,
+            utterance.text,
+            utterance.captured_at,
+            utterance.admission,
+            speaker=utterance.speaker,
+        )
 
     return AudioPipeline(
         sink=sink,
         vad=vad_factory(glados_cfg.vad),
         stt=stt,
         on_utterance=on_utterance,
+        identifier=identifier,
         wake=wake,
     )
 

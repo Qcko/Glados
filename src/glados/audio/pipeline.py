@@ -11,6 +11,13 @@ while the previous one is still being transcribed.
 `close()` drains outstanding transcriptions before tearing down the sink
 and resetting the VAD so a per-connection `<traces>/audio/<client>/...wav`
 is well-formed even if the client disconnects mid-utterance.
+
+Speaker identification (DESIGN-speaker-id.md) runs on the SAME pcm,
+concurrently with STT, and its result travels with the text in one
+`Utterance` -- never through per-client state. Identification is capped by
+its own timeout, so it delays a turn only while STT is still running anyway.
+Dispatch is serialised in VadEnd order: each utterance waits for the one
+before it, so a slow transcription or identification cannot reorder turns.
 """
 
 from __future__ import annotations
@@ -20,7 +27,7 @@ import logging
 import math
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from typing import Awaitable, Callable, Protocol
+from typing import TYPE_CHECKING, Awaitable, Callable, Protocol
 
 import numpy as np
 
@@ -29,9 +36,12 @@ log = logging.getLogger(__name__)
 from ..core.adapters import STT, VAD, VadEnd, VadStart, WakeWord
 from ..core.audio_sink import AudioSink, FrameTooShort
 from ..core.protocols import AUDIO_HEADER_LEN
-from ..core.wake import Admission
+from ..core.speaker import NO_IDENTIFIER, SpeakerMatch, Utterance
 
-OnUtterance = Callable[..., Awaitable[None]]
+OnUtterance = Callable[[Utterance], Awaitable[None]]
+
+if TYPE_CHECKING:
+    from ..voiceid import SpeakerIdentifier
 
 _SAMPLE_RATE = 16000
 _ENERGY_WINDOW_S = 1.0
@@ -61,13 +71,16 @@ class AudioPipeline:
         vad: VAD,
         stt: STT,
         on_utterance: OnUtterance,
+        identifier: SpeakerIdentifier | None = None,
         wake: WakeHook | None = None,
     ) -> None:
         self._sink = sink
         self._vad = vad
         self._stt = stt
         self._on_utterance = on_utterance
+        self._identifier = identifier
         self._tasks: set[asyncio.Task[None]] = set()
+        self._last_task: asyncio.Task[None] | None = None
         self._utterance_start_at: float | None = None
         self._wake = wake
         self._wake_exec = (
@@ -173,29 +186,55 @@ class AudioPipeline:
         return pcm
 
     def _spawn_transcription(self, pcm: bytes, captured_at: float, ended_at: float) -> None:
-        task = asyncio.create_task(self._transcribe_and_dispatch(pcm, captured_at, ended_at))
+        task = asyncio.create_task(
+            self._transcribe_and_dispatch(pcm, captured_at, ended_at, self._last_task)
+        )
+        self._last_task = task
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
     async def _transcribe_and_dispatch(
-        self, pcm: bytes, captured_at: float, ended_at: float
+        self,
+        pcm: bytes,
+        captured_at: float,
+        ended_at: float,
+        previous: asyncio.Task[None] | None,
     ) -> None:
         admission = None
         if self._wake is not None:
             admission = await self._wake.decide(captured_at, ended_at)
-            if admission is None:
-                return
+        if self._wake is None or admission is not None:
+            text, speaker = await asyncio.gather(
+                self._transcribe(pcm), self._identify(pcm)
+            )
+        else:
+            text, speaker = None, NO_IDENTIFIER
+        if previous is not None:
+            await asyncio.wait([previous])
+            _log_failure(previous)
+        if text is not None and text.strip():
+            await self._on_utterance(Utterance(text, captured_at, speaker, admission))
+
+    async def _transcribe(self, pcm: bytes) -> str | None:
         try:
-            text = await self._stt.transcribe(pcm)
+            return await self._stt.transcribe(pcm)
         except Exception:
             # STT failures (model crash, OOM) must not silently disappear
             # into a never-retrieved Task exception; they're rare but
             # debugging-critical when faster-whisper lands.
             log.exception("STT.transcribe failed (utterance %d bytes)", len(pcm))
-            return
-        if not text.strip():
-            return
-        if admission is None:
-            await self._on_utterance(text, captured_at)
-        else:
-            await self._on_utterance(text, captured_at, admission)
+            return None
+
+    async def _identify(self, pcm: bytes) -> SpeakerMatch:
+        if self._identifier is None:
+            return NO_IDENTIFIER
+        try:
+            return await self._identifier.identify(pcm)
+        except Exception:
+            log.exception("speaker identify failed; utterance goes unidentified")
+            return SpeakerMatch.none("error")
+
+
+def _log_failure(task: asyncio.Task[None]) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        log.error("previous utterance dispatch failed", exc_info=task.exception())

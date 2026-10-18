@@ -18,6 +18,7 @@ from typing import Protocol
 from pydantic import BaseModel
 
 from ..core.adapters import ToolSpec
+from ..core.speaker import SpeakerIdentity
 
 
 _log = logging.getLogger(__name__)
@@ -41,7 +42,11 @@ def _format_args(args: dict) -> str:
 class CallEnvelope(BaseModel):
     session_id: str
     room_id: str
+    # The session bucket, kept for existing callers. NOT an identity: an
+    # unidentified voice falls back to the room's default_user here. Read
+    # `speaker.person` / `speaker.verified` to know who spoke.
     speaker_id: str
+    speaker: SpeakerIdentity | None = None
 
 
 class MCPCallResult(BaseModel):

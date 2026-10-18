@@ -351,6 +351,28 @@ class SessionConfig(BaseModel):
     history_max_turns: int = 8
 
 
+class MemoryConfig(BaseModel):
+    """Per-speaker long-term memory (DESIGN-speaker-memory.md, ARCH section 14
+    Layer 3). Off by default and off in the shipped config until the dispatch
+    suite has passed with a full block injected on every live model surface
+    (ARCH section 8 behavioural ceiling). A room also has to opt in with
+    `memory = true` on its `[[rooms]]` row.
+
+    `db_path` holds personal data in plaintext: keep it outside any repo tree.
+    `writer_model` is the bake-off seam; empty means `[llm].model`, which is
+    the only value that keeps the model resident without a reload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    db_path: Path = Path("data/speaker_memory.sqlite")
+    writer_model: str = ""
+    writer_num_predict: int = 256
+    max_facts: int = 30
+    inject_chars: int = 600
+    idle_s: float = 60.0
+
+
 class CartVerifyConfig(BaseModel):
     """Read the real cart before and after a turn's cart writes and speak
     what changed instead of the model's reply (DESIGN-cart-verify.md). Only
@@ -452,6 +474,21 @@ class STTConfig(BaseModel):
     whisper_initial_prompt: str = ""
 
 
+class SpeakerIdConfig(BaseModel):
+    # DESIGN-speaker-id.md. "off" embeds nothing and every voice turn is
+    # `fallback`; "fake" is the test embedder. Thresholds are placeholders
+    # until the bake-off on household clips sets them (slice 3).
+    backend: Literal["off", "fake"] = "off"
+    accept_threshold: float = 0.70
+    margin: float = 0.10
+    min_speech_s: float = 1.0
+    timeout_ms: int = 500
+    # Encrypted voiceprints live here: outside the repo and outside traces/.
+    store_dir: Path = Path(
+        os.environ.get("GLADOS_VOICEID_DIR") or (Path.home() / ".glados" / "voiceprints")
+    )
+
+
 class TTSConfig(BaseModel):
     # "fake" yields a silent chunk (used in tests). "piper" loads a Piper
     # voice and streams real PCM. First piper construct downloads the
@@ -486,12 +523,14 @@ class GladosConfig(BaseModel):
     llm: LLMConfig = LLMConfig()
     router: RouterConfig = RouterConfig()
     session: SessionConfig = SessionConfig()
+    memory: MemoryConfig = MemoryConfig()
     cart_verify: CartVerifyConfig = CartVerifyConfig()
     audio: AudioConfig = AudioConfig()
     vad: VADConfig = VADConfig()
     wake: WakeConfig = WakeConfig()
     stt: STTConfig = STTConfig()
     tts: TTSConfig = TTSConfig()
+    speaker_id: SpeakerIdConfig = SpeakerIdConfig()
 
 
 # Tools that book or move money. On a cart_read server each must carry
@@ -835,6 +874,10 @@ class RoomPolicy(BaseModel):
     announce_sources: list[str] | None = None
     quiet_hours: QuietHours | None = None
     announce_veto_pause: bool = True
+    # Opt-in to per-speaker memory (DESIGN-speaker-memory.md). Only a
+    # voice-matched speaker reads or writes it; typed turns and unidentified
+    # voices get none, so it stays inert until voice-ID has an embedder.
+    memory: bool = False
     # Wake gating for this room; None follows `[wake] mode` in glados.toml.
     wake_mode: Literal["off", "required"] | None = None
     # Added to this room's wake energy in cross-room arbitration, to even
@@ -1000,6 +1043,11 @@ def _apply_env_overrides(cfg: GladosConfig) -> GladosConfig:
 
     if (stt_backend := os.environ.get("GLADOS_STT_BACKEND")) in ("fake", "faster-whisper"):
         cfg = cfg.model_copy(update={"stt": cfg.stt.model_copy(update={"backend": stt_backend})})
+
+    if (sid_backend := os.environ.get("GLADOS_SPEAKERID_BACKEND")) in ("off", "fake"):
+        cfg = cfg.model_copy(
+            update={"speaker_id": cfg.speaker_id.model_copy(update={"backend": sid_backend})}
+        )
 
     if (tts_backend := os.environ.get("GLADOS_TTS_BACKEND")) in ("fake", "piper"):
         cfg = cfg.model_copy(update={"tts": cfg.tts.model_copy(update={"backend": tts_backend})})

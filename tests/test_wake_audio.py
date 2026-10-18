@@ -77,8 +77,8 @@ class _RecordingHook:
 def _pipeline(hook, stt=None, seen=None) -> AudioPipeline:
     seen = seen if seen is not None else []
 
-    async def on_utterance(text, captured_at, admission=None):
-        seen.append((text, admission))
+    async def on_utterance(u):
+        seen.append((u.text, u.admission))
 
     return AudioPipeline(
         sink=None, vad=FakeVAD(utterance_samples=4), stt=stt or FakeSTT("hey glados lights"),

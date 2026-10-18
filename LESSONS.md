@@ -27,3 +27,29 @@ not work, so the next session does not relearn it.
 - **Test autostart without opening Termux.** Opening Termux starts the
   services itself, so a check done after opening it proves nothing about boot.
   Judge by the server-side connection time instead.
+
+## Async background work on the event loop
+
+- **Cancelling an `await asyncio.to_thread(...)` does not stop the thread.**
+  The awaiting task sees `CancelledError` while the thread commits anyway. A
+  job that is requeued on cancel then runs twice. Shield the threaded write
+  and record whether it committed before deciding to retry
+  (`MemoryWriter._committed`, 17-10-2026).
+- **A sqlite connection made in `build_app` is not usable on the loop thread
+  under `TestClient`.** The app is built in one thread and the lifespan runs on
+  a portal thread, so `check_same_thread=True` raises on the first turn. Open
+  with `check_same_thread=False` and guard each connection with its own lock.
+- **A RAM queue outlives an out-of-process delete.** The operator CLI deleting
+  a fact does nothing to notes the writer still holds, so the store has to
+  remember deletes (`purges` counter, forgotten sessions) and refuse writes
+  based on notes older than them.
+
+## Speaker identity
+
+- **The fallback speaker is a session bucket, not a person.** Every client's
+  `default_user` is a real household member, so treating an unidentified voice
+  as `default_user` would guess that person by construction. `SpeakerIdentity`
+  splits the two: `session_key` keeps today's room continuity, and `person` is
+  None unless the voice matched. Consumers (memory) key on `person` + `verified`.
+  A guest sentinel session was considered and rejected 17-10-2026: it splits
+  the conversation every time a short "yes" can't be identified.
