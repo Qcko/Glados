@@ -93,8 +93,10 @@ run is injected from the next turn on, which in practice is the next morning.
    ids it came from; the validator rejects an add whose ids are not in this
    chunk, and `fact_sources` is filled from the cited notes. Caps (8 adds /
    4 drops per person per day) are checked against the persisted day counter,
-   so a day split into many chunks cannot exceed them. A note tagged
-   `untrusted` may support at most one add per day. The validator stays the
+   so a day split into many chunks or rooms cannot exceed them (the counter
+   is per person, not per room). A chunk holding any `untrusted` note may
+   support at most one add per day: the whole chunk counts as untrusted,
+   because such a note could steer the writer to cite a trusted neighbour. The validator stays the
    single authority.
 5. **Organizer, unchanged.** It sees only `SpeakerMemory`: the block a turn
    injects, the note a committed turn leaves, and the push that a turn is
