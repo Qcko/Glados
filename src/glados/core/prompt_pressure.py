@@ -196,7 +196,7 @@ def estimated_prompt_tokens(
     can exceed it -- which is precisely the condition that invalidates the boot
     check, and precisely the shape of a flooding payload.
 
-    Asking the model instead (`price_prompt` with `num_predict=0`) is exact and
+    Asking the model instead (`price_prompt`, a one-token reply) is exact and
     is what boot does, but it is a second full prompt evaluation on every send:
     a per-turn cost paid to detect a condition that should never occur.
 

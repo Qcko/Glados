@@ -35,6 +35,13 @@ from ...core.prompt_pressure import PromptEstimator
 
 log = logging.getLogger(__name__)
 
+_PRICE_STUB = LLMMessage(role="user", content="Hi.")
+_MAX_PLAUSIBLE_CHARS_PER_TOKEN = 8
+
+
+def _system_chars(messages: list[LLMMessage]) -> int:
+    return sum(len(m.content or "") for m in messages if m.role == "system")
+
 
 class OllamaLLM:
     # A local runtime (ARCH section 9): turns on it may carry speaker memory.
@@ -150,11 +157,22 @@ class OllamaLLM:
     ) -> int | None:
         """Exactly how many tokens this prompt costs, per the model itself.
 
-        `num_predict=0` asks the server to evaluate the prompt and generate
-        nothing, and the reply still carries `prompt_eval_count`. That is the
-        real tokenizer through the real code path -- no bundled `tokenizer.json`
-        to drift out of step with a swapped model, and no character estimate
-        (measured 15% LOW, which is the unsafe direction for a budget).
+        A one-token reply carries `prompt_eval_count`: the real tokenizer
+        through the real code path -- no bundled `tokenizer.json` to drift out
+        of step with a swapped model, and no character estimate (measured 15%
+        LOW, which is the unsafe direction for a budget).
+
+        Every price ends in the same user stub, and the cap is 1, never 0.
+        mistral-nemo's template renders system and tools only ahead of a user
+        turn, so a system-only prompt reached it as ONE token; it then ignored
+        `num_predict=0` as "no limit" and free-ran forever, hanging boot
+        (20-10-2026). The stub costs every price the same few tokens, so the
+        differences the boot budget takes still cancel exactly -- assuming, as
+        the Mistral templates do, that two user turns in a row render as given.
+        A count far below the system text's size (English runs near 4 chars
+        per token) means the template dropped it, and is no price at all --
+        unless the count reaches half of num_ctx, where it is a truncated
+        overflow the boot check must still see.
 
         The catch, and why this prices boot-time checks rather than every turn:
         an over-long prompt is truncated here too, so the answer saturates at
@@ -167,10 +185,10 @@ class OllamaLLM:
         """
         payload = {
             "model": self._model,
-            "messages": [self._to_ollama_msg(m) for m in messages],
+            "messages": [self._to_ollama_msg(m) for m in [*messages, _PRICE_STUB]],
             "stream": False,
             "keep_alive": self._keep_alive,
-            "options": {**self._build_options(), "num_predict": 0},
+            "options": {**self._build_options(), "num_predict": 1},
         }
         if tools:
             name_map = {self._sanitise(t): t for t in tools}
@@ -185,7 +203,21 @@ class OllamaLLM:
         except httpx.HTTPError:
             log.warning("could not price the prompt against %s", self._model)
             return None
-        return response.json().get("prompt_eval_count")
+        return self._plausible_price(messages, response.json().get("prompt_eval_count"))
+
+    def _plausible_price(self, messages: list[LLMMessage], count: int | None) -> int | None:
+        chars = _system_chars(messages)
+        floor = chars // _MAX_PLAUSIBLE_CHARS_PER_TOKEN
+        if self._num_ctx:
+            floor = min(floor, self._num_ctx // 2)
+        if count is not None and count < floor:
+            log.warning(
+                "price_prompt against %s counted %d tokens for %d system chars "
+                "(floor %d): the chat template dropped the system prompt",
+                self._model, count, chars, floor,
+            )
+            return None
+        return count
 
     def adopt_boot_budget(
         self, fixed_prefix_tokens: int, *, bytes_per_token: float | None = None

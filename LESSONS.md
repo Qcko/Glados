@@ -58,3 +58,7 @@ not work, so the next session does not relearn it.
   None unless the voice matched. Consumers (memory) key on `person` + `verified`.
   A guest sentinel session was considered and rejected 17-10-2026: it splits
   the conversation every time a short "yes" can't be identified.
+
+## Ollama prompt pricing
+
+- **`num_predict: 0` is not a cap, and a system-only prompt is not a prompt on every template.** `price_prompt` sends the system message plus all tools with `num_predict: 0`. On Ollama 0.23.2 with mistral-nemo:12b, the chat template emits system and tools only before a user turn, so the request rendered to 1 token (`prompt_eval_count=1`). `num_predict: 0` was then treated as unlimited, and Nemo free-ran from BOS forever, hanging boot inside the price check (20-10-2026, prod). With a user turn, the same 41-tool payload priced at 7926 tokens and returned a correct `time__now` call in 8 s. Ministral's template keeps the system message, which is why 8b never showed this. The fix belongs in the harness, not the model choice: price with a trailing user stub and a hard `num_predict` of at least 1, and treat a `prompt_eval_count` far below the system prompt's size as a failed price.

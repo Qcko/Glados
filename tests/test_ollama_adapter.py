@@ -491,3 +491,66 @@ async def test_unknown_call_replays_into_history_without_raising() -> None:
     )
     wire = OllamaLLM._to_ollama_msg(msg)
     assert wire["tool_calls"][0]["function"]["name"] == "shop__drop_database"
+
+
+def _priced(count: int, captured: list[dict]) -> OllamaLLM:
+    body = json.dumps({"message": {"content": "x"}, "done": True, "prompt_eval_count": count}).encode()
+    return OllamaLLM(num_predict=4096, transport=_mock_transport(body, captured=captured))
+
+
+@pytest.mark.asyncio
+async def test_price_prompt_appends_user_stub_and_caps_at_one_token() -> None:
+    """mistral-nemo renders system and tools only ahead of a user turn, and
+    reads num_predict=0 as "no limit": a system-only price free-ran forever
+    and hung boot on prod (20-10-2026)."""
+    captured: list[dict] = []
+    system = LLMMessage(role="system", content="s" * 80)
+
+    count = await _priced(500, captured).price_prompt([system], [_now_spec()])
+
+    assert count == 500
+    assert [m["role"] for m in captured[0]["messages"]] == ["system", "user"]
+    assert captured[0]["options"]["num_predict"] == 1
+    assert captured[0]["stream"] is False
+
+
+@pytest.mark.asyncio
+async def test_price_prompt_stub_is_the_same_on_every_price() -> None:
+    """The boot budget subtracts prices; an identical stub cancels."""
+    captured: list[dict] = []
+    llm = _priced(500, captured)
+    system = LLMMessage(role="system", content="sys")
+
+    await llm.price_prompt([system], [])
+    await llm.price_prompt([system, LLMMessage(role="user", content="payload")], [])
+
+    assert captured[0]["messages"][-1] == captured[1]["messages"][-1]
+    assert [m["role"] for m in captured[1]["messages"]] == ["system", "user", "user"]
+
+
+@pytest.mark.asyncio
+async def test_price_prompt_far_below_system_size_is_no_price() -> None:
+    """Nemo priced a 2690-char system prompt plus 41 tools at ONE token."""
+    captured: list[dict] = []
+    system = LLMMessage(role="system", content="s" * 2690)
+
+    assert await _priced(1, captured).price_prompt([system], []) is None
+
+
+@pytest.mark.asyncio
+async def test_price_prompt_at_plausible_size_is_kept() -> None:
+    captured: list[dict] = []
+    system = LLMMessage(role="system", content="s" * 2690)
+
+    assert await _priced(336, captured).price_prompt([system], []) == 336
+
+
+@pytest.mark.asyncio
+async def test_price_prompt_saturated_at_num_ctx_is_kept_as_overflow() -> None:
+    """An over-long prompt is truncated to num_ctx; that count must still reach
+    the boot check, which exists to fail exactly this case."""
+    body = json.dumps({"message": {"content": "x"}, "done": True, "prompt_eval_count": 4096}).encode()
+    llm = OllamaLLM(num_ctx=4096, transport=_mock_transport(body))
+    system = LLMMessage(role="system", content="s" * 40000)
+
+    assert await llm.price_prompt([system], []) == 4096
