@@ -37,6 +37,10 @@ log = logging.getLogger(__name__)
 
 _PRICE_STUB = LLMMessage(role="user", content="Hi.")
 _MAX_PLAUSIBLE_CHARS_PER_TOKEN = 8
+# Per call: a one-token price, cold model load included. Far below the 600 s
+# stream bound: an unknown price only skips the boot budget check, while a
+# wedged price stalls boot. The boot check makes several calls in a row.
+_PRICE_READ_TIMEOUT_S = 120.0
 
 
 def _system_chars(messages: list[LLMMessage]) -> int:
@@ -197,11 +201,17 @@ class OllamaLLM:
             ]
         try:
             response = await self._ensure_client().post(
-                f"{self._host}/api/chat", json=payload
+                f"{self._host}/api/chat",
+                json=payload,
+                timeout=httpx.Timeout(self._timeout, read=_PRICE_READ_TIMEOUT_S),
             )
             response.raise_for_status()
-        except httpx.HTTPError:
-            log.warning("could not price the prompt against %s", self._model)
+        except httpx.HTTPError as exc:
+            log.warning(
+                "could not price the prompt against %s (one-token /api/chat, "
+                "read timeout %.0fs): %s: %s",
+                self._model, _PRICE_READ_TIMEOUT_S, type(exc).__name__, exc,
+            )
             return None
         return self._plausible_price(messages, response.json().get("prompt_eval_count"))
 

@@ -546,6 +546,33 @@ async def test_price_prompt_at_plausible_size_is_kept() -> None:
 
 
 @pytest.mark.asyncio
+async def test_price_prompt_has_its_own_short_read_timeout() -> None:
+    """A wedged price must not hold boot for the 600 s stream bound."""
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions["timeout"])
+        return httpx.Response(200, json={"done": True, "prompt_eval_count": 500})
+
+    llm = OllamaLLM(timeout=7.0, transport=httpx.MockTransport(handler))
+    await llm.price_prompt([LLMMessage(role="system", content="s")], [])
+
+    assert seen[0] == {"connect": 7.0, "read": 120.0, "write": 7.0, "pool": 7.0}
+
+
+@pytest.mark.asyncio
+async def test_price_prompt_read_timeout_is_no_price_and_names_the_wait(caplog) -> None:
+    """An unknown price skips the boot check; the log must say what stalled."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("stalled", request=request)
+
+    llm = OllamaLLM(transport=httpx.MockTransport(handler))
+
+    assert await llm.price_prompt([LLMMessage(role="system", content="s")], []) is None
+    assert "one-token /api/chat, read timeout 120s): ReadTimeout" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_price_prompt_saturated_at_num_ctx_is_kept_as_overflow() -> None:
     """An over-long prompt is truncated to num_ctx; that count must still reach
     the boot check, which exists to fail exactly this case."""
