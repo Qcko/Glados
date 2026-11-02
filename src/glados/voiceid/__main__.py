@@ -20,7 +20,7 @@ from ..core.config import load_glados_config, load_rooms_config
 from ..core.secrets import KeyringSecrets, SecretsStore
 from .embedder import SAMPLE_RATE, SpeakerEmbedder
 from .store import StoreError, VoiceprintStore
-from . import bakeoff, build_embedder
+from . import ONNX_BACKENDS, bakeoff, build_embedder
 
 _MIN_CLIPS_ADVISED = 3
 
@@ -69,7 +69,8 @@ def _parser() -> argparse.ArgumentParser:
         "bakeoff", help="Pick accept_threshold from household clips (<dir>/<person>/, <dir>/impostor/).",
     )
     bake.add_argument("clip_dir", type=Path)
-    bake.add_argument("--model", type=Path, help="WeSpeaker ONNX file (default: [speaker_id].model_path).")
+    bake.add_argument("--backend", choices=sorted(ONNX_BACKENDS), default="wespeaker")
+    bake.add_argument("--model", type=Path, help="ONNX file for that backend (default: [speaker_id].model_path).")
     bake.add_argument("--out", type=Path, help="Report dir (default: $GLADOS_LAB_DIR/glados/voiceid_bakeoff).")
     return p
 
@@ -91,9 +92,7 @@ def _enroll(store: VoiceprintStore, embedder: SpeakerEmbedder, args, known: set[
 
 
 def _bakeoff(args, cfg) -> int:
-    from .embedder import WeSpeakerEmbedder
-
-    embedder = WeSpeakerEmbedder(args.model or cfg.model_path, threads=cfg.threads)
+    embedder = ONNX_BACKENDS[args.backend](args.model or cfg.model_path, threads=cfg.threads)
     try:
         data = bakeoff.run(args.clip_dir, embedder, cfg.margin)
     except ValueError as e:

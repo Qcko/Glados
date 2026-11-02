@@ -1,7 +1,7 @@
-"""WeSpeaker ONNX backend (DESIGN-speaker-id.md, slice 3).
+"""ONNX speaker-id backends, WeSpeaker and ECAPA (DESIGN-speaker-id.md, slice 3).
 
-The model file is not in the repo; the tests that need it run only when
-`GLADOS_VOICEID_MODEL` points at it.
+The model files are not in the repo; the tests that need one run only when
+`GLADOS_VOICEID_MODEL` (WeSpeaker) or `GLADOS_VOICEID_ECAPA_MODEL` points at it.
 """
 
 from __future__ import annotations
@@ -22,6 +22,10 @@ from glados.voiceid.store import Voiceprint
 
 MODEL = os.environ.get("GLADOS_VOICEID_MODEL", "")
 needs_model = pytest.mark.skipif(not MODEL or not Path(MODEL).is_file(), reason="GLADOS_VOICEID_MODEL not set")
+ECAPA = os.environ.get("GLADOS_VOICEID_ECAPA_MODEL", "")
+needs_ecapa = pytest.mark.skipif(
+    not ECAPA or not Path(ECAPA).is_file(), reason="GLADOS_VOICEID_ECAPA_MODEL not set"
+)
 
 
 def _tone(hz: float, seconds: float = 2.0) -> bytes:
@@ -38,6 +42,12 @@ def test_fbank_is_80_bins_at_10_ms_with_the_mean_removed():
 
 def test_a_missing_model_degrades_to_unidentified_not_a_failed_boot(tmp_path):
     cfg = SpeakerIdConfig(backend="wespeaker", model_path=tmp_path / "absent.onnx", store_dir=tmp_path)
+    assert build_identifier(cfg, InMemorySecrets()) is None
+
+
+@pytest.mark.parametrize("backend", ["wespeaker", "ecapa"])
+def test_each_onnx_backend_degrades_on_a_missing_model(tmp_path, backend):
+    cfg = SpeakerIdConfig(backend=backend, model_path=tmp_path / "absent.onnx", store_dir=tmp_path)
     assert build_identifier(cfg, InMemorySecrets()) is None
 
 
@@ -63,6 +73,47 @@ def test_the_same_clip_embeds_identically():
     embedder = WeSpeakerEmbedder(Path(MODEL))
     clip = _tone(300.0)
     assert float(embedder.embed(clip) @ embedder.embed(clip)) > 0.999
+
+
+@needs_ecapa
+def test_ecapa_embeds_a_unit_192_vector_and_names_its_model():
+    from glados.voiceid.embedder import EcapaEmbedder
+
+    embedder = EcapaEmbedder(Path(ECAPA))
+    vector = embedder.embed(_tone(180.0))
+    assert vector.shape == (192,) and abs(float(np.linalg.norm(vector)) - 1.0) < 1e-5
+    assert embedder.model_id.startswith("ecapa-speechbrain-voxceleb:")
+
+
+@needs_ecapa
+def test_ecapa_cuts_a_long_clip_to_its_first_30_seconds():
+    from glados.voiceid.embedder import EcapaEmbedder
+
+    embedder = EcapaEmbedder(Path(ECAPA))
+    head = np.random.default_rng(3).integers(-3000, 3000, 30 * SAMPLE_RATE, dtype=np.int16).tobytes()
+    tail = _tone(440.0, seconds=10.0)
+    assert float(embedder.embed(head + tail) @ embedder.embed(head)) > 0.9999
+
+
+@needs_ecapa
+def test_ecapa_refuses_under_a_second_so_the_turn_goes_unidentified():
+    from glados.voiceid.embedder import EcapaEmbedder
+
+    with pytest.raises(ValueError, match="1 s"):
+        EcapaEmbedder(Path(ECAPA)).embed(_tone(200.0, seconds=0.5))
+
+
+@needs_model
+@needs_ecapa
+def test_each_backend_refuses_the_other_backends_model_file(tmp_path):
+    from glados.voiceid.embedder import EcapaEmbedder, WeSpeakerEmbedder
+
+    with pytest.raises(ValueError, match="feeds 'wav'"):
+        EcapaEmbedder(Path(MODEL))
+    with pytest.raises(ValueError, match="feeds 'feats'"):
+        WeSpeakerEmbedder(Path(ECAPA))
+    swapped = SpeakerIdConfig(backend="ecapa", model_path=Path(MODEL), store_dir=tmp_path)
+    assert build_identifier(swapped, InMemorySecrets()) is None
 
 
 # ---- threshold bake-off -----------------------------------------------------

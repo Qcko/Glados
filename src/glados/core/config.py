@@ -526,10 +526,12 @@ class STTConfig(BaseModel):
 
 class SpeakerIdConfig(BaseModel):
     # DESIGN-speaker-id.md. "off" embeds nothing and every voice turn is
-    # `fallback`; "fake" is the test embedder; "wespeaker" runs the ONNX
-    # model at `model_path` on CPU. Thresholds are placeholders until the
-    # bake-off on household clips sets them (slice 3).
-    backend: Literal["off", "fake", "wespeaker"] = "off"
+    # `fallback`; "fake" is the test embedder; "wespeaker" and "ecapa" run
+    # the ONNX model at `model_path` on CPU (the two bake-off candidates).
+    # `accept_threshold` belongs to ONE model: scores are not comparable
+    # across backends, so changing `backend` means re-running the bake-off
+    # for it. Placeholders until the bake-off on household clips (slice 3).
+    backend: Literal["off", "fake", "wespeaker", "ecapa"] = "off"
     model_path: Path = Path(os.environ.get("GLADOS_VOICEID_MODEL") or "voxceleb_resnet34_LM.onnx")
     threads: int = Field(default=1, ge=1, le=2)
     accept_threshold: float = 0.70

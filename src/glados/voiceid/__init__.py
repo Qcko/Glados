@@ -10,20 +10,22 @@ import logging
 
 from ..core.config import SpeakerIdConfig
 from ..core.secrets import SecretsStore
-from .embedder import FakeEmbedder, SpeakerEmbedder, WeSpeakerEmbedder
+from .embedder import EcapaEmbedder, FakeEmbedder, SpeakerEmbedder, WeSpeakerEmbedder
 from .identifier import SpeakerIdentifier
 from .store import VoiceprintStore
 
 log = logging.getLogger(__name__)
 
-__all__ = ["SpeakerIdentifier", "VoiceprintStore", "build_embedder", "build_identifier"]
+ONNX_BACKENDS = {"wespeaker": WeSpeakerEmbedder, "ecapa": EcapaEmbedder}
+
+__all__ = ["ONNX_BACKENDS", "SpeakerIdentifier", "VoiceprintStore", "build_embedder", "build_identifier"]
 
 
 def build_embedder(cfg: SpeakerIdConfig) -> SpeakerEmbedder | None:
     if cfg.backend == "fake":
         return FakeEmbedder()
-    if cfg.backend == "wespeaker":
-        return WeSpeakerEmbedder(cfg.model_path, threads=cfg.threads)
+    if cfg.backend in ONNX_BACKENDS:
+        return ONNX_BACKENDS[cfg.backend](cfg.model_path, threads=cfg.threads)
     return None
 
 

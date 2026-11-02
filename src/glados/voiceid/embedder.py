@@ -80,30 +80,70 @@ class WeSpeakerEmbedder:
     saves here."""
 
     _FAMILY = "wespeaker-resnet34-LM"
+    _INPUT = "feats"
 
     def __init__(self, model_path: Path, *, threads: int = 1) -> None:
-        import onnxruntime as ort
-
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = threads
-        options.inter_op_num_threads = 1
-        self._session = ort.InferenceSession(
-            str(model_path), options, providers=["CPUExecutionProvider"]
-        )
-        self._input = self._session.get_inputs()[0].name
+        self._session = _cpu_session(model_path, threads, self._INPUT)
         self.model_id = f"{self._FAMILY}:{_file_digest(model_path)}"
-        self._warm_up()
-
-    def _warm_up(self) -> None:
-        """The first embed pays the torch import and session init, about
-        2.6 s on the devbox: well past the turn's identify cap. Pay it at
-        load time instead, on a second of silence."""
-        self.embed(bytes(2 * SAMPLE_RATE))
+        _warm_up(self)
 
     def embed(self, pcm: bytes) -> np.ndarray:
         feats = _fbank(pcm)
-        [embedding] = self._session.run(None, {self._input: feats[np.newaxis]})
+        [embedding] = self._session.run(None, {self._INPUT: feats[np.newaxis]})
         return unit(embedding[0])
+
+
+class EcapaEmbedder:
+    """SpeechBrain ECAPA-TDNN (spkrec-ecapa-voxceleb) exported to one ONNX
+    graph with its Fbank and sentence normalisation inside, so it needs no
+    torch: waveform in [-1, 1] in, 192-dim embedding out. Export recipe and
+    parity check: `<lab-root>/glados/ecapa_export/`.
+
+    The export declared 1-30 s clips. Under 1 s is refused, so the turn goes
+    unidentified rather than matching on a vector the graph was never checked
+    for. Over 30 s keeps the first 30 s: the onset is the person addressing
+    GLaDOS, and a long capture's tail is likelier to be TV or someone else."""
+
+    _FAMILY = "ecapa-speechbrain-voxceleb"
+    _INPUT = "wav"
+    MIN_SAMPLES = SAMPLE_RATE
+    MAX_SAMPLES = 30 * SAMPLE_RATE
+
+    def __init__(self, model_path: Path, *, threads: int = 1) -> None:
+        self._session = _cpu_session(model_path, threads, self._INPUT)
+        self.model_id = f"{self._FAMILY}:{_file_digest(model_path)}"
+        _warm_up(self)
+
+    def embed(self, pcm: bytes) -> np.ndarray:
+        samples = np.frombuffer(pcm, dtype=np.int16)[: self.MAX_SAMPLES]
+        if len(samples) < self.MIN_SAMPLES:
+            raise ValueError(f"ecapa needs 1 s of audio, got {len(samples) / SAMPLE_RATE:.2f} s")
+        wav = samples.astype(np.float32) / 32768.0
+        [embedding] = self._session.run(None, {self._INPUT: wav[np.newaxis]})
+        return unit(embedding[0])
+
+
+def _warm_up(embedder: SpeakerEmbedder) -> None:
+    """The first embed pays session init (and for WeSpeaker the torch
+    import), about 2.6 s on the devbox: well past the turn's identify cap.
+    Pay it at load time instead, on a second of silence."""
+    embedder.embed(bytes(2 * SAMPLE_RATE))
+
+
+def _cpu_session(model_path: Path, threads: int, expected_input: str):
+    """Refuses a model file whose input is not the one this backend feeds,
+    so `backend` and `model_path` pointing at different models fail at load
+    (degrading to unidentified) instead of embedding garbage."""
+    import onnxruntime as ort
+
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = threads
+    options.inter_op_num_threads = 1
+    session = ort.InferenceSession(str(model_path), options, providers=["CPUExecutionProvider"])
+    actual = session.get_inputs()[0].name
+    if actual != expected_input:
+        raise ValueError(f"{Path(model_path).name} takes input {actual!r}, this backend feeds {expected_input!r}")
+    return session
 
 
 def _fbank(pcm: bytes) -> np.ndarray:
