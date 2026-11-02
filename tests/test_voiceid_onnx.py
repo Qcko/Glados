@@ -6,6 +6,7 @@ The model files are not in the repo; the tests that need one run only when
 
 from __future__ import annotations
 
+import argparse
 import os
 import wave
 from pathlib import Path
@@ -15,7 +16,8 @@ import pytest
 
 from glados.core.config import SpeakerIdConfig
 from glados.core.secrets import InMemorySecrets
-from glados.voiceid import bakeoff, build_identifier
+from glados.voiceid import __main__ as voiceid_cli
+from glados.voiceid import bakeoff, build_identifier, compare
 from glados.voiceid.embedder import SAMPLE_RATE, FakeEmbedder, _fbank, unit
 from glados.voiceid.identifier import decide
 from glados.voiceid.store import Voiceprint
@@ -217,3 +219,62 @@ def test_bakeoff_report_holds_no_vectors(household, tmp_path):
     path = bakeoff.write_report(bakeoff.run(clip_dir, embedder, 0.1), tmp_path / "out", now=lambda: "t")
     text = path.read_text(encoding="utf-8")
     assert path.name == "voiceid_bakeoff_t.json" and "embedding" not in text and len(text) < 20_000
+
+
+def test_score_summary_separates_genuine_from_impostor_clips(household):
+    clip_dir, embedder = household
+    scores = bakeoff.run(clip_dir, embedder, margin=0.10)["scores"]
+    assert scores["eer"] == 0.0
+    assert scores["gap"] == pytest.approx(scores["weakest_genuine"] - scores["worst_impostor"], abs=1e-3)
+    assert scores["gap"] > 0
+
+
+def test_eer_is_half_way_when_the_score_ranges_overlap_completely():
+    assert bakeoff._eer([0.5, 0.5], [0.5, 0.5]) == 0.5
+    assert bakeoff._eer([0.9], []) is None
+
+
+# ---- side-by-side comparison -----------------------------------------------
+
+
+def _result(accepts: int | None, p95: float = 200.0, enough: bool = True) -> dict:
+    pick = None if accepts is None else {"genuine_accepts": accepts}
+    return {"pick": pick, "embed_ms": {"p50": p95, "p95": p95}, "enough_impostors": enough}
+
+
+@pytest.mark.parametrize(
+    "ecapa, wespeaker, winner",
+    [
+        (_result(9), _result(9), "ecapa"),
+        (_result(8), _result(9), "ecapa"),
+        (_result(7), _result(9), "wespeaker"),
+        (_result(None), _result(9), "wespeaker"),
+        (_result(None), _result(None), None),
+        (_result(9, p95=301), _result(9), "wespeaker"),
+        (_result(9, p95=301), _result(None), None),
+        (_result(9), _result(None), "ecapa"),
+    ],
+)
+def test_verdict_follows_the_agreed_rule(ecapa, wespeaker, winner):
+    assert compare.verdict({"ecapa": ecapa, "wespeaker": wespeaker})["winner"] == winner
+
+
+def test_one_backend_short_of_impostors_makes_the_verdict_provisional():
+    v = compare.verdict({"ecapa": _result(9), "wespeaker": _result(9, enough=False)})
+    assert v["winner"] == "ecapa" and v["provisional"] is True
+
+
+def test_comparison_runs_both_backends_on_the_same_clips(household):
+    clip_dir, embedder = household
+    other = FakeEmbedder(embedder._voices, dim=16, model_id="fake-v2")
+    data = compare.run(clip_dir, {"wespeaker": embedder, "ecapa": other}, margin=0.10)
+    assert set(data["backends"]) == {"wespeaker", "ecapa"}
+    assert data["backends"]["ecapa"]["model_id"] == "fake-v2"
+    assert data["verdict"] == {"winner": "ecapa", "reason": data["verdict"]["reason"], "provisional": True}
+    assert "winner: ecapa" in compare.headline(data) and "EER" in compare.headline(data)
+
+
+@pytest.mark.parametrize("text", ["wespeaker,wespeaker", "ecapa,nope", ""])
+def test_cli_refuses_a_backend_list_that_is_not_the_pair(text):
+    with pytest.raises(argparse.ArgumentTypeError):
+        voiceid_cli._backends(text)

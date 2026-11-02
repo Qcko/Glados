@@ -20,7 +20,7 @@ from ..core.config import load_glados_config, load_rooms_config
 from ..core.secrets import KeyringSecrets, SecretsStore
 from .embedder import SAMPLE_RATE, SpeakerEmbedder
 from .store import StoreError, VoiceprintStore
-from . import ONNX_BACKENDS, bakeoff, build_embedder
+from . import ONNX_BACKENDS, bakeoff, build_embedder, compare
 
 _MIN_CLIPS_ADVISED = 3
 
@@ -69,8 +69,14 @@ def _parser() -> argparse.ArgumentParser:
         "bakeoff", help="Pick accept_threshold from household clips (<dir>/<person>/, <dir>/impostor/).",
     )
     bake.add_argument("clip_dir", type=Path)
-    bake.add_argument("--backend", choices=sorted(ONNX_BACKENDS), default="wespeaker")
-    bake.add_argument("--model", type=Path, help="ONNX file for that backend (default: [speaker_id].model_path).")
+    bake.add_argument(
+        "--backend", type=_backends, default=("wespeaker",),
+        help="One backend, or 'wespeaker,ecapa' for the side-by-side comparison.",
+    )
+    bake.add_argument(
+        "--model", type=Path, action="append",
+        help="ONNX file per backend, in --backend order (one backend: default [speaker_id].model_path).",
+    )
     bake.add_argument("--out", type=Path, help="Report dir (default: $GLADOS_LAB_DIR/glados/voiceid_bakeoff).")
     return p
 
@@ -91,19 +97,61 @@ def _enroll(store: VoiceprintStore, embedder: SpeakerEmbedder, args, known: set[
     return 0
 
 
+def _backends(text: str) -> tuple[str, ...]:
+    names = tuple(n.strip() for n in text.split(",") if n.strip())
+    unknown = [n for n in names if n not in ONNX_BACKENDS]
+    if unknown or not names:
+        raise argparse.ArgumentTypeError(f"unknown backend(s) {unknown}; choose from {sorted(ONNX_BACKENDS)}")
+    if len(names) > 1 and sorted(names) != sorted(compare.BACKENDS):
+        raise argparse.ArgumentTypeError(f"side-by-side compares exactly {','.join(compare.BACKENDS)}")
+    return names
+
+
 def _bakeoff(args, cfg) -> int:
-    embedder = ONNX_BACKENDS[args.backend](args.model or cfg.model_path, threads=cfg.threads)
+    models = args.model or [cfg.model_path]
+    if len(models) != len(args.backend):
+        print(f"error: {len(args.backend)} backend(s) need {len(args.backend)} --model", file=sys.stderr)
+        return 2
     try:
-        data = bakeoff.run(args.clip_dir, embedder, cfg.margin)
+        embedders = _load_embedders(args.backend, models, cfg.threads)
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    try:
+        if len(embedders) > 1:
+            return _report_comparison(args, compare.run(args.clip_dir, embedders, cfg.margin))
+        return _report_single(args, bakeoff.run(args.clip_dir, embedders[args.backend[0]], cfg.margin))
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+
+
+def _load_embedders(backends, models, threads: int) -> dict[str, SpeakerEmbedder]:
+    embedders = {}
+    for name, model in zip(backends, models):
+        try:
+            embedders[name] = ONNX_BACKENDS[name](model, threads=threads)
+        except Exception as e:
+            raise RuntimeError(f"backend {name} cannot load {Path(model).name}: {e}") from e
+    return embedders
+
+
+def _report_single(args, data: dict) -> int:
     path = bakeoff.write_report(data, args.out or bakeoff.default_out_dir())
     print(bakeoff.headline(data))
     print(f"report: {path}")
     if not data["pick"]:
         return 4
     return 0 if data["enough_impostors"] else 5
+
+
+def _report_comparison(args, data: dict) -> int:
+    path = bakeoff.write_report(data, args.out or bakeoff.default_out_dir())
+    print(compare.headline(data))
+    print(f"report: {path}")
+    if data["verdict"]["winner"] is None:
+        return 4
+    return 5 if data["verdict"]["provisional"] else 0
 
 
 def _list(store: VoiceprintStore) -> int:

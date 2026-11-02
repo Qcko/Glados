@@ -33,7 +33,7 @@ from .store import Voiceprint
 IMPOSTOR_DIR = "impostor"
 FAR_GATE = 0.01
 MIN_IMPOSTOR_PROBES = int(1 / FAR_GATE)
-THRESHOLDS = tuple(round(0.30 + 0.02 * i, 2) for i in range(31))
+THRESHOLDS = tuple(round(0.30 + 0.02 * i, 2) for i in range(35))
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,7 @@ class Point:
     wrong_person: float
     impostor_accepts: int
     wrong_persons: int
+    genuine_accepts: int = 0
 
 
 def run(clip_dir: Path, embedder: SpeakerEmbedder, margin: float) -> dict:
@@ -66,7 +67,9 @@ def run(clip_dir: Path, embedder: SpeakerEmbedder, margin: float) -> dict:
         "people": sorted(p for p in clips if p != IMPOSTOR_DIR),
         "clips": {p: len(v) for p, v in clips.items()},
         "impostor_groups": _group_counts(impostors),
+        "genuine_probes": len(probes) - len(impostors),
         "enough_impostors": len(impostors) >= MIN_IMPOSTOR_PROBES,
+        "scores": score_summary(probes),
         "pick": _as_dict(pick(points)),
         "sweep": [asdict(p) for p in points],
         "embed_ms": {"p50": _percentile(latencies, 50), "p95": _percentile(latencies, 95)},
@@ -98,7 +101,44 @@ def _point(threshold: float, probes: list[Probe], margin: float) -> Point:
         wrong_person=_rate(wrong, genuine),
         impostor_accepts=impostor_accepts,
         wrong_persons=wrong,
+        genuine_accepts=right,
     )
+
+
+def score_summary(probes: list[Probe]) -> dict:
+    """Threshold-free separation: a genuine probe scores against its own
+    print, an impostor against the closest print."""
+    genuine = [_score(p, p.truth) for p in probes if p.truth is not None]
+    impostor = [_score(p, None) for p in probes if p.truth is None]
+    weakest = min(genuine) if genuine else None
+    worst = max(impostor) if impostor else None
+    return {
+        "eer": _eer(genuine, impostor),
+        "weakest_genuine": _round(weakest),
+        "worst_impostor": _round(worst),
+        "gap": _round(weakest - worst) if genuine and impostor else None,
+    }
+
+
+def _score(p: Probe, person: str | None) -> float:
+    probe = unit(p.embedding)
+    return max(float(np.dot(probe, v.centroid)) for v in p.prints if person in (None, v.person))
+
+
+def _eer(genuine: list[float], impostor: list[float]) -> float | None:
+    if not genuine or not impostor:
+        return None
+    rates = [(_share(impostor, lambda s: s >= t), _share(genuine, lambda s: s < t)) for t in sorted(genuine + impostor)]
+    far, frr = min(rates, key=lambda r: abs(r[0] - r[1]))
+    return _round((far + frr) / 2)
+
+
+def _share(scores: list[float], hit: Callable[[float], bool]) -> float:
+    return sum(1 for s in scores if hit(s)) / len(scores)
+
+
+def _round(value: float | None) -> float | None:
+    return round(value, 4) if value is not None else None
 
 
 def _decide(p: Probe, threshold: float, margin: float) -> str | None:
