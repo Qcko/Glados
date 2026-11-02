@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
@@ -270,7 +271,7 @@ class MemoryWriter:
                 continue
             self._log_applied(chunk, verdict, outcome)
             if outcome == "applied":
-                await self._send_to_review(write, verdict, known)
+                await self._send_to_review(write, verdict, known, _untrusted_ids(chunk))
             return outcome, called_llm
         return "failed", called_llm
 
@@ -283,14 +284,15 @@ class MemoryWriter:
         )
 
     async def _send_to_review(
-        self, write: ChunkWrite, verdict: WriterVerdict, known: list[Fact]
+        self, write: ChunkWrite, verdict: WriterVerdict, known: list[Fact],
+        untrusted_ids: frozenset[int],
     ) -> None:
         """Shadow mode's output. Shielded like the apply, so a preempt cannot
         drop the record of facts that are already committed; a failed write
         costs the record, never the chunk."""
         if self._review is None:
             return
-        entries = review_entries(write, verdict, known)
+        entries = review_entries(write, verdict, known, untrusted_ids)
         try:
             await self._committed(asyncio.to_thread(self._review.append, entries))
         except Exception as e:
@@ -349,8 +351,17 @@ class MemoryWriter:
         return "".join(parts)
 
 
-def review_entries(write: ChunkWrite, verdict: WriterVerdict, known: list[Fact]) -> list[dict]:
-    """One line per change the chunk made, for a human to score."""
+def _untrusted_ids(chunk: Chunk) -> frozenset[int]:
+    return frozenset(n.id for n in chunk.notes if n.untrusted)
+
+
+def review_entries(
+    write: ChunkWrite, verdict: WriterVerdict, known: list[Fact],
+    untrusted_ids: frozenset[int] = frozenset(),
+) -> list[dict]:
+    """One line per change the chunk made, for a human to score. Each line
+    gets a random id the score sidecar refers to. A drop cites no notes, so
+    it is untrusted when anything in the chunk was."""
     room_id, person, session_id = write.group
     base = {"run_date": write.run_date, "room": room_id, "person": person, "session": session_id}
     text_of = {f.id: f.text for f in known}
@@ -358,9 +369,13 @@ def review_entries(write: ChunkWrite, verdict: WriterVerdict, known: list[Fact])
         {**base, "kind": "add", "fact": a.text, "notes": len(a.note_ids), "untrusted": a.untrusted}
         for a in verdict.adds
     ]
-    entries += [{**base, "kind": "drop", "fact": text_of.get(i, "")} for i in verdict.drop_ids]
     entries += [
-        {**base, "kind": "reaffirm", "fact": text_of.get(i, ""), "notes": len(ids)}
+        {**base, "kind": "drop", "fact": text_of.get(i, ""), "untrusted": bool(untrusted_ids)}
+        for i in verdict.drop_ids
+    ]
+    entries += [
+        {**base, "kind": "reaffirm", "fact": text_of.get(i, ""), "notes": len(ids),
+         "untrusted": bool(untrusted_ids.intersection(ids))}
         for i, ids in verdict.reaffirmed.items()
     ]
-    return entries
+    return [{"id": uuid.uuid4().hex, **e} for e in entries]

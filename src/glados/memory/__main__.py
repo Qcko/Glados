@@ -23,7 +23,7 @@ from ..core.config import load_glados_config
 from ..core.memory_facts import DayBudget, StagedNote, judge_writer_output, writer_messages
 from ..core.memory_wiring import batch_policy, build_writer_llm
 from ..core.speaker_memory import SpeakerMemoryStore
-from . import bakeoff, scoring
+from . import bakeoff, review, scoring
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -62,6 +62,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_bake.add_argument("--num-predict", type=int,
                         help="Writer output cap (default: [memory].writer_num_predict). "
                         "Raise it for a reasoning model, or its thinking eats the answer.")
+    p_review = sub.add_parser(
+        "review", help="Score one person's shadow facts: 2 useful / 1 harmless / 0 noise / x wrong.",
+    )
+    p_review.add_argument("--person", required=True, help="Whose facts (only theirs are shown).")
+    p_review.add_argument("--file", type=Path, help="Review file (default: [memory].review_path).")
+    p_summary = sub.add_parser("summary", help="Score counts per week, person and kind.")
+    p_summary.add_argument("--file", type=Path, help="Review file (default: [memory].review_path).")
     return p
 
 
@@ -71,6 +78,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_replay(args.transcript, args.model))
     if args.cmd == "bakeoff":
         return asyncio.run(_bakeoff(args))
+    if args.cmd == "review":
+        return _review(args.file or _config().memory.review_path, args.person)
+    if args.cmd == "summary":
+        return _summary(args.file or _config().memory.review_path)
     store = SpeakerMemoryStore(args.db or _configured_db())
     try:
         return _run(store, args)
@@ -85,6 +96,24 @@ def _configured_db() -> Path:
 def _config():
     config_dir = Path(os.environ.get("GLADOS_CONFIG_DIR", "configs"))
     return load_glados_config(config_dir / "glados.toml")
+
+
+def _review(path: Path, person: str) -> int:
+    sidecar = review.sidecar_path(path)
+    todo = review.pending(review.load_items(path), review.load_scores(sidecar), person)
+    if not todo:
+        print(f"nothing to score for {person}")
+        return 0
+    scored = review.run_review(todo, sidecar, input, print)
+    print(f"scored {scored} of {len(todo)}; scores in {sidecar.name}")
+    print("Anything GLaDOS should have remembered and did not? Note it by hand; it is not stored.")
+    return 0
+
+
+def _summary(path: Path) -> int:
+    items = review.load_items(path)
+    print(review.format_summary(review.summarise(items, review.load_scores(review.sidecar_path(path)))))
+    return 0
 
 
 async def _bakeoff(args: argparse.Namespace) -> int:
