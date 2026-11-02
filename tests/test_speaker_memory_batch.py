@@ -639,6 +639,8 @@ async def test_shadow_batch_writes_each_change_to_the_review_file(store, tmp_pat
     kinds = {(r["kind"], r["fact"]) for r in rows}
     assert kinds == {("add", "Is vegetarian."), ("drop", "Lives in Cork."), ("reaffirm", "Has a cat.")}
     assert all(r["score"] is None and r["person"] == "qcko" and r["session"] == "s1" for r in rows)
+    assert all(r["untrusted"] is False for r in rows)
+    assert len({r["id"] for r in rows}) == 3 and all(len(r["id"]) == 32 for r in rows)
     assert "I moved" not in review.read_text(encoding="utf-8"), "facts only, never the speech"
 
 
