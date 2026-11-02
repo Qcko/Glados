@@ -73,7 +73,7 @@ from .cart_verifier import CartVerifier
 from .memory_wiring import build_speaker_memory, open_speaker_memory
 from .organizer import Organizer
 from .wake import Admission, WakeGate, WakeTimings
-from .prompt_budget import measure_boot_budget
+from .prompt_budget import BudgetVerdict, measure_boot_budget
 from .release import describe_release
 from .secrets import KeyringSecrets, SecretsStore
 from .protocols import (
@@ -125,6 +125,27 @@ async def _lazy_reaper(lazy_servers: list[tuple["StdioServer", float]]) -> None:
         now = asyncio.get_running_loop().time()
         for coro in _reap_idle_servers(lazy_servers, now):
             await coro
+
+
+_BOOT_BUDGET_TIMEOUT_S = 300.0
+_BUDGET_TIMED_OUT = "timed out"
+
+
+async def _measure_boot_budget_bounded(
+    llm: object, *, bound_s: float = _BOOT_BUDGET_TIMEOUT_S, **budget_inputs
+) -> BudgetVerdict | str | None:
+    try:
+        return await asyncio.wait_for(
+            measure_boot_budget(llm, **budget_inputs), timeout=bound_s
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "prompt budget NOT CHECKED: pricing boot prompts against the model "
+            "did not finish within %.0fs. The context-flooding guarantee is "
+            "unverified for this run.",
+            bound_s,
+        )
+        return _BUDGET_TIMED_OUT
 
 
 def _build_cart_verifier(
@@ -760,7 +781,7 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             log.info("prompt budget not checked: num_ctx/num_predict unset")
             return
         system_prompt, external_ceiling = _app.state.organizer.budget_inputs()
-        verdict = await measure_boot_budget(
+        verdict = await _measure_boot_budget_bounded(
             _app.state.llm,
             system_prompt=system_prompt,
             tools=_app.state.mcp.specs(),
@@ -768,6 +789,8 @@ def build_app(config_dir: Path | None = None) -> FastAPI:
             num_ctx=cfg.llm.num_ctx,
             num_predict=cfg.llm.num_predict,
         )
+        if verdict is _BUDGET_TIMED_OUT:
+            return
         if verdict is None:
             # On ollama the window is known by construction (the validator
             # above refuses None), so a prompt that cannot be priced is a

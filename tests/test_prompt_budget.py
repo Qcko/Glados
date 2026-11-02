@@ -338,3 +338,30 @@ async def test_a_payload_that_compresses_is_refused() -> None:
             num_ctx=100_000,
             num_predict=10,
         )
+
+
+@pytest.mark.asyncio
+async def test_a_boot_check_slower_than_its_bound_is_not_checked_and_says_so(caplog) -> None:
+    """Each price has its own 120 s read bound, but the check makes several in
+    a row; a slow-but-answering daemon must not hold boot for their sum."""
+    import asyncio
+
+    from glados.core.server import _measure_boot_budget_bounded
+
+    class _Slow:
+        async def price_prompt(self, messages, tools):
+            await asyncio.sleep(10)
+            return 100
+
+    verdict = await _measure_boot_budget_bounded(
+        _Slow(),
+        bound_s=0.05,
+        system_prompt="sys",
+        tools=[],
+        max_history_external_bytes=1000,
+        num_ctx=12288,
+        num_predict=4096,
+    )
+
+    assert verdict == "timed out"
+    assert "pricing boot prompts against the model did not finish within 0s" in caplog.text

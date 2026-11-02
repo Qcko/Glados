@@ -213,7 +213,24 @@ class OllamaLLM:
                 self._model, _PRICE_READ_TIMEOUT_S, type(exc).__name__, exc,
             )
             return None
-        return self._plausible_price(messages, response.json().get("prompt_eval_count"))
+        return self._plausible_price(messages, self._prompt_eval_count(response))
+
+    def _prompt_eval_count(self, response: httpx.Response) -> int | None:
+        try:
+            body = response.json()
+        except ValueError as exc:
+            return self._unpriceable_body(f"not JSON: {exc}")
+        if not isinstance(body, dict):
+            return self._unpriceable_body(f"JSON {type(body).__name__}, not an object")
+        return body.get("prompt_eval_count")
+
+    def _unpriceable_body(self, why: str) -> None:
+        log.warning(
+            "could not price the prompt against %s (one-token /api/chat): "
+            "response body is %s",
+            self._model, why,
+        )
+        return None
 
     def _plausible_price(self, messages: list[LLMMessage], count: int | None) -> int | None:
         chars = _system_chars(messages)

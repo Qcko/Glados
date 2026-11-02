@@ -581,3 +581,26 @@ async def test_price_prompt_saturated_at_num_ctx_is_kept_as_overflow() -> None:
     system = LLMMessage(role="system", content="s" * 40000)
 
     assert await llm.price_prompt([system], []) == 4096
+
+
+@pytest.mark.asyncio
+async def test_price_prompt_non_json_body_is_no_price_and_names_the_call(caplog) -> None:
+    """A garbled body must skip the boot check, not crash it."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>proxy error</html>")
+
+    llm = OllamaLLM(transport=httpx.MockTransport(handler))
+
+    assert await llm.price_prompt([LLMMessage(role="system", content="s")], []) is None
+    assert "one-token /api/chat): response body is not JSON" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_price_prompt_non_object_json_is_no_price(caplog) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[1, 2])
+
+    llm = OllamaLLM(transport=httpx.MockTransport(handler))
+
+    assert await llm.price_prompt([LLMMessage(role="system", content="s")], []) is None
+    assert "response body is JSON list, not an object" in caplog.text
