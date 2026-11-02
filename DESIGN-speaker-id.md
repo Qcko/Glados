@@ -1,7 +1,11 @@
 # DESIGN - speaker identity (ARCH v5)
 
 Status: slices 1-2 BUILT (signed off 17-10-2026, fallback option: session
-keyed on default_user, `person` None). Slice 3 open. Reviewed by the design
+keyed on default_user, `person` None). Slice 3 half built (02-11-2026): the
+`wespeaker` backend (WeSpeaker ResNet34-LM ONNX, about 150 ms per embed on
+one CPU thread, warmed at boot) and `python -m glados.voiceid bakeoff`. The
+thresholds still wait on household clips recorded through the kitchen phone,
+and prod stays on `backend = "off"` until they are set. Reviewed by the design
 roster (clean-slate, architect, security, concurrency) on 17-10-2026.
 
 Built differently from the plan below: the identifier is shared by every

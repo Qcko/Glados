@@ -20,7 +20,7 @@ from ..core.config import load_glados_config, load_rooms_config
 from ..core.secrets import KeyringSecrets, SecretsStore
 from .embedder import SAMPLE_RATE, SpeakerEmbedder
 from .store import StoreError, VoiceprintStore
-from . import build_embedder
+from . import bakeoff, build_embedder
 
 _MIN_CLIPS_ADVISED = 3
 
@@ -41,6 +41,8 @@ def main(
             return _list(store)
         if args.cmd == "forget":
             return _forget(store, args.person)
+        if args.cmd == "bakeoff":
+            return _bakeoff(args, cfg)
         embedder = embedder_factory(cfg)
         if embedder is None:
             print("speaker_id.backend is 'off' in glados.toml; set a backend first", file=sys.stderr)
@@ -63,6 +65,12 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("list", help="List enrolled people (no voice data).")
     forget = sub.add_parser("forget", help="Delete a person's voiceprint.")
     forget.add_argument("person")
+    bake = sub.add_parser(
+        "bakeoff", help="Pick accept_threshold from household clips (<dir>/<person>/, <dir>/impostor/).",
+    )
+    bake.add_argument("clip_dir", type=Path)
+    bake.add_argument("--model", type=Path, help="WeSpeaker ONNX file (default: [speaker_id].model_path).")
+    bake.add_argument("--out", type=Path, help="Report dir (default: $GLADOS_LAB_DIR/glados/voiceid_bakeoff).")
     return p
 
 
@@ -80,6 +88,23 @@ def _enroll(store: VoiceprintStore, embedder: SpeakerEmbedder, args, known: set[
     store.enroll(args.person, embedder.model_id, embeddings, replace=args.replace)
     print(f"enrolled {args.person} ({len(embeddings)} clips, model {embedder.model_id})")
     return 0
+
+
+def _bakeoff(args, cfg) -> int:
+    from .embedder import WeSpeakerEmbedder
+
+    embedder = WeSpeakerEmbedder(args.model or cfg.model_path, threads=cfg.threads)
+    try:
+        data = bakeoff.run(args.clip_dir, embedder, cfg.margin)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    path = bakeoff.write_report(data, args.out or bakeoff.default_out_dir())
+    print(bakeoff.headline(data))
+    print(f"report: {path}")
+    if not data["pick"]:
+        return 4
+    return 0 if data["enough_impostors"] else 5
 
 
 def _list(store: VoiceprintStore) -> int:

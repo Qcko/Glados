@@ -10,7 +10,7 @@ import logging
 
 from ..core.config import SpeakerIdConfig
 from ..core.secrets import SecretsStore
-from .embedder import FakeEmbedder, SpeakerEmbedder
+from .embedder import FakeEmbedder, SpeakerEmbedder, WeSpeakerEmbedder
 from .identifier import SpeakerIdentifier
 from .store import VoiceprintStore
 
@@ -22,6 +22,8 @@ __all__ = ["SpeakerIdentifier", "VoiceprintStore", "build_embedder", "build_iden
 def build_embedder(cfg: SpeakerIdConfig) -> SpeakerEmbedder | None:
     if cfg.backend == "fake":
         return FakeEmbedder()
+    if cfg.backend == "wespeaker":
+        return WeSpeakerEmbedder(cfg.model_path, threads=cfg.threads)
     return None
 
 
@@ -31,7 +33,10 @@ def build_identifier(cfg: SpeakerIdConfig, secrets: SecretsStore) -> SpeakerIden
     try:
         embedder = build_embedder(cfg)
     except Exception:
-        log.exception("speaker-id backend %r failed to load; voices go unidentified", cfg.backend)
+        log.exception(
+            "speaker-id backend %r failed to load (model %s); voices go unidentified",
+            cfg.backend, cfg.model_path.name,
+        )
         return None
     if embedder is None:
         log.info("speaker-id off; every voice turn is unidentified")
