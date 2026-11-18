@@ -435,9 +435,10 @@ async def test_stale_playback_done_cannot_reraise_horizon(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_echo_horizon_reported_once_gate_is_draining(tmp_path: Path) -> None:
-    """After sending, the horizon can only shrink to a PlaybackDone time, so
-    the pipeline may cut a segment that began under it at that horizon."""
+async def test_long_segment_drops_before_stt_once_gate_is_draining(tmp_path: Path) -> None:
+    """After sending, the horizon can only shrink to a PlaybackDone time,
+    which is later than the segment, so a long segment that began under it is
+    dropped before transcription."""
     async with _make_organizer(
         [_DESK, _DESK_SPK], tmp_path,
         tts=FakeTTS(sample_rate=1_000, samples_per_chunk=10_000),
@@ -446,13 +447,12 @@ async def test_echo_horizon_reported_once_gate_is_draining(tmp_path: Path) -> No
         await org.flush()
         assert org._tts_gate["desk"].phase == "draining"
         now = asyncio.get_running_loop().time()
-        assert org.echo_horizon("desk-ui", now) == org._tts_gate["desk"].closed_until
-        later = org._tts_gate["desk"].closed_until + 0.01
-        assert org.echo_horizon("desk-ui", later) is None, "began after the gate"
+        assert org.drops_as_echo("desk-ui", now, 5.0)
+        assert not org.drops_as_echo("desk-ui", now, 2.9), "short: may be 'stop'"
 
 
 @pytest.mark.asyncio
-async def test_no_echo_horizon_while_sending(tmp_path: Path) -> None:
+async def test_long_segment_while_sending_waits_for_post_stt_gate(tmp_path: Path) -> None:
     """While SENDING the horizon is a placeholder that arming may lower below
     the segment's start, so the early drop must leave it to the post-STT check."""
     tts = _GatedTTS()
@@ -461,14 +461,14 @@ async def test_no_echo_horizon_while_sending(tmp_path: Path) -> None:
         await tts.entered.wait()
         now = asyncio.get_running_loop().time()
         assert org._room_mic_gated("desk", now)
-        assert org.echo_horizon("desk-ui", now) is None
+        assert not org.drops_as_echo("desk-ui", now, 9.0)
         tts.released.set()
         await org.flush()
 
 
 @pytest.mark.asyncio
-async def test_no_echo_horizon_with_open_gate(tmp_path: Path) -> None:
+async def test_long_segment_with_open_gate_is_transcribed(tmp_path: Path) -> None:
     async with _make_organizer([_DESK], tmp_path) as (org, _sink):
         now = asyncio.get_running_loop().time()
-        assert org.echo_horizon("desk-ui", now) is None
-        assert org.echo_horizon("unknown-client", now) is None
+        assert not org.drops_as_echo("desk-ui", now, 9.0)
+        assert not org.drops_as_echo("unknown-client", now, 9.0)

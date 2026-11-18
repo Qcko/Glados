@@ -1491,7 +1491,8 @@ def _build_pipeline(
             timing=utterance.timing,
         )
 
-    echo_gate = _RoomEchoGate(organizer, client_id)
+    def echo_gate(captured_at: float, duration_s: float) -> bool:
+        return organizer.drops_as_echo(client_id, captured_at, duration_s)
 
     return AudioPipeline(
         sink=sink,
@@ -1725,17 +1726,3 @@ async def _replace_connection(
 # directly with a tmp config dir.
 
 app = build_app()
-
-
-class _RoomEchoGate:
-    """One mic connection's view of its room's TTS gate (`pipeline.EchoGate`)."""
-
-    def __init__(self, organizer: Organizer, client_id: str) -> None:
-        self._organizer = organizer
-        self._client_id = client_id
-
-    def horizon(self, captured_at: float) -> float | None:
-        return self._organizer.echo_horizon(self._client_id, captured_at)
-
-    def dropped(self, duration_s: float) -> None:
-        self._organizer.note_echo_drop(self._client_id, duration_s)

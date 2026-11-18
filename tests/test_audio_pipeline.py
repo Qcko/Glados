@@ -301,81 +301,31 @@ def test_e2e_audio_drives_fake_transcript_into_organizer(
     assert msgs[2]["server"] == "time" and msgs[2]["name"] == "now"
 
 
-class _FakeEchoGate:
-    """Horizon at `offset_s` after each segment's VadStart stamp, or none."""
-
-    def __init__(self, offset_s: float | None) -> None:
-        self.offset_s = offset_s
-        self.dropped_s: list[float] = []
-
-    def horizon(self, captured_at: float) -> float | None:
-        return None if self.offset_s is None else captured_at + self.offset_s
-
-    def dropped(self, duration_s: float) -> None:
-        self.dropped_s.append(duration_s)
-
-
-async def _run_gated(samples: int, gate: _FakeEchoGate) -> tuple[list[bytes], list[Utterance]]:
+@pytest.mark.asyncio
+async def test_pipeline_echo_gate_skips_stt(tmp_path: Path) -> None:
+    calls: list[tuple[float, float]] = []
     transcribed: list[bytes] = []
     seen: list[Utterance] = []
 
     def stt_text(pcm: bytes) -> str:
         transcribed.append(pcm)
-        return "yes"
+        return "echo"
 
     async def on_utterance(u: Utterance) -> None:
         seen.append(u)
 
+    def echo_gate(captured_at: float, duration_s: float) -> bool:
+        calls.append((captured_at, duration_s))
+        return True
+
     pipe = AudioPipeline(
-        sink=None, vad=FakeVAD(utterance_samples=samples), stt=FakeSTT(stt_text),
-        on_utterance=on_utterance, echo_gate=gate,
+        sink=None, vad=FakeVAD(utterance_samples=16000), stt=FakeSTT(stt_text),
+        on_utterance=on_utterance, echo_gate=echo_gate,
     )
-    await pipe.feed_frame(_frame(0, [i % 30000 for i in range(samples)]))
+    await pipe.feed_frame(_frame(0, [1] * 16000))
     await pipe.drain()
-    return transcribed, seen
-
-
-@pytest.mark.asyncio
-async def test_long_segment_wholly_echo_skips_stt() -> None:
-    gate = _FakeEchoGate(offset_s=0.0)
-    transcribed, seen = await _run_gated(4 * 16000, gate)
     assert transcribed == [] and seen == []
-    assert gate.dropped_s == [pytest.approx(4.0)]
-
-
-@pytest.mark.asyncio
-async def test_short_segment_wholly_echo_still_transcribed_for_barge_in() -> None:
-    gate = _FakeEchoGate(offset_s=0.0)
-    transcribed, seen = await _run_gated(16000, gate)
-    assert len(transcribed) == 1 and len(transcribed[0]) == 2 * 16000
-    assert gate.dropped_s == []
-    assert seen[0].captured_at == pytest.approx(seen[0].timing.segment_end_at), (
-        "untrimmed: keeps its start stamp so the post-STT gate still judges it"
-    )
-
-
-@pytest.mark.asyncio
-async def test_reply_after_echo_keeps_only_the_audio_after_the_horizon() -> None:
-    """FakeVAD stamps VadStart and VadEnd on the same frame, so the 4 s of pcm
-    ends at the stamp and the horizon 1 s before it leaves 1 s of reply."""
-    gate = _FakeEchoGate(offset_s=-1.0)
-    transcribed, seen = await _run_gated(4 * 16000, gate)
-    assert len(transcribed) == 1
-    kept = transcribed[0]
-    assert len(kept) == 2 * 16000
-    assert kept[:2] == (3 * 16000 % 30000).to_bytes(2, "little")
-    assert seen[0].captured_at == pytest.approx(gate_horizon(seen[0], -1.0))
-    assert gate.dropped_s == []
-
-
-def gate_horizon(u: Utterance, offset_s: float) -> float:
-    return u.timing.segment_end_at + offset_s
-
-
-@pytest.mark.asyncio
-async def test_open_gate_transcribes_whole_segment() -> None:
-    transcribed, _seen = await _run_gated(4 * 16000, _FakeEchoGate(offset_s=None))
-    assert len(transcribed[0]) == 2 * 4 * 16000
+    assert calls and calls[0][1] == pytest.approx(1.0)
 
 
 @pytest.mark.asyncio
@@ -387,7 +337,7 @@ async def test_pipeline_carries_speech_timing() -> None:
 
     pipe = AudioPipeline(
         sink=None, vad=FakeVAD(utterance_samples=4), stt=FakeSTT("hi"),
-        on_utterance=on_utterance, echo_gate=_FakeEchoGate(offset_s=None),
+        on_utterance=on_utterance, echo_gate=lambda _at, _dur: False,
     )
     await pipe.feed_frame(_frame(0, [1, 2, 3, 4]))
     await pipe.drain()

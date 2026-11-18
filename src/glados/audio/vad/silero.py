@@ -103,11 +103,7 @@ class SileroVAD:
         if "end" in speech and self._in_speech:
             end_abs = int(speech["end"])
             events.append(
-                VadEnd(
-                    pcm=self._slice_utterance(end_abs),
-                    hangover_ms=self._hangover_ms(end_abs),
-                    tail_ms=self._tail_ms(end_abs),
-                )
+                VadEnd(pcm=self._slice_utterance(end_abs), hangover_ms=self._hangover_ms(end_abs))
             )
             self._in_speech = False
             self._trim_history(end_abs)
@@ -117,10 +113,6 @@ class SileroVAD:
         now_abs = self._history_base_sample + len(self._history) // 2
         silent_samples = now_abs - (end_abs - self._pad_samples)
         return max(0, silent_samples * 1000 // _SAMPLE_RATE)
-
-    def _tail_ms(self, end_abs: int) -> int:
-        now_abs = self._history_base_sample + len(self._history) // 2
-        return max(0, (now_abs - end_abs) * 1000 // _SAMPLE_RATE)
 
     def _slice_utterance(self, end_abs: int) -> bytes:
         # speech_pad_ms can place start slightly before history_base only
@@ -151,9 +143,8 @@ class SileroVAD:
         chunk = self._slice_utterance(end_abs)
         self._in_speech = False
         self._vad.reset_states()
-        tail_ms = self._tail_ms(end_abs)
         self._trim_history(end_abs)
-        return VadEnd(pcm=chunk, tail_ms=tail_ms)
+        return VadEnd(pcm=chunk)
 
     def _cap_history_if_idle(self) -> None:
         if self._in_speech:
