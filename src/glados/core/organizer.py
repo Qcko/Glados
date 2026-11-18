@@ -1018,14 +1018,6 @@ def _spoken_message(raw: str) -> str:
     return tts_safe(raw, MAX_MESSAGE_CHARS)
 
 
-# Shortest segment `drops_as_echo` may drop before STT. A judgement, not a
-# measurement: the longest barge-in the regex accepts ("hey okay glados stop
-# talking please") is about 2.5 s spoken slowly, plus the VAD's 2 x 200 ms
-# padding; anything shorter still goes through STT so a "stop" can be heard
-# over a closed gate.
-_ECHO_SKIP_MIN_S = 3.0
-
-
 def _report_latency(synth_started_at: float, trace) -> None:
     latency = TURN_LATENCY.get()
     if latency is not None:
@@ -2019,22 +2011,24 @@ class Organizer:
     # genuinely long reply -- is treated as implausible and ignored.
     _CLAMP_GRACE_S = 0.05
 
-    def drops_as_echo(self, client_id: str, captured_at: float, duration_s: float) -> bool:
-        """True when a segment would only be dropped by the TTS gate after
-        transcription, so it can be dropped before it occupies STT. Limited to
-        segments too long to be a barge-in: "stop" must reach the text check,
-        which lets it through a closed gate."""
+    def echo_horizon(self, client_id: str, captured_at: float) -> float | None:
+        """When a segment starting at `captured_at` began under a settled TTS
+        gate, the gate's horizon: audio before it is the room's own voice.
+        None while SENDING, whose horizon is a placeholder that may still move."""
         binding = self.binding_for_client(client_id)
-        if binding is None or duration_s < _ECHO_SKIP_MIN_S:
-            return False
-        if not self._gate_settled_over(binding.room_id, captured_at):
-            return False
+        if binding is None or not self._gate_settled_over(binding.room_id, captured_at):
+            return None
+        return self._tts_gate[binding.room_id].closed_until
+
+    def note_echo_drop(self, client_id: str, duration_s: float) -> None:
+        binding = self.binding_for_client(client_id)
+        if binding is None:
+            return
         log.info(
             "tts gate: dropped %.1fs audio from %s in %s untranscribed",
             duration_s, client_id, binding.room_id,
         )
         self._note_drop_during_confirm(binding.room_id)
-        return True
 
     def _gate_settled_over(self, room_id: str, at: float) -> bool:
         """True when the gate closed over `at` and cannot reopen over it

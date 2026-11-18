@@ -27,7 +27,7 @@ import logging
 import math
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Protocol
 
 import numpy as np
@@ -41,9 +41,6 @@ from ..core.speaker import NO_IDENTIFIER, SpeakerMatch, Utterance
 from ..core.turn_latency import SpeechTiming
 
 OnUtterance = Callable[[Utterance], Awaitable[None]]
-# (captured_at, duration_s) -> True when the segment is the room's own TTS
-# coming back through the mic and must be dropped without transcribing it.
-EchoGate = Callable[[float, float], bool]
 
 if TYPE_CHECKING:
     from ..voiceid import SpeakerIdentifier
@@ -52,6 +49,25 @@ _SAMPLE_RATE = 16000
 _ENERGY_WINDOW_S = 1.0
 _FULL_SCALE_SQ = 32768.0 ** 2
 _SILENCE_DBFS = -120.0
+# A segment wholly inside the TTS gate is dropped untranscribed only from this
+# length up. The longest barge-in the text check accepts ("hey okay glados stop
+# talking please") is about 2.5 s spoken slowly plus the VAD's padding; shorter
+# segments still reach STT so a "stop" is heard over a closed gate.
+_ECHO_SKIP_MIN_S = 3.0
+# Less speech than this after the gate's horizon is reverb or a clipped
+# syllable, not a reply: the segment is treated as wholly echo.
+_MIN_REPLY_AFTER_ECHO_S = 0.3
+
+
+class EchoGate(Protocol):
+    """The room's TTS feedback gate, as the pipeline sees it before STT."""
+
+    def horizon(self, captured_at: float) -> float | None:
+        """Loop time the room's own TTS stops reaching the mic, when a segment
+        starting at `captured_at` began under a settled gate; else None."""
+        ...
+
+    def dropped(self, duration_s: float) -> None: ...
 
 
 class WakeHook(Protocol):
@@ -128,7 +144,9 @@ class AudioPipeline:
                     else arrived_at
                 )
                 self._utterance_start_at = None
-                segment = _Segment(event.pcm, captured_at, arrived_at, event.hangover_ms)
+                segment = _Segment(
+                    event.pcm, captured_at, arrived_at, event.hangover_ms, event.tail_ms
+                )
                 self._spawn_transcription(segment)
 
     async def drain(self) -> None:
@@ -205,10 +223,13 @@ class AudioPipeline:
         if self._wake is not None:
             admission = await self._wake.decide(segment.captured_at, segment.ended_at)
         text, speaker, timing = None, NO_IDENTIFIER, None
-        if (self._wake is None or admission is not None) and not self._is_echo(segment):
-            (text, timing), speaker = await asyncio.gather(
-                self._timed_transcribe(segment), self._identify(segment.pcm)
-            )
+        if self._wake is None or admission is not None:
+            speech = self._strip_echo(segment)
+            if speech is not None:
+                (text, timing), speaker = await asyncio.gather(
+                    self._timed_transcribe(speech), self._identify(speech.pcm)
+                )
+                segment = speech
         if previous is not None:
             await asyncio.wait([previous])
             _log_failure(previous)
@@ -217,11 +238,29 @@ class AudioPipeline:
                 Utterance(text, segment.captured_at, speaker, admission, timing)
             )
 
-    def _is_echo(self, segment: _Segment) -> bool:
-        if self._echo_gate is None:
-            return False
+    def _strip_echo(self, segment: _Segment) -> _Segment | None:
+        """Cut the part of a segment the room's own TTS was still playing into,
+        so a reply spoken straight after GLaDOS (no pause the VAD can split on)
+        is kept instead of dropped with the echo. None = wholly echo, drop.
+
+        Sample times come from frame ARRIVAL, so transport delay maps audio
+        slightly late and the cut errs short (a sliver of echo kept), never
+        into the reply; on the LAN the gate's drain margin covers it."""
+        horizon = None if self._echo_gate is None else self._echo_gate.horizon(segment.captured_at)
+        if horizon is None:
+            return segment
         duration_s = len(segment.pcm) / 2 / _SAMPLE_RATE
-        return self._echo_gate(segment.captured_at, duration_s)
+        reply_s = segment.ended_at - segment.tail_ms / 1000 - horizon
+        if reply_s < _MIN_REPLY_AFTER_ECHO_S:
+            if duration_s < _ECHO_SKIP_MIN_S:
+                return segment
+            self._echo_gate.dropped(duration_s)
+            return None
+        cut = int((duration_s - reply_s) * _SAMPLE_RATE) * 2
+        if cut <= 0:
+            return segment
+        log.info("tts gate: cut %.1fs of echo, kept %.1fs after it", cut / 2 / _SAMPLE_RATE, reply_s)
+        return replace(segment, pcm=segment.pcm[cut:], captured_at=horizon)
 
     async def _timed_transcribe(self, segment: _Segment) -> tuple[str | None, SpeechTiming]:
         loop = asyncio.get_running_loop()
@@ -255,6 +294,7 @@ class _Segment:
     captured_at: float
     ended_at: float
     hangover_ms: int
+    tail_ms: int = 0
 
 
 def _log_failure(task: asyncio.Task[None]) -> None:

@@ -175,6 +175,9 @@ class VadEnd(BaseModel):
     # Silence the VAD waited through after speech stopped before closing the
     # segment (0 for a force-cut). Reported in the per-turn latency line.
     hangover_ms: int = 0
+    # Audio the VAD had already received past the segment's last sample when
+    # it closed it, so `pcm` ended `tail_ms` before the VadEnd was emitted.
+    tail_ms: int = 0
 
 
 VadEvent = Annotated[VadStart | VadEnd, Field(discriminator="type")]
