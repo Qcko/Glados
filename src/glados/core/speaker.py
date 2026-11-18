@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from .turn_latency import SpeechTiming
 from .wake import Admission
 
 SpeakerSource = Literal["voice", "fallback", "typed"]
@@ -71,6 +72,9 @@ class Utterance:
     speaker: SpeakerMatch = NO_IDENTIFIER
     # Set when wake gating admitted the segment (DESIGN.md, wake word).
     admission: Admission | None = None
+    # Endpoint + STT timing for the per-turn latency line; None for text
+    # that did not come from the audio pipeline.
+    timing: SpeechTiming | None = None
 
 
 def resolve_identity(match: SpeakerMatch | None, default_user: str) -> SpeakerIdentity:

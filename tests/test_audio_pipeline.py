@@ -299,3 +299,47 @@ def test_e2e_audio_drives_fake_transcript_into_organizer(
     transcript = msgs[1]
     assert transcript["source"] == "voice"  # came from STT, not typed
     assert msgs[2]["server"] == "time" and msgs[2]["name"] == "now"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_echo_gate_skips_stt(tmp_path: Path) -> None:
+    calls: list[tuple[float, float]] = []
+    transcribed: list[bytes] = []
+    seen: list[Utterance] = []
+
+    def stt_text(pcm: bytes) -> str:
+        transcribed.append(pcm)
+        return "echo"
+
+    async def on_utterance(u: Utterance) -> None:
+        seen.append(u)
+
+    def echo_gate(captured_at: float, duration_s: float) -> bool:
+        calls.append((captured_at, duration_s))
+        return True
+
+    pipe = AudioPipeline(
+        sink=None, vad=FakeVAD(utterance_samples=16000), stt=FakeSTT(stt_text),
+        on_utterance=on_utterance, echo_gate=echo_gate,
+    )
+    await pipe.feed_frame(_frame(0, [1] * 16000))
+    await pipe.drain()
+    assert transcribed == [] and seen == []
+    assert calls and calls[0][1] == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_carries_speech_timing() -> None:
+    seen: list[Utterance] = []
+
+    async def on_utterance(u: Utterance) -> None:
+        seen.append(u)
+
+    pipe = AudioPipeline(
+        sink=None, vad=FakeVAD(utterance_samples=4), stt=FakeSTT("hi"),
+        on_utterance=on_utterance, echo_gate=lambda _at, _dur: False,
+    )
+    await pipe.feed_frame(_frame(0, [1, 2, 3, 4]))
+    await pipe.drain()
+    timing = seen[0].timing
+    assert timing is not None and timing.stt_ms >= 0 and timing.hangover_ms == 0

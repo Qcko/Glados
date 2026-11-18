@@ -76,6 +76,7 @@ from .traces import TraceStore
 from .cart_verify import cart_line, trailing_question, with_quip
 from .cart_verifier import CartVerifier, TurnCart
 from contextvars import ContextVar
+from .turn_latency import TURN_LATENCY, SpeechTiming, TurnLatency
 from .turn_outcome import (
     LandedQuantity,
     TurnRecord,
@@ -1017,6 +1018,20 @@ def _spoken_message(raw: str) -> str:
     return tts_safe(raw, MAX_MESSAGE_CHARS)
 
 
+# Shortest segment `drops_as_echo` may drop before STT. A judgement, not a
+# measurement: the longest barge-in the regex accepts ("hey okay glados stop
+# talking please") is about 2.5 s spoken slowly, plus the VAD's 2 x 200 ms
+# padding; anything shorter still goes through STT so a "stop" can be heard
+# over a closed gate.
+_ECHO_SKIP_MIN_S = 3.0
+
+
+def _report_latency(synth_started_at: float, trace) -> None:
+    latency = TURN_LATENCY.get()
+    if latency is not None:
+        latency.report(synth_started_at, asyncio.get_running_loop().time(), trace)
+
+
 def _is_barge_in(text: str) -> bool:
     return bool(text) and _BARGE_IN_RE.match(text.strip()) is not None
 
@@ -1356,6 +1371,7 @@ class Organizer:
         source: UserTextSource = "text",
         captured_at: float | None = None,
         speaker: SpeakerMatch | None = None,
+        timing: SpeechTiming | None = None,
     ) -> None:
         """Enqueue a turn for the speaker's room. Returns once the turn
         is in the room's FIFO; the turn itself runs on the room's
@@ -1380,7 +1396,7 @@ class Organizer:
         self._queues.enqueue(
             binding.room_id,
             lambda: self._run_user_text(
-                client_id, text, source=source, speaker=speaker
+                client_id, text, source=source, speaker=speaker, timing=timing
             ),
             max_depth=_CONFIRM_HOLD_QUEUE_DEPTH
             if binding.room_id in self._confirm_by_room
@@ -1529,6 +1545,7 @@ class Organizer:
         *,
         source: UserTextSource = "text",
         speaker: SpeakerMatch | None = None,
+        timing: SpeechTiming | None = None,
     ) -> None:
         binding = self.binding_for_client(client_id)
         if binding is None:
@@ -1554,6 +1571,9 @@ class Organizer:
         trace = self.traces.open(session.session_id)
         cancelled = False
         started_at = asyncio.get_running_loop().time()
+        TURN_LATENCY.set(
+            TurnLatency(session.room_id, timing, started_at) if timing is not None else None
+        )
         try:
             trace.event(
                 "turn_start",
@@ -1769,6 +1789,7 @@ class Organizer:
             trace.event("cancelled")
         finally:
             _TURN_CART.set(None)
+            TURN_LATENCY.set(None)
             self._stamp_turn_end(session.room_id, source, cancelled, started_at)
             entry = self._inflight.get(session.session_id)
             if entry is not None and entry[0] is task:
@@ -1923,6 +1944,7 @@ class Organizer:
         admission: Admission | None = None,
         *,
         speaker: SpeakerMatch = NO_IDENTIFIER,
+        timing: SpeechTiming | None = None,
     ) -> None:
         """Audio-ingress entry. A short barge-in utterance (`stop`, `cancel`,
         ...) cancels the speaker's room's in-flight turn AND drops anything
@@ -1980,15 +2002,11 @@ class Organizer:
                 "tts gate: dropped audio from %s in %s (text=%r)",
                 client_id, binding.room_id, text,
             )
-            pending = self._confirm_by_room.get(binding.room_id)
-            if pending is not None:
-                log.info(
-                    "confirm %s: that drop happened while the room was being asked",
-                    pending.request_id,
-                )
+            self._note_drop_during_confirm(binding.room_id)
             return
         await self.handle_user_text(
-            client_id, text, source="voice", captured_at=captured_at, speaker=speaker
+            client_id, text, source="voice", captured_at=captured_at, speaker=speaker,
+            timing=timing,
         )
 
     # The soonest fraction of the estimated playback at which a PlaybackDone is
@@ -2000,6 +2018,40 @@ class Organizer:
     # estimates). Only a signal earlier than this -- which only happens for a
     # genuinely long reply -- is treated as implausible and ignored.
     _CLAMP_GRACE_S = 0.05
+
+    def drops_as_echo(self, client_id: str, captured_at: float, duration_s: float) -> bool:
+        """True when a segment would only be dropped by the TTS gate after
+        transcription, so it can be dropped before it occupies STT. Limited to
+        segments too long to be a barge-in: "stop" must reach the text check,
+        which lets it through a closed gate."""
+        binding = self.binding_for_client(client_id)
+        if binding is None or duration_s < _ECHO_SKIP_MIN_S:
+            return False
+        if not self._gate_settled_over(binding.room_id, captured_at):
+            return False
+        log.info(
+            "tts gate: dropped %.1fs audio from %s in %s untranscribed",
+            duration_s, client_id, binding.room_id,
+        )
+        self._note_drop_during_confirm(binding.room_id)
+        return True
+
+    def _gate_settled_over(self, room_id: str, at: float) -> bool:
+        """True when the gate closed over `at` and cannot reopen over it
+        before the post-STT check. While SENDING the horizon is a placeholder
+        that arming may move below `at` (synthesis slower than realtime);
+        after that it only shrinks to a PlaybackDone time plus cooldown, which
+        is later than this segment's end and so later than `at`."""
+        gate = self._tts_gate.get(room_id)
+        return gate is not None and gate.phase != "sending" and at < gate.closed_until
+
+    def _note_drop_during_confirm(self, room_id: str) -> None:
+        pending = self._confirm_by_room.get(room_id)
+        if pending is not None:
+            log.info(
+                "confirm %s: that drop happened while the room was being asked",
+                pending.request_id,
+            )
 
     def _room_mic_gated(self, room_id: str, at: float | None = None) -> bool:
         """True if the room's mic was gated at time `at` (loop time; default
@@ -3363,6 +3415,8 @@ class Organizer:
                         samples=len(chunk.pcm) // 2,
                         sample_rate=chunk.sample_rate,
                     )
+                    if seq == 0:
+                        _report_latency(send_start, trace)
                     seq += 1
         except asyncio.CancelledError:
             cancelled = True
@@ -4099,6 +4153,25 @@ class Organizer:
         return None
 
     async def _dispatch_or_answer(
+        self,
+        tc: LLMToolCall,
+        envelope: CallEnvelope,
+        session_id: str,
+        room_id: str,
+        trace,
+        outcome: TurnRecord,
+    ) -> MCPCallResult:
+        started = asyncio.get_running_loop().time()
+        try:
+            return await self._dispatch_or_answer_untimed(
+                tc, envelope, session_id, room_id, trace, outcome
+            )
+        finally:
+            latency = TURN_LATENCY.get()
+            if latency is not None:
+                latency.add_tool(asyncio.get_running_loop().time() - started)
+
+    async def _dispatch_or_answer_untimed(
         self,
         tc: LLMToolCall,
         envelope: CallEnvelope,

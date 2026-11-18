@@ -593,18 +593,45 @@ def _wake_detector_factory(cfg: WakeConfig, cfg_dir: Path) -> Callable[[], WakeW
 
 
 def _build_stt(cfg: STTConfig) -> STT:
-    if cfg.backend == "faster-whisper":
-        from ..audio.stt.whisper import WhisperSTT
-
-        return WhisperSTT(
-            model=cfg.whisper_model,
-            device=cfg.whisper_device,
-            compute_type=cfg.whisper_compute_type,
-            language=cfg.whisper_language,
-            hotwords=cfg.whisper_hotwords,
-            initial_prompt=cfg.whisper_initial_prompt,
+    if cfg.backend != "faster-whisper":
+        return FakeSTT(text=cfg.fake_text)
+    if cfg.whisper_device != "cuda":
+        return _build_whisper(cfg, cfg.whisper_model, cfg.whisper_device, cfg.whisper_compute_type)
+    failure = _try_cuda_whisper(cfg)
+    if isinstance(failure, str):
+        log.warning(
+            "stt: whisper %s on cuda:%d failed (%s); falling back to %s on cpu",
+            cfg.whisper_model, cfg.whisper_device_index, failure, cfg.whisper_fallback_model,
         )
-    return FakeSTT(text=cfg.fake_text)
+        return _build_whisper(cfg, cfg.whisper_fallback_model, "cpu", "int8")
+    log.info("stt: whisper %s on cuda:%d", cfg.whisper_model, cfg.whisper_device_index)
+    return failure
+
+
+def _try_cuda_whisper(cfg: STTConfig):
+    """The checked CUDA backend, or why it failed. Returning (not building
+    the fallback inside `except`) lets the failed model and its VRAM go
+    before the CPU model is built."""
+    try:
+        stt = _build_whisper(cfg, cfg.whisper_model, "cuda", cfg.whisper_compute_type)
+        stt.check()
+        return stt
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
+def _build_whisper(cfg: STTConfig, model: str, device: str, compute_type: str):
+    from ..audio.stt.whisper import WhisperSTT
+
+    return WhisperSTT(
+        model=model,
+        device=device,
+        device_index=cfg.whisper_device_index,
+        compute_type=compute_type,
+        language=cfg.whisper_language,
+        hotwords=cfg.whisper_hotwords,
+        initial_prompt=cfg.whisper_initial_prompt,
+    )
 
 
 def _build_tts(cfg: TTSConfig) -> TTS:
@@ -1461,7 +1488,11 @@ def _build_pipeline(
             utterance.captured_at,
             utterance.admission,
             speaker=utterance.speaker,
+            timing=utterance.timing,
         )
+
+    def echo_gate(captured_at: float, duration_s: float) -> bool:
+        return organizer.drops_as_echo(client_id, captured_at, duration_s)
 
     return AudioPipeline(
         sink=sink,
@@ -1470,6 +1501,7 @@ def _build_pipeline(
         on_utterance=on_utterance,
         identifier=identifier,
         wake=wake,
+        echo_gate=echo_gate,
     )
 
 

@@ -27,6 +27,7 @@ import logging
 import math
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Awaitable, Callable, Protocol
 
 import numpy as np
@@ -37,8 +38,12 @@ from ..core.adapters import STT, VAD, VadEnd, VadStart, WakeWord
 from ..core.audio_sink import AudioSink, FrameTooShort
 from ..core.protocols import AUDIO_HEADER_LEN
 from ..core.speaker import NO_IDENTIFIER, SpeakerMatch, Utterance
+from ..core.turn_latency import SpeechTiming
 
 OnUtterance = Callable[[Utterance], Awaitable[None]]
+# (captured_at, duration_s) -> True when the segment is the room's own TTS
+# coming back through the mic and must be dropped without transcribing it.
+EchoGate = Callable[[float, float], bool]
 
 if TYPE_CHECKING:
     from ..voiceid import SpeakerIdentifier
@@ -73,6 +78,7 @@ class AudioPipeline:
         on_utterance: OnUtterance,
         identifier: SpeakerIdentifier | None = None,
         wake: WakeHook | None = None,
+        echo_gate: EchoGate | None = None,
     ) -> None:
         self._sink = sink
         self._vad = vad
@@ -83,6 +89,7 @@ class AudioPipeline:
         self._last_task: asyncio.Task[None] | None = None
         self._utterance_start_at: float | None = None
         self._wake = wake
+        self._echo_gate = echo_gate
         self._wake_exec = (
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="wake")
             if wake is not None
@@ -121,8 +128,8 @@ class AudioPipeline:
                     else arrived_at
                 )
                 self._utterance_start_at = None
-                ended_at = arrived_at
-                self._spawn_transcription(event.pcm, captured_at, ended_at)
+                segment = _Segment(event.pcm, captured_at, arrived_at, event.hangover_ms)
+                self._spawn_transcription(segment)
 
     async def drain(self) -> None:
         """Wait for transcriptions spawned before this call. Tasks spawned
@@ -185,35 +192,42 @@ class AudioPipeline:
             raise FrameTooShort(f"PCM payload length {len(pcm)} is not a whole number of int16 samples")
         return pcm
 
-    def _spawn_transcription(self, pcm: bytes, captured_at: float, ended_at: float) -> None:
-        task = asyncio.create_task(
-            self._transcribe_and_dispatch(pcm, captured_at, ended_at, self._last_task)
-        )
+    def _spawn_transcription(self, segment: _Segment) -> None:
+        task = asyncio.create_task(self._transcribe_and_dispatch(segment, self._last_task))
         self._last_task = task
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
     async def _transcribe_and_dispatch(
-        self,
-        pcm: bytes,
-        captured_at: float,
-        ended_at: float,
-        previous: asyncio.Task[None] | None,
+        self, segment: _Segment, previous: asyncio.Task[None] | None
     ) -> None:
         admission = None
         if self._wake is not None:
-            admission = await self._wake.decide(captured_at, ended_at)
-        if self._wake is None or admission is not None:
-            text, speaker = await asyncio.gather(
-                self._transcribe(pcm), self._identify(pcm)
+            admission = await self._wake.decide(segment.captured_at, segment.ended_at)
+        text, speaker, timing = None, NO_IDENTIFIER, None
+        if (self._wake is None or admission is not None) and not self._is_echo(segment):
+            (text, timing), speaker = await asyncio.gather(
+                self._timed_transcribe(segment), self._identify(segment.pcm)
             )
-        else:
-            text, speaker = None, NO_IDENTIFIER
         if previous is not None:
             await asyncio.wait([previous])
             _log_failure(previous)
         if text is not None and text.strip():
-            await self._on_utterance(Utterance(text, captured_at, speaker, admission))
+            await self._on_utterance(
+                Utterance(text, segment.captured_at, speaker, admission, timing)
+            )
+
+    def _is_echo(self, segment: _Segment) -> bool:
+        if self._echo_gate is None:
+            return False
+        duration_s = len(segment.pcm) / 2 / _SAMPLE_RATE
+        return self._echo_gate(segment.captured_at, duration_s)
+
+    async def _timed_transcribe(self, segment: _Segment) -> tuple[str | None, SpeechTiming]:
+        loop = asyncio.get_running_loop()
+        text = await self._transcribe(segment.pcm)
+        stt_ms = int((loop.time() - segment.ended_at) * 1000)
+        return text, SpeechTiming(segment.ended_at, segment.hangover_ms, stt_ms)
 
     async def _transcribe(self, pcm: bytes) -> str | None:
         try:
@@ -233,6 +247,14 @@ class AudioPipeline:
         except Exception:
             log.exception("speaker identify failed; utterance goes unidentified")
             return SpeakerMatch.none("error")
+
+
+@dataclass(frozen=True)
+class _Segment:
+    pcm: bytes
+    captured_at: float
+    ended_at: float
+    hangover_ms: int
 
 
 def _log_failure(task: asyncio.Task[None]) -> None:

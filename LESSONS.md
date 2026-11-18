@@ -74,3 +74,13 @@ not work, so the next session does not relearn it.
   body sent `keep_alive: "-1"` as a string and got a 400 that the real adapter
   never sees (`OllamaLLM._coerce_keep_alive` sends an int). Build probe bodies
   from `_build_options()` / `_keep_alive`, or you debug a bug you made.
+
+## Audio models
+
+- **Silero VAD's model is stateful; never share it between connections.**
+  `VADIterator.reset_states()` calls `model.reset_states()`, and the model
+  carries recurrent state chunk to chunk. A module-level shared model (the
+  old `_load_model_once`, documented as "immutable + thread-safe") mixed
+  every mic connection's audio into one state and let one room's reset wipe
+  another's. Fixed 18-11-2026: one model per `SileroVAD`. Check any "load
+  once, share" model for hidden per-stream state before caching it.

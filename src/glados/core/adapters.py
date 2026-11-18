@@ -172,6 +172,9 @@ class VadStart(BaseModel):
 class VadEnd(BaseModel):
     type: Literal["end"] = "end"
     pcm: bytes
+    # Silence the VAD waited through after speech stopped before closing the
+    # segment (0 for a force-cut). Reported in the per-turn latency line.
+    hangover_ms: int = 0
 
 
 VadEvent = Annotated[VadStart | VadEnd, Field(discriminator="type")]

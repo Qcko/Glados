@@ -509,6 +509,12 @@ class STTConfig(BaseModel):
     whisper_model: str = "distil-small.en"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
+    # Only read with whisper_device = "cuda": which NVIDIA card (CUDA's own
+    # numbering), and what to build on CPU when CUDA fails to load or to run a
+    # warm-up transcription (missing cuBLAS/cuDNN fail lazily). Never the big
+    # model on CPU (DESIGN-stt-fit.md step 3).
+    whisper_device_index: int = 0
+    whisper_fallback_model: str = "distil-small.en"
     # Default "en" pins English-only decoding. Set to None for
     # auto-detect (paired with a multilingual model like `small`);
     # see configs/glados.toml for the full recipe.

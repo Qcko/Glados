@@ -29,18 +29,14 @@ _HISTORY_CAP_SAMPLES = 60 * _SAMPLE_RATE
 _MAX_UTTERANCE_SAMPLES = 30 * _SAMPLE_RATE
 
 
-_shared_model = None
+def _load_model():
+    """A fresh model per VAD: silero's model carries recurrent state across
+    chunks (`VADIterator.reset_states()` resets the model too), so sharing one
+    between connections mixes their audio and lets one room's reset wipe
+    another's."""
+    from silero_vad import load_silero_vad
 
-
-def _load_model_once():
-    """`load_silero_vad()` is fast but not free, and the model is
-    immutable + thread-safe -- share it across VAD instances."""
-    global _shared_model
-    if _shared_model is None:
-        from silero_vad import load_silero_vad
-
-        _shared_model = load_silero_vad()
-    return _shared_model
+    return load_silero_vad()
 
 
 class SileroVAD:
@@ -53,7 +49,7 @@ class SileroVAD:
     ) -> None:
         from silero_vad import VADIterator
 
-        self._model = _load_model_once()
+        self._model = _load_model()
         self._vad = VADIterator(
             self._model,
             threshold=threshold,
@@ -61,6 +57,7 @@ class SileroVAD:
             min_silence_duration_ms=min_silence_ms,
             speech_pad_ms=speech_pad_ms,
         )
+        self._pad_samples = speech_pad_ms * _SAMPLE_RATE // 1000
         self._pending = bytearray()
         self._history = bytearray()
         self._history_base_sample = 0
@@ -105,10 +102,17 @@ class SileroVAD:
             events.append(VadStart())
         if "end" in speech and self._in_speech:
             end_abs = int(speech["end"])
-            events.append(VadEnd(pcm=self._slice_utterance(end_abs)))
+            events.append(
+                VadEnd(pcm=self._slice_utterance(end_abs), hangover_ms=self._hangover_ms(end_abs))
+            )
             self._in_speech = False
             self._trim_history(end_abs)
         return events
+
+    def _hangover_ms(self, end_abs: int) -> int:
+        now_abs = self._history_base_sample + len(self._history) // 2
+        silent_samples = now_abs - (end_abs - self._pad_samples)
+        return max(0, silent_samples * 1000 // _SAMPLE_RATE)
 
     def _slice_utterance(self, end_abs: int) -> bytes:
         # speech_pad_ms can place start slightly before history_base only
