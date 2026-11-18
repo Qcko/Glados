@@ -24,7 +24,7 @@ from glados.core.sessions import SessionRegistry
 from glados.core.speaker import SpeakerMatch
 from glados.core.traces import TraceStore
 from glados.core.turn_outcome import TurnRecord, classify
-from glados.core.utterance import classify_confirm_answer
+from glados.core.utterance import answer_after_question, classify_confirm_answer
 from glados.mcp.registry import CallEnvelope, MCPCallResult, MCPRegistry
 
 SAMPLE_RATE = 22_050
@@ -598,3 +598,57 @@ async def test_who_said_yes_is_audited_but_never_gates_the_grant(
         assert tool.calls == [{"x": 1}]
         voice = next(e for e in _events(tmp_path) if e["event"] == "tool_confirm_voice")
         assert voice["speaker_person"] == speaker.person
+
+
+# ---- an answer merged with the question's echo -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "reply"),
+    [
+        ("So yes, to add one coffee to the cart, shall I go ahead? Yes.", "Yes."),
+        ("Say yes to: add x -- shall I go ahead? No thanks.", "No thanks."),
+        ("Say yes to: add x -- shall I go ahead?", None),
+        ("So yes, to add one coffee to the cart.", None),
+        ("shall I go ahead? add the milk too", None),
+        ("Say yes to: add x -- shall I go ahead? Yes, go ahead.", "Yes, go ahead."),
+        ("Say yes to: add x -- shall I go ahead? Thank you.", None),
+        ("Say yes to: add x -- shall I go ahead? Okay.", None),
+        ("Say yes to: add x -- shall I go ahead? So yes.", None),
+        ("", None),
+    ],
+)
+def test_answer_after_question(text: str, reply: str | None) -> None:
+    assert answer_after_question(text) == reply
+
+
+async def _ask_and_hear_gated(tmp_path: Path, heard: str):
+    org_cm = _make_org(
+        tmp_path, [MIC, SPEAKER], tts=_FakeTts(seconds=1.0), confirm_timeout_s=0.5
+    )
+    async with org_cm as (org, sink, tool):
+        await org.handle_user_text("k-mic", "do it")
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while not (org._confirm_by_room.get("kitchen") and org._confirm_by_room["kitchen"].voice_armed):
+            assert asyncio.get_running_loop().time() < deadline, "never asked aloud"
+            await asyncio.sleep(0.01)
+        pending = org._confirm_by_room["kitchen"]
+        assert org._room_mic_gated("kitchen", pending.asked_at), "test needs a closed gate"
+        assert not org.drops_as_echo("k-mic", pending.asked_at, 9.0), (
+            "a gated segment must reach STT while a confirm is pending"
+        )
+        await org.handle_audio_text("k-mic", heard, pending.asked_at)
+        await org.flush()
+        return tool.calls
+
+
+async def test_yes_after_the_questions_echo_answers_the_confirm(tmp_path: Path) -> None:
+    calls = await _ask_and_hear_gated(
+        tmp_path, "Say yes to: add x -- shall I go ahead? Yes."
+    )
+    assert calls == [{"x": 1}]
+
+
+async def test_the_questions_echo_alone_never_answers(tmp_path: Path) -> None:
+    calls = await _ask_and_hear_gated(tmp_path, "Say yes to: add x -- shall I go ahead?")
+    assert calls == []

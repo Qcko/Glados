@@ -92,6 +92,7 @@ from ..servers.room_intercom import MAX_MESSAGE_CHARS, SPEAK_INTO
 from .confirm_phrase import compose_confirm_question, tts_safe
 from .product_names import ProductNames, reported_names
 from .utterance import (
+    answer_after_question,
     classify_confirm_answer,
     has_quantity_cue,
     has_repeat_cue,
@@ -1990,6 +1991,8 @@ class Organizer:
             # is genuinely idle. Fall through to a normal turn rather than
             # silently swallowing user input.
         elif self._room_mic_gated(binding.room_id, captured_at):
+            if self._rescue_confirm_answer(binding, client_id, text, captured_at, speaker):
+                return
             # Speaker->mic feedback loop guard. The browser already runs
             # `echoCancellation: true`, but the gate is a second layer
             # for Pi clients without `webrtc-audio-processing` and for
@@ -2027,6 +2030,8 @@ class Organizer:
         binding = self.binding_for_client(client_id)
         if binding is None or duration_s < _ECHO_SKIP_MIN_S:
             return False
+        if self._voice_confirm_pending(binding.room_id):
+            return False
         if not self._gate_settled_over(binding.room_id, captured_at):
             return False
         log.info(
@@ -2035,6 +2040,36 @@ class Organizer:
         )
         self._note_drop_during_confirm(binding.room_id)
         return True
+
+    def _voice_confirm_pending(self, room_id: str) -> bool:
+        """A confirm was asked aloud here: a gated segment may then carry the
+        answer after the question's echo, so it must reach STT."""
+        pending = self._confirm_by_room.get(room_id)
+        return pending is not None and pending.voice_armed and not pending.fut.done()
+
+    def _rescue_confirm_answer(
+        self,
+        binding: ClientBinding,
+        client_id: str,
+        text: str,
+        captured_at: float | None,
+        speaker: SpeakerMatch,
+    ) -> bool:
+        """A reply said straight after the confirm question merges with the
+        question's echo into one gated segment. Answer the confirm from the
+        part after the question's ending; nothing else passes the gate."""
+        if not self._voice_confirm_pending(binding.room_id):
+            return False
+        reply = answer_after_question(text)
+        if reply is None:
+            return False
+        answered = self._try_answer_confirm(binding, client_id, reply, captured_at, speaker)
+        if answered:
+            log.info(
+                "tts gate: kept confirm answer %r from gated audio from %s in %s",
+                reply, client_id, binding.room_id,
+            )
+        return answered
 
     def _gate_settled_over(self, room_id: str, at: float) -> bool:
         """True when the gate closed over `at` and cannot reopen over it

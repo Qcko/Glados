@@ -400,6 +400,28 @@ _NO_ANSWER_RE = re.compile(
 )
 
 
+# The spoken question always ends "... shall I go ahead?" (confirm_phrase).
+_QUESTION_END_RE = re.compile(r"\bgo\s+ahead\s*[.?!]\s*", re.IGNORECASE)
+# Whisper hears the question's head "Say yes to:" as "So yes, ...", which the
+# yes lexicon would accept: the next question's start is never an answer.
+_QUESTION_HEAD_RE = re.compile(r"s(?:ay|o)\s+yes\b", re.IGNORECASE)
+
+
+def answer_after_question(text: str) -> str | None:
+    """The reply in a transcript that also caught the confirm question's echo:
+    whatever follows the LAST "go ahead?" -- the question's own ending -- when
+    that is a yes or a no, else None. Anchoring on the question's end means
+    the question alone ("Say yes to: ...") can never answer itself."""
+    for end in reversed(list(_QUESTION_END_RE.finditer(text or ""))):
+        reply = text[end.end():].strip()
+        if not reply:
+            continue
+        if _QUESTION_HEAD_RE.match(reply) or classify_confirm_answer(reply) is None:
+            return None
+        return reply
+    return None
+
+
 def classify_confirm_answer(text: str) -> str | None:
     """`"yes"`, `"no"`, or None when the utterance is not an answer at all."""
     stripped = text.strip() if text else ""
