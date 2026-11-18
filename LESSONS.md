@@ -84,3 +84,13 @@ not work, so the next session does not relearn it.
   every mic connection's audio into one state and let one room's reset wipe
   another's. Fixed 18-11-2026: one model per `SileroVAD`. Check any "load
   once, share" model for hidden per-stream state before caching it.
+- **The TTS gate horizon is not where the echo ends in the mic stream.**
+  The echo-head cut (`dc95bb1`, prod-2026-11-18.02) trimmed segments at the
+  gate's `closed_until` on the server loop clock, mapping pcm to that clock
+  by frame ARRIVAL. On the Termux kitchen phone every cut kept ~0.3-1.3 s of
+  GLaDOS's own voice, which became a follow-up turn: a self-talk loop within
+  a minute (18-11-2026, rolled back to .01). Mic frames reach the server
+  well after they were captured (phone buffering), while the horizon comes
+  from the speaker's PlaybackDone. Judging a whole segment by its START
+  tolerated that lag; cutting by sample time does not. Any sample-accurate
+  echo work needs the mic-side lag measured per client first.
